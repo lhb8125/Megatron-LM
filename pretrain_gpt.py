@@ -27,7 +27,9 @@ from megatron.utils import (
 from megatron.arguments import core_transformer_config_from_args
 from megatron.core.models.gpt.gpt_layer_specs import (
     gpt_layer_with_transformer_engine_spec,
-    gpt_layer_with_transformer_engine_spec_moe
+    gpt_layer_with_transformer_engine_spec_moe,
+    gpt_layer_local_spec,
+    gpt_layer_local_spec_moe,
 )
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.model.GPTModel]:
@@ -44,18 +46,29 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         Union[GPTModel, megatron.model.GPTModel]: The returned model
     """
     args = get_args()
+    use_te = args.transformer_impl == "transformer_engine"
 
     print_rank_0('building GPT model ...')
     config = core_transformer_config_from_args(get_args())
 
+    # >>>
+    # from lutil import pax
+    # pax({"use_mcore_models": args.use_mcore_models})
+    # <<<
     if args.use_mcore_models:
         if args.model_spec is not None:
             transformer_layer_spec = import_module(args.model_spec)
         else:
             if args.num_experts is None:
-                transformer_layer_spec = gpt_layer_with_transformer_engine_spec
+                if use_te:
+                    transformer_layer_spec = gpt_layer_with_transformer_engine_spec
+                else:
+                    transformer_layer_spec = gpt_layer_local_spec
             else:
-                transformer_layer_spec = gpt_layer_with_transformer_engine_spec_moe
+                if use_te:
+                    transformer_layer_spec = gpt_layer_with_transformer_engine_spec_moe
+                else:
+                    transformer_layer_spec = gpt_layer_local_spec_moe
 
         model = GPTModel(
             config=config,

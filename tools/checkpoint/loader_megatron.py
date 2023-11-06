@@ -7,6 +7,11 @@ import types
 
 import torch
 
+# >>>
+from lutil import pax
+# <<<
+
+
 def add_arguments(parser):
     group = parser.add_argument_group(title='Megatron loader')
 
@@ -62,6 +67,15 @@ def _load_checkpoint(queue, args):
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
+
+    # >>>
+    margs.use_rotary_position_embeddings = True
+    checkpoint_args.use_rotary_position_embeddings = True
+    # pax({
+    #     "margs": {k:v for k,v in vars(margs).items() if "position" in k.lower()},
+    #     "chkpt": {k:v for k,v in vars(checkpoint_args).items() if "position" in k.lower()},
+    # })
+    # <<<
 
     margs = validate_args(margs)
 
@@ -212,6 +226,12 @@ def _load_checkpoint(queue, args):
 
     md.consumed_train_samples = consumed_train_samples
     md.consumed_valid_samples = consumed_valid_samples
+    # >>>
+    # pax({
+    #     "md" : md,
+    #     "checkpoint_args" : md.checkpoint_args,
+    # })
+    # <<<
     queue.put(md)
 
     def queue_put(name, msg):
