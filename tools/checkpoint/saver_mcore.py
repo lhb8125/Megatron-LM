@@ -164,8 +164,8 @@ class MCoreTESetter(MCoreSetter):
         # >>>
         # cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
         # cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
-        cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
-        cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+        cls.set_tensor(l.self_attention.linear_qkv.layer_norm_weight, self_attn_norm_weight)
+        cls.set_tensor(l.self_attention.linear_qkv.layer_norm_bias, self_attn_norm_bias)
         # <<<
         cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
         cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
@@ -176,8 +176,8 @@ class MCoreTESetter(MCoreSetter):
         # >>>
         # cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
         # cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
-        cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
-        cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+        cls.set_tensor(l.mlp.linear_fc1.layer_norm_weight, mlp_norm_weight)
+        cls.set_tensor(l.mlp.linear_fc1.layer_norm_bias, mlp_norm_bias)
         # <<<
         cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
         cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
@@ -570,9 +570,6 @@ def save_checkpoint(queue, args):
                     exit(1)
                 output_layer_weight = torch.chunk(msg.pop("weight"), args.target_tensor_parallel_size, dim=0)
                 for tp_rank, model in enumerate(models):
-                    # >>>
-                    raise Exception("hi.")
-                    # <<<
                     setter.set_output_layer(model, output_layer_weight[tp_rank])
                 del output_layer_weight
                 check_message(msg)
