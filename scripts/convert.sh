@@ -43,8 +43,8 @@ KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
 
 export NVTE_APPLY_QK_LAYER_SCALING=1
 
-TRANSFORMER_IMPL=local
-# TRANSFORMER_IMPL=transformer_engine
+# TRANSFORMER_IMPL=local
+TRANSFORMER_IMPL=transformer_engine
 python tools/checkpoint/convert.py \
     --model-type GPT \
     --loader megatron \

@@ -82,8 +82,9 @@ class CudaRNGStatesTracker:
     def __init__(self):
         # Map from a string name to the cuda rng state.
         # >>>
-        # self.states_ = {}
-        self.states_ = None
+        self._is_initialized = False
+        self.states_ = {}
+        # self.states_ = None
         # <<<
         # Seeds are just for book keeping and ensure no seed is set twice.
         self.seeds_ = set()
@@ -93,13 +94,15 @@ class CudaRNGStatesTracker:
         # from lutil import pax
         # pax({"states_": self.states_})
         # <<<
-        return self.states_ is not None
+        # return self.states_ is not None
+        return self._is_initialized
 
     def reset(self):
         """Set to the initial state (no tracker)."""
         # >>>
-        # self.states_ = {}
-        self.states_ = None
+        self._is_initialized = False
+        self.states_ = {}
+        # self.states_ = None
         # <<<
         self.seeds_ = set()
 
@@ -117,6 +120,7 @@ class CudaRNGStatesTracker:
         # >>>
         raise Exception("hi.")
         # <<<
+        self._is_initialized = True
         self.states_ = states
 
     def add(self, name, seed):
