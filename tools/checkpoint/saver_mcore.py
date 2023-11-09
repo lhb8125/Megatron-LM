@@ -161,24 +161,16 @@ class MCoreTESetter(MCoreSetter):
         l = model.decoder.layers[layer_idx]
 
         # Self attention.
-        # >>>
-        # cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
-        # cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
         cls.set_tensor(l.self_attention.linear_qkv.layer_norm_weight, self_attn_norm_weight)
         cls.set_tensor(l.self_attention.linear_qkv.layer_norm_bias, self_attn_norm_bias)
-        # <<<
         cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
         cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
         cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
         cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
         # MLP.
-        # >>>
-        # cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
-        # cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
         cls.set_tensor(l.mlp.linear_fc1.layer_norm_weight, mlp_norm_weight)
         cls.set_tensor(l.mlp.linear_fc1.layer_norm_bias, mlp_norm_bias)
-        # <<<
         cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
         cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
         cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
@@ -197,12 +189,9 @@ def add_arguments(parser):
     group.add_argument('--target-pipeline-parallel-size', type=int,
                        help='Target tensor model parallel size, default to the pipeline parall size '
                        'in the input checkpoint if provided by the loader, otherwise to 1')
-    # >>>
-    # group.add_argument('--transformer-impl', default='local',
     group.add_argument('--transformer-impl', required=True,
                        choices=['local', 'transformer_engine'],
                        help='Which Transformer implementation to use.')
-    # <<<
 
 
 def save_checkpoint(queue, args):
@@ -319,10 +308,6 @@ def save_checkpoint(queue, args):
 
     margs = parse_args()
 
-    # >>>
-    # pax({"perf init": margs.perform_initialization})
-    # <<<
-
     if hasattr (md, 'checkpoint_args'):
         # These are arguments that we are either changing, or cause problems for validation if they are set
         # Note that some of these deal with T5 so will need to be changed if we support T5.
@@ -330,9 +315,7 @@ def save_checkpoint(queue, args):
                         'num_layers_per_virtual_pipeline_stage', 'virtual_pipeline_model_parallel_size',
                         'masked_softmax_fusion', 'bias_gelu_fusion', 'bias_dropout_fusion',
                         'sequence_parallel', 'async_tensor_model_parallel_allreduce',
-                        # >>>
                         'no_load_optim', 'no_load_rng', 'no_save_optim', 'no_save_rng',
-                        # <<<
                         'vocab_file', 'tokenizer_model',
                         'save_interval', 'save',
                         'perform_initialization', 'use_cpu_initialization',
