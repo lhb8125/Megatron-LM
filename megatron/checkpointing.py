@@ -469,6 +469,10 @@ def load_args_from_checkpoint(args, load_arg='load'):
         return args
 
     checkpoint_args = state_dict['args']
+    # >>>
+    # from lutil import pax
+    # pax("checkpoint_args")
+    # <<<
     checkpoint_version = state_dict.get('checkpoint_version', 0)
     args.iteration = state_dict['iteration']
 

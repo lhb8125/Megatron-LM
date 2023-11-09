@@ -41,10 +41,15 @@ KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
 #     --load-dir /lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-843m-multi-1.1t-gtc-llr \
 #     --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/843m
 
+export NVTE_APPLY_QK_LAYER_SCALING=1
+
+TRANSFORMER_IMPL=local
+# TRANSFORMER_IMPL=transformer_engine
 python tools/checkpoint/convert.py \
     --model-type GPT \
     --loader megatron \
     --saver mcore \
+    --transformer-impl ${TRANSFORMER_IMPL} \
     --target-tensor-parallel-size ${TP} \
     --target-pipeline-parallel-size 1 \
     --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \

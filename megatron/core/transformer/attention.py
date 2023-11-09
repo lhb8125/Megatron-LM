@@ -19,6 +19,10 @@ from .enums import AttnMaskType
 from .transformer_config import TransformerConfig
 from .utils import make_sharded_tensors_for_checkpoint
 
+# >>>
+from lutil import pax
+# <<<
+
 
 @dataclass
 class SelfAttentionSubmodules:
@@ -215,12 +219,20 @@ class Attention(MegatronModule, ABC):
         if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):
             rotary_pos_emb = (rotary_pos_emb,) * 2
 
+        # >>>
+        # pax("hidden_states, attention_mask")
+        # <<<
+
         # =====================
         # Query, Key, and Value
         # =====================
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+
+        # >>>
+        # pax("query, key, value")
+        # <<<
 
         # ===================================================
         # Adjust key, value, and rotary_pos_emb for inference
@@ -241,6 +253,10 @@ class Attention(MegatronModule, ABC):
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
 
+        # >>>
+        # pax("query, key, value, rotary_pos_emb")
+        # <<<
+
         # ==================================
         # core attention computation
         # ==================================
@@ -255,6 +271,10 @@ class Attention(MegatronModule, ABC):
         # =================
 
         output, bias = self.linear_proj(core_attn_out)
+
+        # >>>
+        pax({"checkpoint_dot_product_attention": self.checkpoint_dot_product_attention}, "core_attn_out, output, bias")
+        # <<<
 
         return output, bias
 

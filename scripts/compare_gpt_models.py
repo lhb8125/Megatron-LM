@@ -70,28 +70,31 @@ def compare_preprocess_nparams(default_model, core_model, batch):
     core_embedding = core_model.embedding
     compare_top_nparams("emb", default_embedding, core_embedding)
 
-    args = get_args()
-    input_ids = torch.randint(
-        low=0,
-        high=10,
-        size=(args.micro_batch_size, args.seq_length),
-        dtype=torch.long,
-    )
-    position_ids = torch.randint(
-        low=0,
-        high=10,
-        size=(args.micro_batch_size, args.hidden_size),
-        dtype=torch.long,
-    )
+    # args = get_args()
+    # input_ids = torch.randint(
+    #     low=0,
+    #     high=10,
+    #     size=(args.micro_batch_size, args.seq_length),
+    #     dtype=torch.long,
+    # )
+    # position_ids = torch.randint(
+    #     low=0,
+    #     high=10,
+    #     size=(args.micro_batch_size, args.hidden_size),
+    #     dtype=torch.long,
+    # )
+    input_ids = batch["input_ids"]
+    position_ids = batch["position_ids"]
 
     default_output = default_embedding(input_ids, position_ids)
     core_output = core_embedding(input_ids, position_ids)
+    batch["hidden_states"] = default_output
 
     # >>>
-    print_model("default emb", default_embedding)
-    print_model("core emb", core_embedding)
-    pax("input_ids, position_ids, default_output, core_output")
-    exit()
+    # print_model("default emb", default_embedding)
+    # print_model("core emb", core_embedding)
+    # pax("input_ids, position_ids, default_output, core_output, batch")
+    # exit()
     # <<<
 
     # pax({
@@ -99,15 +102,26 @@ def compare_preprocess_nparams(default_model, core_model, batch):
     #     "core_embedding" : type(core_embedding).__name__,
     # })
 
-def compare_layer_nparams(key, layer_idx, default_layers, core_layers):
+def compare_layer_nparams(key, layer_idx, default_layers, core_layers, batch):
 
     default_layer = default_layers[layer_idx]
     core_layer = core_layers[layer_idx]
 
+    hidden_states = batch["hidden_states"]
+    attention_mask = batch["attention_mask"]
+    default_output = default_layer(hidden_states, attention_mask)
+    core_output = core_layer(hidden_states, attention_mask)
+    batch["hidden_states"] = default_output
+
     # >>>
-    print_model("default layer", default_layer)
-    print_model("core layer", core_layer)
-    exit()
+    # print_model("default layer", default_layer)
+    # print_model("core layer", core_layer)
+    if layer_idx == 0:
+        pax(
+            {"layer_idx": f"{layer_idx} / {len(default_layers)}"},
+            "default_output, core_output",
+        )
+    return
     # <<<
 
     compare_top_nparams(
@@ -153,7 +167,7 @@ def compare_layer_nparams(key, layer_idx, default_layers, core_layers):
 
     # compare_top_nparams(f"{key} {layer_idx}", default_layer, core_layer)
 
-def compare_block_nparams(key, default_layers, core_layers):
+def compare_block_nparams(key, default_layers, core_layers, batch):
     assert len(default_layers) == len(core_layers)
     for i in range(len(default_layers)):
         compare_top_nparams(
@@ -161,6 +175,13 @@ def compare_block_nparams(key, default_layers, core_layers):
             default_layers[i],
             core_layers[i],
         )
+        # compare_layer_nparams(
+        #     f"{key} block / {i}",
+        #     i,
+        #     default_layers,
+        #     core_layers,
+        #     batch,
+        # )
 
 # def get_default_and_core_models():
 
@@ -252,11 +273,16 @@ def compare_gpt_models():
     core_layers = list(core_model.decoder.layers)
 
     compare_preprocess_nparams(default_model, core_model, batch)
-    pax("batch")
-    compare_block_nparams("decoder", default_layers, core_layers)
-    compare_layer_nparams("decoder layer", 5, default_layers, core_layers) # 5, 8
+    compare_block_nparams("decoder", default_layers, core_layers, batch)
+    # pax("batch")
+    # compare_layer_nparams("decoder layer", 5, default_layers, core_layers) # 5, 8
     compare_top_nparams("model", default_model, core_model)
     print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+    print_model("default final norm", default_model.language_model.encoder.final_norm)
+    print_model("core final norm", core_model.decoder.final_layernorm)
+    print_model("default final layer", default_model.language_model.output_layer)
+    print_model("core final layer", core_model.output_layer)
     exit()
 
     pax(

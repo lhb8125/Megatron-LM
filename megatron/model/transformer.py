@@ -33,6 +33,10 @@ except ImportError:
     except ImportError:
         flash_attn_unpadded_func = None
 
+# >>>
+from lutil import pax
+# <<<
+
 """ We use the following notation throughout this file:
      h: hidden size
      n: number of attention heads
@@ -308,6 +312,9 @@ class CoreAttention(MegatronModule):
         coeff = None
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
         if self.apply_query_key_layer_scaling:
+            # >>>
+            raise Exception("hi.")
+            # <<<
             coeff = self.layer_number
             self.norm_factor *= coeff
 
@@ -620,6 +627,10 @@ class ParallelAttention(MegatronModule):
                 rotary_pos_emb=None):
         # hidden_states: [sq, b, h]
 
+        # >>>
+        # pax("hidden_states, attention_mask")
+        # <<<
+
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -650,6 +661,10 @@ class ParallelAttention(MegatronModule):
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
 
+            # >>>
+            # pax("mixed_x_layer")
+            # <<<
+
             # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
             new_tensor_shape = mixed_x_layer.size()[:-1] + (
                 self.num_query_groups_per_partition,
@@ -677,6 +692,9 @@ class ParallelAttention(MegatronModule):
 
             # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn] -
             query_layer = query_layer.view(query_layer.size(0), query_layer.size(1), -1, self.hidden_size_per_attention_head)
+            # >>>
+            # pax("query_layer, key_layer, value_layer")
+            # <<<
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
@@ -709,6 +727,11 @@ class ParallelAttention(MegatronModule):
                 rotary_pos_emb = rotary_pos_emb
             else:
                 rotary_pos_emb = ((rotary_pos_emb,) * 2)
+
+        # >>>
+        # if get_args().debug:
+        # pax("query_layer, key_layer, value_layer, rotary_pos_emb")
+        # <<<
 
         if inference_params:
             batch_start = inference_params.batch_size_offset
@@ -773,6 +796,10 @@ class ParallelAttention(MegatronModule):
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
 
+        # >>>
+        # pax("query_layer, key_layer, value_layer, rotary_pos_emb")
+        # <<<
+
         if not self.use_flash_attn:
             if self.checkpoint_core_attention:
                 context_layer = self._checkpointed_attention_forward(
@@ -795,6 +822,10 @@ class ParallelAttention(MegatronModule):
         # =================
 
         output, bias = self.dense(context_layer)
+
+        # >>>
+        pax({"use_flash_attention": self.use_flash_attn, "checkpoint_core_attention": self.checkpoint_core_attention}, "context_layer, output, bias")
+        # <<<
 
         return output, bias
 
@@ -1138,6 +1169,10 @@ class ParallelTransformerLayer(MegatronModule):
                 attention_mask,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb)
+
+        # >>>
+        pax("norm_output, attention_mask, attention_output, attention_bias")
+        # <<<
 
         # Residual connection.
         if self.apply_residual_connection_post_norm:

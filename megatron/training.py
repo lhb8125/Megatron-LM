@@ -99,9 +99,9 @@ def pretrain(train_valid_test_dataset_provider,
     set_jit_fusion_options()
 
     # >>>
-    from scripts.compare_gpt_models import compare_gpt_models
-    compare_gpt_models()
-    raise Exception("hi.")
+    # from scripts.compare_gpt_models import compare_gpt_models
+    # compare_gpt_models()
+    # raise Exception("hi.")
     # <<<
 
     # Adjust the startup time so it reflects the largest value.
@@ -278,6 +278,10 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Disallow training and inference with Transformer Engine
     # for non-GPT models
+    # >>>
+    from lutil import pax
+    pax("model")
+    # <<<
     args.allow_transformer_engine = all([type(m) == GPTModel for m in model])
     assert args.allow_transformer_engine or args.transformer_impl == 'local', \
         'Transformer Engine is only approved for GPT models'

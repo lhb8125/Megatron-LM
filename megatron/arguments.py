@@ -41,6 +41,10 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_retro_args(parser)
     parser = _add_experimental_args(parser)
 
+    # >>>
+    # parser.add_argument("--debug", action="store_true")
+    # <<<
+
     # Custom arguments.
     if extra_args_provider is not None:
         parser = extra_args_provider(parser)

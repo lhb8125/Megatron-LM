@@ -64,13 +64,26 @@ def _load_checkpoint(queue, args):
     margs = parse_args()
     margs, checkpoint_args = load_args_from_checkpoint(margs)
 
+    # >>>
+    # pax({
+    #     "margs / apply_query_key_layer_scaling" :
+    #     margs.apply_query_key_layer_scaling,
+    #     "checkpoint_args / apply_query_key_layer_scaling" :
+    #     checkpoint_args.apply_query_key_layer_scaling,
+    #     "margs / use_rotary_position_embeddings" :
+    #     margs.use_rotary_position_embeddings,
+    #     "checkpoint_args / use_rotary_position_embeddings" :
+    #     checkpoint_args.use_rotary_position_embeddings,
+    # })
+    # <<<
+
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
 
     # >>>
-    margs.use_rotary_position_embeddings = True
-    checkpoint_args.use_rotary_position_embeddings = True
+    # margs.use_rotary_position_embeddings = True
+    # checkpoint_args.use_rotary_position_embeddings = True
     # pax({
     #     "margs": {k:v for k,v in vars(margs).items() if "position" in k.lower()},
     #     "chkpt": {k:v for k,v in vars(checkpoint_args).items() if "position" in k.lower()},
@@ -141,12 +154,22 @@ def _load_checkpoint(queue, args):
                         pre_process=pre_process,
                         post_process=post_process
                     ).to(dtype)
+                    # >>>
+                    pax("this_model")
+                    # <<<
                     model_.append(this_model)
             else:
                 pre_process = mpu.is_pipeline_first_stage()
                 post_process = mpu.is_pipeline_last_stage()
                 model_rank = 0
+                # >>>
+                # margs.use_mcore_models = True
+                # pax({"use_mcore_models": margs.use_mcore_models})
+                # <<<
                 model_ = [model_provider(pre_process, post_process).to(dtype)]
+                # >>>
+                # pax("model_")
+                # <<<
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
             load_checkpoint(model_, None, None)

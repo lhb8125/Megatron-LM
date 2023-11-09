@@ -36,6 +36,10 @@ def _set_cuda_rng_state(new_state, device=-1):
     with a single change: the input state is not cloned. Cloning caused
     major performance issues for +4 GPU cases.
     """
+    # >>>
+    from lutil import pax
+    pax("new_state")
+    # <<<
     if hasattr(_C, '_cuda_setRNGState') and callable(_C._cuda_setRNGState):
         # older PyTorch
         def cb():
@@ -77,13 +81,26 @@ class CudaRNGStatesTracker:
 
     def __init__(self):
         # Map from a string name to the cuda rng state.
-        self.states_ = {}
+        # >>>
+        # self.states_ = {}
+        self.states_ = None
+        # <<<
         # Seeds are just for book keeping and ensure no seed is set twice.
         self.seeds_ = set()
 
+    def is_initialized(self):
+        # >>>
+        # from lutil import pax
+        # pax({"states_": self.states_})
+        # <<<
+        return self.states_ is not None
+
     def reset(self):
         """Set to the initial state (no tracker)."""
-        self.states_ = {}
+        # >>>
+        # self.states_ = {}
+        self.states_ = None
+        # <<<
         self.seeds_ = set()
 
     def get_states(self):
@@ -97,6 +114,9 @@ class CudaRNGStatesTracker:
     def set_states(self, states):
         """Set the rng states. For efficiency purposes, we do not check
         the size of seed for compatibility."""
+        # >>>
+        raise Exception("hi.")
+        # <<<
         self.states_ = states
 
     def add(self, name, seed):
@@ -120,8 +140,15 @@ class CudaRNGStatesTracker:
     def fork(self, name=_MODEL_PARALLEL_RNG_TRACKER_NAME):
         """Fork the cuda rng state, perform operations, and exit with
         the original state."""
+        # >>>
+        raise Exception("hi.")
+        # <<<
         # Check if we have added the state
         if name not in self.states_:
+            # >>>
+            # from lutil import pax
+            # pax("name", {"states_": self.states_})
+            # <<<
             raise Exception('cuda rng state {} is not added'.format(name))
         # Store current rng state.
         orig_cuda_rng_state = torch.cuda.get_rng_state()
@@ -143,6 +170,9 @@ _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
 
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
+    # >>>
+    # raise Exception("hi.")
+    # <<<
     return _CUDA_RNG_STATE_TRACKER
 
 
