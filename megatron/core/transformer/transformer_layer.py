@@ -160,11 +160,11 @@ class TransformerLayer(MegatronModule):
         )
 
         # >>>
-        from lutil import pax
-        pax("input_layernorm_output, attention_mask", {
-            "attention_output" : attention_output_with_bias[0],
-            "attention_bias" : attention_output_with_bias[1],
-        })
+        # from lutil import pax
+        # pax("input_layernorm_output, attention_mask", {
+        #     "attention_output" : attention_output_with_bias[0],
+        #     "attention_bias" : attention_output_with_bias[1],
+        # })
         # <<<
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself

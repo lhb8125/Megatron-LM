@@ -153,6 +153,7 @@ ARGS+=" \
     --log-num-zeros-in-grad \
     --bf16 \
 "
+ARGS+=" --transformer-impl transformer_engine"
 
 ######## retro. ########
 

@@ -824,7 +824,7 @@ class ParallelAttention(MegatronModule):
         output, bias = self.dense(context_layer)
 
         # >>>
-        pax({"use_flash_attention": self.use_flash_attn, "checkpoint_core_attention": self.checkpoint_core_attention}, "context_layer, output, bias")
+        # pax({"use_flash_attention": self.use_flash_attn, "checkpoint_core_attention": self.checkpoint_core_attention}, "context_layer, output, bias")
         # <<<
 
         return output, bias
@@ -1171,7 +1171,7 @@ class ParallelTransformerLayer(MegatronModule):
                 rotary_pos_emb=rotary_pos_emb)
 
         # >>>
-        pax("norm_output, attention_mask, attention_output, attention_bias")
+        # pax("norm_output, attention_mask, attention_output, attention_bias")
         # <<<
 
         # Residual connection.

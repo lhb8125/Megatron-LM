@@ -17,10 +17,6 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 
-# >>>
-from lutil import pax
-# <<<
-
 
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {
@@ -117,12 +113,6 @@ class TELinear(te.pytorch.Linear):
                 self.config.tp_comm_overlap and self.config.tp_comm_split_rs
             )
 
-        # >>>
-        # pax({"no_load_optim": 
-        # pax("get_cuda_rng_tracker")
-        # pax({"init": config.perform_initialization})
-        # <<<
-
         super().__init__(
             in_features=input_size,
             out_features=output_size,
@@ -131,7 +121,6 @@ class TELinear(te.pytorch.Linear):
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             tp_size=self.config.tensor_model_parallel_size,
             # >>>
-            # get_rng_state_tracker=get_cuda_rng_tracker,
             get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
             # <<<
             init_method=init_method,
@@ -213,10 +202,6 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
                 self.config.tp_comm_overlap and self.config.tp_comm_split_ag
             )
 
-        # >>>
-        # pax("get_cuda_rng_tracker")
-        # <<<
-
         super().__init__(
             in_features=input_size,
             out_features=output_size,
@@ -226,7 +211,6 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             tp_size=self.config.tensor_model_parallel_size,
             # >>>
-            # get_rng_state_tracker=get_cuda_rng_tracker,
             get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
             # <<<
             init_method=init_method,
@@ -415,7 +399,6 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             sequence_parallel=self.config.sequence_parallel,
             tp_size=self.config.tensor_model_parallel_size,
             # >>>
-            # get_rng_state_tracker=get_cuda_rng_tracker,
             get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
             # <<<
             tp_group=get_tensor_model_parallel_group(check_initialized=False),

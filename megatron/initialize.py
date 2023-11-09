@@ -80,9 +80,6 @@ def initialize_megatron(
         return finish_mpu_init
     else:
         # Megatron's MPU is the master. Complete initialization right away.
-        # >>>
-        raise Exception("hi.")
-        # <<<
         finish_mpu_init()
 
         # Autoresume.
@@ -285,10 +282,6 @@ def _set_random_seed(seed_, data_parallel_random_init=False):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        # >>>
-        from lutil import pax
-        pax("seed")
-        # <<<
         if torch.cuda.device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(seed)
     else:

@@ -273,7 +273,7 @@ class Attention(MegatronModule, ABC):
         output, bias = self.linear_proj(core_attn_out)
 
         # >>>
-        pax({"checkpoint_dot_product_attention": self.checkpoint_dot_product_attention}, "core_attn_out, output, bias")
+        # pax({"checkpoint_dot_product_attention": self.checkpoint_dot_product_attention}, "core_attn_out, output, bias")
         # <<<
 
         return output, bias

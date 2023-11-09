@@ -89,14 +89,6 @@ def _initialize_affine_weight_gpu(
         tensor=weight, is_parallel=True, dim=partition_dim, stride=stride
     )
 
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "expert_parallel" : expert_parallel,
-    #     "cuda_rng_tracker" : get_cuda_rng_tracker(),
-    # })
-    pax({"perf init": get_args().perform_initialization})
-    # <<<
     if not expert_parallel:
         with get_cuda_rng_tracker().fork():
             init_method(weight)
@@ -207,9 +199,6 @@ class VocabParallelEmbedding(torch.nn.Module):
                 )
             )
             if config.perform_initialization:
-                # >>>
-                raise Exception("hi.")
-                # <<<
                 _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
 
     def forward(self, input_):

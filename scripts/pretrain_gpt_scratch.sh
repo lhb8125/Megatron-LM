@@ -26,8 +26,8 @@ NPROCS=1
 
 # Get the data blend
 # . /lustre/fsw/adlr/adlr-nlp/adlr-nlp-sharing/nvllm-1.1t/data/tokens/multi-1.1t-gtc-blend-v0.1.sh
-. /lustre/fs6/portfolios/adlr/users/lmcafee/retro/misc/next-llm-tokenizer/lawrence_blend_oci.sh
-# DATA_BLEND="1.000 /lustre/fsw/portfolios/adlr/users/lmcafee/retro/data/MTNLG/NIHExporter_shuf_text_document"
+# . /lustre/fs6/portfolios/adlr/users/lmcafee/retro/misc/next-llm-tokenizer/lawrence_blend_oci.sh
+DATA_BLEND="1.000 /lustre/fsw/portfolios/adlr/users/lmcafee/retro/data/MTNLG/NIHExporter_shuf_text_document"
 
 #     --use-container-fused-kernels \
 #     --blendable-index-path ${BLENDABLE_INDEX} \
