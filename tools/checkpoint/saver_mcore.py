@@ -21,8 +21,6 @@ class MCoreSetter:
     def has_position_embeddings(cls, model):
         return hasattr(model.embedding, "position_embeddings")
 
-class MCoreLocalSetter(MCoreSetter):
-
     @classmethod
     def set_embeddings(
         cls,
@@ -33,43 +31,6 @@ class MCoreLocalSetter(MCoreSetter):
         cls.set_tensor(model.embedding.word_embeddings.weight, word)
         if pos is not None:
             cls.set_tensor(model.embedding.position_embeddings.weight, pos)
-
-    @classmethod
-    def set_layer(
-        cls,
-        model,
-        layer_idx,
-        self_attn_norm_weight=None,
-        self_attn_norm_bias=None,
-        self_attn_qkv_weight=None,
-        self_attn_qkv_bias=None,
-        self_attn_proj_weight=None,
-        self_attn_proj_bias=None,
-        mlp_norm_weight=None,
-        mlp_norm_bias=None,
-        mlp_fc1_weight=None,
-        mlp_fc1_bias=None,
-        mlp_fc2_weight=None,
-        mlp_fc2_bias=None,
-    ):
-
-        l = model.decoder.layers[layer_idx]
-
-        # Self attention.
-        cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
-        cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
-        cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
-        cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
-        cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
-        cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
-
-        # MLP.
-        cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
-        cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
-        cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
-        cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
-        cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
-        cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
 
     @classmethod
     def set_final_norm(
@@ -136,179 +97,92 @@ class MCoreLocalSetter(MCoreSetter):
         cls.set_tensor(model.binary_head.bias, binary_head_bias)
 
 
-# def receive_te_modules(mpu, out_word_embed):
+class MCoreLocalSetter(MCoreSetter):
 
-#     raise Exception("hi.")
+    @classmethod
+    def set_layer(
+        cls,
+        model,
+        layer_idx,
+        self_attn_norm_weight=None,
+        self_attn_norm_bias=None,
+        self_attn_qkv_weight=None,
+        self_attn_qkv_bias=None,
+        self_attn_proj_weight=None,
+        self_attn_proj_bias=None,
+        mlp_norm_weight=None,
+        mlp_norm_bias=None,
+        mlp_fc1_weight=None,
+        mlp_fc1_bias=None,
+        mlp_fc2_weight=None,
+        mlp_fc2_bias=None,
+    ):
 
-#     # Make models for first pipeline stage and fill in embeddings
-#     mpu.set_pipeline_model_parallel_rank(0)
-#     post_process = args.target_pipeline_parallel_size == 1
-#     models = get_models(args.target_tensor_parallel_size, md.params_dtype, True, post_process)
+        l = model.decoder.layers[layer_idx]
 
-#     for tp_rank, model in enumerate(models):
-#         model.embedding.word_embeddings.weight.data.copy_(out_word_embed[tp_rank])
-#         if pos_embed is not None:
-#             model.embedding.position_embeddings.weight.data.copy_(pos_embed)
-#         else:
-#             assert not hasattr(model.embedding, "position_embeddings")
+        # Self attention.
+        cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
+        cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+        cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
+        cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+        cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
+        cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
-#     # Transformer layers
-#     #-------------------
-#     total_layer_num = 0
-#     for pp_rank in range(args.target_pipeline_parallel_size):
-#         # For later pipeline parallel ranks, make the new models
-#         if pp_rank > 0:
-#             mpu.set_pipeline_model_parallel_rank(pp_rank)
-#             post_process = pp_rank == args.target_pipeline_parallel_size - 1
-#             models = get_models(args.target_tensor_parallel_size, md.params_dtype, False, post_process)
-
-#         for layer in range(len(models[0].decoder.layers)):
-#             msg = queue_get(f"transformer layer {total_layer_num}")
-
-#             # duplicated tensors
-#             input_norm_weight = msg.pop("input norm weight")
-#             if md.norm_has_bias:
-#                 input_norm_bias = msg.pop("input norm bias")
-#             post_norm_weight = msg.pop("post norm weight")
-#             if md.norm_has_bias:
-#                 post_norm_bias = msg.pop("post norm bias")
-#             if md.linear_bias:
-#                 dense_bias = msg.pop("dense bias")
-#                 mlp_l1_bias = msg.pop("mlp l1 bias")
-
-#             # Split up the parallel tensors
-#             qkv_weight = torch.chunk(msg.pop("qkv weight"), args.target_tensor_parallel_size, dim=0)
-#             dense_weight = torch.chunk(msg.pop("dense weight"), args.target_tensor_parallel_size, dim=1)
-#             mlp_l1_weight = torch.chunk(msg.pop("mlp l1 weight"), args.target_tensor_parallel_size, dim=1)
-
-#             # Special handling for swiglu
-#             if md.swiglu:
-#                 mlp_l0_weight_W = torch.chunk(msg.pop("mlp l0 weight W"), args.target_tensor_parallel_size, dim=0)
-#                 mlp_l0_weight_V = torch.chunk(msg.pop("mlp l0 weight V"), args.target_tensor_parallel_size, dim=0)
-#                 mlp_l0_weight = [torch.cat(weights, dim=0) for weights in zip(mlp_l0_weight_W, mlp_l0_weight_V)]
-#             else:
-#                 mlp_l0_weight = torch.chunk(msg.pop("mlp l0 weight"), args.target_tensor_parallel_size, dim=0)
-
-#             if md.linear_bias:
-#                 qkv_bias = torch.chunk(msg.pop("qkv bias"), args.target_tensor_parallel_size, dim=0)
-#                 if md.swiglu:
-#                     mlp_l0_bias_W = torch.chunk(msg.pop("mlp l0 bias W"), args.target_tensor_parallel_size, dim=0)
-#                     mlp_l0_bias_V = torch.chunk(msg.pop("mlp l0 bias V"), args.target_tensor_parallel_size, dim=0)
-#                     mlp_l0_bias = [torch.cat(bias, dim=0) for bias in zip(mlp_l0_bias_W, mlp_l0_bias_V)]
-#                 else:
-#                     mlp_l0_bias = torch.chunk(msg.pop("mlp l0 bias"), args.target_tensor_parallel_size, dim=0)
-
-#             # Save them to the model
-#             for tp_rank in range(args.target_tensor_parallel_size):
-#                 l = models[tp_rank].decoder.layers[layer]
-#                 l.input_layernorm.weight.data.copy_(input_norm_weight)
-#                 if md.norm_has_bias:
-#                     l.input_layernorm.bias.data.copy_(input_norm_bias)
-#                 l.self_attention.linear_qkv.weight.data.copy_(qkv_weight[tp_rank])
-#                 l.self_attention.linear_proj.weight.data.copy_(dense_weight[tp_rank])
-#                 # >>>
-#                 l.pre_mlp_layernorm.weight.data.copy_(post_norm_weight)
-#                 if md.norm_has_bias:
-#                     l.pre_mlp_layernorm.bias.data.copy_(post_norm_bias)
-#                 # +++
-#                 # l.pre_cross_attn_layernorm.weight.data.copy_(post_norm_weight)
-#                 # if md.norm_has_bias:
-#                 #     l.pre_cross_attn_layernorm.bias.data.copy_(post_norm_bias)
-#                 # <<<
-#                 l.mlp.linear_fc1.weight.data.copy_(mlp_l0_weight[tp_rank])
-#                 l.mlp.linear_fc2.weight.data.copy_(mlp_l1_weight[tp_rank])
-#                 if md.linear_bias:
-#                     l.self_attention.linear_qkv.bias.data.copy_(qkv_bias[tp_rank])
-#                     l.self_attention.linear_proj.bias.data.copy_(dense_bias)
-#                     l.mlp.linear_fc1.bias.data.copy_(mlp_l0_bias[tp_rank])
-#                     l.mlp.linear_fc2.bias.data.copy_(mlp_l1_bias)
-
-#             total_layer_num = total_layer_num + 1
-#             check_message(msg)
+        # MLP.
+        cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
+        cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+        cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
+        cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+        cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
+        cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
 
 
-#         if post_process:
-#             msg = queue_get("final norm")
-#             final_norm_weight = msg.pop("weight")
-#             if md.norm_has_bias:
-#                 final_norm_bias = msg.pop("bias")
-#             for tp_rank in range(args.target_tensor_parallel_size):
-#                 models[tp_rank].decoder.final_layernorm.weight.data.copy_(final_norm_weight)
-#                 if md.norm_has_bias:
-#                     models[tp_rank].decoder.final_layernorm.bias.data.copy_(final_norm_bias)
-#                 if pp_rank != 0 and not md.output_layer:
-#                     # Copy word embeddings to final pipeline rank
-#                     models[tp_rank].word_embeddings.weight.data.copy_(out_word_embed[tp_rank])
-#             del final_norm_weight
-#             if md.norm_has_bias:
-#                 del final_norm_bias
-#             check_message(msg)
+class MCoreTESetter(MCoreSetter):
 
-#             if md.output_layer:
-#                 msg = queue_get("output layer")
-#                 if not hasattr(models[0], 'output_layer'):
-#                     print("ERROR: got an output layer, but model does not have one")
-#                     exit(1)
-#                 output_layer_weight = torch.chunk(msg.pop("weight"), args.target_tensor_parallel_size, dim=0)
-#                 for tp_rank in range(args.target_tensor_parallel_size):
-#                     models[tp_rank].output_layer.weight.data.copy_(output_layer_weight[tp_rank])
-#                 del output_layer_weight
-#                 check_message(msg)
+    @classmethod
+    def set_layer(
+        cls,
+        model,
+        layer_idx,
+        self_attn_norm_weight=None,
+        self_attn_norm_bias=None,
+        self_attn_qkv_weight=None,
+        self_attn_qkv_bias=None,
+        self_attn_proj_weight=None,
+        self_attn_proj_bias=None,
+        mlp_norm_weight=None,
+        mlp_norm_bias=None,
+        mlp_fc1_weight=None,
+        mlp_fc1_bias=None,
+        mlp_fc2_weight=None,
+        mlp_fc2_bias=None,
+    ):
 
-#             msg = queue_get()
-#             if msg != "done" and msg["name"] == "pooler":
-#                 if not hasattr(models[0], 'pooler'):
-#                     print("ERROR: got a pooler, but model does not have one")
-#                     exit(1)
-#                 print("received pooler")
-#                 pooler_weight = msg.pop("weight")
-#                 pooler_bias = msg.pop("bias")
-#                 for tp_rank in range(args.target_tensor_parallel_size):
-#                     models[tp_rank].pooler.dense.weight.data.copy_(pooler_weight)
-#                     models[tp_rank].pooler.dense.bias.data.copy_(pooler_bias)
-#                 del pooler_weight
-#                 del pooler_bias
-#                 check_message(msg)
-#                 msg = queue_get()
+        l = model.decoder.layers[layer_idx]
 
-#             if msg != "done" and msg["name"] == "lm head":
-#                 if not hasattr(models[0], 'lm_head'):
-#                     print("ERROR: got an lm head, but model does not have one")
-#                     exit(1)
-#                 print("received lm head")
-#                 lm_head_dense_weight = msg.pop("dense weight")
-#                 lm_head_dense_bias = msg.pop("dense bias")
-#                 lm_head_norm_weight = msg.pop("norm weight")
-#                 if md.norm_has_bias:
-#                     lm_head_norm_bias = msg.pop("norm bias")
-#                 for tp_rank in range(args.target_tensor_parallel_size):
-#                     models[tp_rank].lm_head.dense.weight.data.copy_(lm_head_dense_weight)
-#                     models[tp_rank].lm_head.dense.bias.data.copy_(lm_head_dense_bias)
-#                     models[tp_rank].lm_head.norm.weight.data.copy_(lm_head_norm_weight)
-#                     if md.norm_has_bias:
-#                         models[tp_rank].lm_head.norm.bias.data.copy_(lm_head_norm_bias)
-#                 check_message(msg)
-#                 msg = queue_get()
+        # Self attention.
+        # >>>
+        # cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
+        # cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+        cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
+        cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+        # <<<
+        cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
+        cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+        cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
+        cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
-#             if msg != "done" and msg["name"] == "binary head":
-#                 if not hasattr(models[0], 'binary_head'):
-#                     print("ERROR: got a binary head, but model does not have one")
-#                     exit(1)
-#                 print("received binary head")
-#                 binary_head_weight = msg.pop("weight")
-#                 binary_head_bias = msg.pop("bias")
-#                 for tp_rank in range(args.target_tensor_parallel_size):
-#                     models[tp_rank].binary_head.weight.data.copy_(binary_head_weight)
-#                     models[tp_rank].binary_head.bias.data.copy_(binary_head_bias)
-#                 check_message(msg)
-#                 msg = queue_get()
-
-#             if msg != "done":
-#                 print("ERROR: got some more data but was expecting to be done")
-
-#         for tp_rank in range(args.target_tensor_parallel_size):
-#             mpu.set_tensor_model_parallel_rank(tp_rank)
-#             save_checkpoint(md.iteration, [models[tp_rank]], None, None)
+        # MLP.
+        # >>>
+        # cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
+        # cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+        cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
+        cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+        # <<<
+        cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
+        cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+        cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
+        cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
 
 
 def add_arguments(parser):
@@ -489,20 +363,13 @@ def save_checkpoint(queue, args):
     margs.tensorboard_dir = None
     margs.tokenizer_model = None
     # >>>
-    # margs.transformer_impl = "transformer_engine"
     margs.transformer_impl = args.transformer_impl
-    # margs.no_load_optim = False
-    # margs.no_load_rng = False
     # <<<
 
     set_global_variables(margs, build_tokenizer=False)
 
-    # margs = megatron args
+    # Megatron args. (i.e., 'margs')
     margs = get_args()
-    # >>>
-    # pax({"transformer_impl": margs.transformer_impl})
-    # pax({"perf init": margs.perform_initialization})
-    # <<<
 
     if hasattr(md, 'consumed_train_samples'):
         margs.consumed_train_samples = md.consumed_train_samples
@@ -572,7 +439,7 @@ def save_checkpoint(queue, args):
     # Parameter setter class.
     setter = {
         "local" : MCoreLocalSetter,
-        # "transformer_engine" : MCoreTESetter,
+        "transformer_engine" : MCoreTESetter,
     }[args.transformer_impl]
 
     # Get models.
@@ -643,9 +510,6 @@ def save_checkpoint(queue, args):
 
             # Save them to the model
             for tp_rank in range(args.target_tensor_parallel_size):
-                # >>>
-                # l = models[tp_rank].decoder.layers[layer]
-                # <<<
                 params_dict = {
                     "self_attn_norm_weight" : input_norm_weight,
                     "self_attn_qkv_weight" : qkv_weight[tp_rank],
@@ -679,30 +543,21 @@ def save_checkpoint(queue, args):
             final_norm_weight = msg.pop("weight")
             if md.norm_has_bias:
                 final_norm_bias = msg.pop("bias")
-            # >>>
-            # for tp_rank in range(args.target_tensor_parallel_size):
             for tp_rank, model in enumerate(models):
-            # <<<
-                # >>>
-                # models[tp_rank].decoder.final_layernorm.weight.data.copy_(final_norm_weight)
-                # if md.norm_has_bias:
-                #     models[tp_rank].decoder.final_layernorm.bias.data.copy_(final_norm_bias)
-                # +++
                 setter.set_final_norm(
                     model,
                     weight=final_norm_weight,
                     bias=final_norm_bias if md.norm_has_bias else None,
                 )
-                # <<<
                 if pp_rank != 0 and not md.output_layer:
-                    # Copy word embeddings to final pipeline rank
                     # >>>
-                    # models[tp_rank].word_embeddings.weight.data.copy_(out_word_embed[tp_rank])
+                    raise Exception("hi.")
+                    # <<<
+                    # Copy word embeddings to final pipeline rank
                     setter.set_output_word_embeddings(
                         model,
                         emb=out_word_embed[tp_rank],
                     )
-                    # <<<
             del final_norm_weight
             if md.norm_has_bias:
                 del final_norm_bias
@@ -714,13 +569,11 @@ def save_checkpoint(queue, args):
                     print("ERROR: got an output layer, but model does not have one")
                     exit(1)
                 output_layer_weight = torch.chunk(msg.pop("weight"), args.target_tensor_parallel_size, dim=0)
-                # >>>
-                # for tp_rank in range(args.target_tensor_parallel_size):
-                #     models[tp_rank].output_layer.weight.data.copy_(output_layer_weight[tp_rank])
-                # +++
                 for tp_rank, model in enumerate(models):
+                    # >>>
+                    raise Exception("hi.")
+                    # <<<
                     setter.set_output_layer(model, output_layer_weight[tp_rank])
-                # <<<
                 del output_layer_weight
                 check_message(msg)
 
