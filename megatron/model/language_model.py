@@ -285,6 +285,10 @@ class Embedding(MegatronModule):
                     if 'position_embeddings' in key:
                         state_dict_[key.split('position_embeddings.')[1]] \
                             = state_dict[key]
+            # >>>
+            from lutil import pax
+            pax("state_dict_")
+            # <<<
             self.position_embeddings.load_state_dict(state_dict_, strict=strict)
 
         # Tokentype embedding.
@@ -561,6 +565,11 @@ class TransformerLanguageModel(MegatronModule):
 
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
+
+        # >>>
+        from lutil import pax
+        pax("state_dict")
+        # <<<
 
         # Embedding.
         if self.pre_process:

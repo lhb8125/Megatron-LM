@@ -25,46 +25,45 @@ set -u
 # gpt3-43b-multi-1.1t-gtc/training_gpt3_43b_gtc.sh      ... 8
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-# KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
-KEY=2b   DIR=gpt3-2b-multi-1.1t-gtc       TP=1
-# KEY=8b   DIR=gpt3-8b-multi-1.1t-gtc       TP=4
-# KEY=22b  DIR=gpt3-22b-multi-1.1t-gtc      TP=8
-# KEY=43b  DIR=gpt3-43b-multi-1.1t-gtc      TP=8
-
-# python tools/checkpoint/convert.py \
-#     --model-type GPT \
-#     --loader megatron \
-#     --saver mcore \
-#     --target-tensor-parallel-size 1 \
-#     --target-pipeline-parallel-size 1 \
-#     --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
-#     --load-dir /lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-843m-multi-1.1t-gtc-llr \
-#     --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/843m
-
 export NVTE_APPLY_QK_LAYER_SCALING=1
 
 # TRANSFORMER_IMPL=local
 TRANSFORMER_IMPL=transformer_engine
-python tools/checkpoint/convert.py \
-    --model-type GPT \
-    --loader megatron \
-    --saver mcore \
-    --transformer-impl ${TRANSFORMER_IMPL} \
-    --target-tensor-parallel-size ${TP} \
-    --target-pipeline-parallel-size 1 \
-    --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
-    --load-dir /lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/${DIR} \
-    --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/${KEY}
 
-# PP=4
-# python tools/checkpoint/convert.py \
-#     --model-type GPT \
-#     --loader megatron \
-#     --saver mcore \
-#     --target-tensor-parallel-size 8 \
-#     --target-pipeline-parallel-size ${PP} \
-#     --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
-#     --load-dir /lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-43b-multi-1.1t-gtc/tp8pp${PP}/ \
-#     --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/43b-tp8pp${PP}
+if [ "0" = "1" ]; then
+
+    KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
+    # KEY=2b   DIR=gpt3-2b-multi-1.1t-gtc       TP=1
+    # KEY=8b   DIR=gpt3-8b-multi-1.1t-gtc       TP=4
+    # KEY=22b  DIR=gpt3-22b-multi-1.1t-gtc      TP=8
+
+    python tools/checkpoint/convert.py \
+        --model-type GPT \
+        --loader megatron \
+        --saver mcore \
+        --transformer-impl ${TRANSFORMER_IMPL} \
+        --target-tensor-parallel-size ${TP} \
+        --target-pipeline-parallel-size 1 \
+        --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
+        --load-dir /lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/${DIR} \
+        --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/${TRANSFORMER_IMPL}/${KEY}
+
+else
+
+    KEY=43b  DIR=gpt3-43b-multi-1.1t-gtc      TP=8
+
+    PP=1 # 1, 2, 4, 4v1
+    python tools/checkpoint/convert.py \
+        --model-type GPT \
+        --loader megatron \
+        --saver mcore \
+        --transformer-impl ${TRANSFORMER_IMPL} \
+        --target-tensor-parallel-size ${TP} \
+        --target-pipeline-parallel-size ${PP} \
+        --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
+        --load-dir /lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-43b-multi-1.1t-gtc/tp8pp${PP}/ \
+        --save-dir /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/${TRANSFORMER_IMPL}/${KEY}-tp8pp${PP}
+
+fi
 
 # eof

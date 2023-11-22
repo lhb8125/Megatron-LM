@@ -75,6 +75,7 @@ def _load_checkpoint(queue, args):
     #     "checkpoint_args / use_rotary_position_embeddings" :
     #     checkpoint_args.use_rotary_position_embeddings,
     # })
+    # pax("margs, checkpoint_args")
     # <<<
 
     # Arguments do sanity checks on the world size, but we don't care,
@@ -85,8 +86,14 @@ def _load_checkpoint(queue, args):
     # margs.use_rotary_position_embeddings = True
     # checkpoint_args.use_rotary_position_embeddings = True
     # pax({
+    #     "load" : "/".join(margs.load.strip("/").split("/")[-2:]),
     #     "margs": {k:v for k,v in vars(margs).items() if "position" in k.lower()},
     #     "chkpt": {k:v for k,v in vars(checkpoint_args).items() if "position" in k.lower()},
+    # })
+    # pax({
+    #     "margs / load" : margs.load,
+    #     "margs / add_position_embedding" : margs.add_position_embedding,
+    #     "margs / position_embedding_type" : margs.position_embedding_type,
     # })
     # <<<
 
@@ -172,6 +179,9 @@ def _load_checkpoint(queue, args):
                 # <<<
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
+            # >>>
+            margs.exit_on_missing_checkpoint = True
+            # <<<
             load_checkpoint(model_, None, None)
 
             if consumed_train_samples is not None:

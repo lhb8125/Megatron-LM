@@ -539,8 +539,17 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
 
     state_dict, checkpoint_name, release = _load_base_checkpoint(load_dir, rank0=False)
 
+    # >>>
+    # from lutil import pax
+    # pax("state_dict")
+    # <<<
+
     # Checkpoint not loaded.
     if state_dict is None:
+
+        # >>>
+        raise Exception("missing checkpoint?")
+        # <<<
 
         # Conditionally exit at this point.
         if args.exit_on_missing_checkpoint:

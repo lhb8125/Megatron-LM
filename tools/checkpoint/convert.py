@@ -138,14 +138,6 @@ def main():
 
     queue = mp.Queue(maxsize=args.max_queue_size)
 
-    # >>>
-    # import torch
-    # from lutil import pax, print_mem
-    # pax({"device": torch.cuda.is_available()})
-    # loader.load_checkpoint(queue, args)
-    # pax()
-    # <<<
-
     print("Starting saver...")
     saver_proc = mp.Process(target=saver.save_checkpoint, args=(queue, args))
     saver_proc.start()

@@ -62,6 +62,17 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     return args
 
 def validate_args(args, defaults={}):
+
+    # >>>
+    # from lutil import pax
+    # pax({
+    #     "args / load" : args.load,
+    #     "args / add_position_embedding" : args.add_position_embedding,
+    #     "args / position_embedding_type" : args.position_embedding_type,
+    #     "args / use_rotary_position_embeddings" : args.use_rotary_position_embeddings,
+    # })
+    # <<<
+
     # Tensor model parallel size.
     args.tensor_model_parallel_size = min(
         args.tensor_model_parallel_size, args.world_size)
@@ -382,8 +393,17 @@ def validate_args(args, defaults={}):
     # Would just need to add 'NoPE' as a position_embedding_type to support this, but for now
     # don't allow it to keep things simple
     # >>>
-    if not args.add_position_embedding and args.position_embedding_type != 'rope':
-    # if not args.add_position_embedding and args.position_embedding_type not in ('rope', 'learned_absolute'):
+    # from lutil import pax
+    # pax({
+    #     "args / load" : args.load,
+    #     "args / add_position_embedding" : args.add_position_embedding,
+    #     "args / position_embedding_type" : args.position_embedding_type,
+    #     "transformer_impl" : args.transformer_impl,
+    # })
+    # <<<
+    # >>>
+    # if not args.add_position_embedding and args.position_embedding_type != 'rope':
+    if not args.add_position_embedding and args.position_embedding_type not in ('rope', 'learned_absolute'):
     # <<<
         raise RuntimeError('--no-position-embedding is deprecated, use --position-embedding-type')
 
