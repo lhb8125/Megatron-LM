@@ -33,7 +33,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 
 # >>>
-from lutil import pax
+from lutil import pax, print_model
 # <<<
 
 
@@ -82,6 +82,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         #     "args / init" : args.perform_initialization,
         #     "config / init" : config.perform_initialization,
         # })
+        # raise Exception("no.")
         # <<<
         model = GPTModel(
             config=config,
@@ -100,6 +101,10 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         # pax("args")
         # pax("model")
         # <<<
+        # >>>
+        # pax({"use_mcore_models": args.use_mcore_models})
+        # raise Exception("hi.")
+        # <<<
     else:
         assert(args.context_parallel_size == 1), "Context parallelism is only supported with Megatron Core!"
 
@@ -110,6 +115,16 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             pre_process=pre_process,
             post_process=post_process
         )
+        # >>>
+        # raise Exception("hi.")
+        # <<<
+
+    # >>>
+    # from lutil import pax, print_model
+    # print_model("model", model)
+    # pax({"use_mcore_models": args.use_mcore_models})
+    # exit()
+    # <<<
 
     return model
 

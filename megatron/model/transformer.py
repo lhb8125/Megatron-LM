@@ -1811,4 +1811,10 @@ class ParallelTransformer(MegatronModule):
             newkey = key.replace("layernorm", "norm")
             state_dict_[newkey] = state_dict[key]
 
+        # >>>
+        # from lutil import print_model
+        # print_model("par trans", self)
+        # exit()
+        # <<<
+
         super().load_state_dict(state_dict_, strict)

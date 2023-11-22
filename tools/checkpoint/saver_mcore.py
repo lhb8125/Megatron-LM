@@ -1,8 +1,9 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
+from importlib.metadata import version
 import os
+from pkg_resources import packaging
 import sys
-
 import torch
 
 # >>>
@@ -195,6 +196,10 @@ def add_arguments(parser):
 
 
 def save_checkpoint(queue, args):
+
+    # Transformer engine >= 0.12.0, for CPU initialization.
+    te_version = packaging.version.Version(version("transformer-engine"))
+    assert te_version >= packaging.version.Version("0.12.0")
 
     # Search in directory above this
     sys.path.append(os.path.abspath(

@@ -129,6 +129,12 @@ def pretrain(train_valid_test_dataset_provider,
                    'scheduler are built')
     config = get_model_config(model[0])
 
+    # >>>
+    # from lutil import print_model
+    # print_model("model", model[0])
+    # exit()
+    # <<<
+
     # Data stuff.
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
@@ -267,11 +273,22 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 post_process=post_process,
                 add_encoder=add_encoder,
                 add_decoder=add_decoder)
+            # >>>
+            from lutil import print_model
+            # print_model("model", model)
+            raise Exception("hi.")
+            # <<<
         else:
             model = model_provider_func(
                 pre_process=pre_process,
                 post_process=post_process
             )
+            # >>>
+            # from lutil import pax, print_model
+            # pax({"model_type": model_type}, "model_provider_func")
+            # print_model("model", model)
+            # raise Exception("hi.")
+            # <<<
         model.model_type = model_type
 
     if not isinstance(model, list):
@@ -396,6 +413,12 @@ def setup_model_and_optimizer(model_provider_func,
 
     model = get_model(model_provider_func, model_type)
     unwrapped_model = unwrap_model(model)
+
+    # >>>
+    # from lutil import print_model
+    # print_model("model", unwrapped_model[0])
+    # exit()
+    # <<<
 
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,
                                        scale_lr_cond, lr_mult)

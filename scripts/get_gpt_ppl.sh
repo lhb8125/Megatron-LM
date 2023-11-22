@@ -17,7 +17,7 @@ if [ "$#" != 1 ]; then
 fi
 USE_CORE=$1
 # ADD_RETRIEVER=$2
-NPROCS=1 # 8
+NPROCS=8
 # NWORKERS=32
 
 
@@ -78,6 +78,7 @@ ARGS=""
 if [ "$USE_CORE" = "0" ]; then
     LOAD_DIR="/lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-843m-multi-1.1t-gtc-llr"
 else
+    ARGS+=" --transformer-impl transformer_engine"
     ARGS+=" --use-mcore-models"
     LOAD_DIR="/lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/843m"
 fi
@@ -153,7 +154,6 @@ ARGS+=" \
     --log-num-zeros-in-grad \
     --bf16 \
 "
-ARGS+=" --transformer-impl transformer_engine"
 
 ######## retro. ########
 

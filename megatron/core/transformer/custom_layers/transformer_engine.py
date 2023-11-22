@@ -29,6 +29,14 @@ def _get_extra_te_kwargs(config: TransformerConfig):
             extra_transformer_engine_kwargs["device"] = 'cpu'
         else:
             extra_transformer_engine_kwargs["device"] = torch.cuda.current_device()
+    # >>>
+    # from lutil import pax
+    # pax(
+    #     {"use_cpu_initialization": config.use_cpu_initialization},
+    #     "te_version",
+    #     "extra_transformer_engine_kwargs",
+    # )
+    # <<<
     return extra_transformer_engine_kwargs
 
 
@@ -112,6 +120,11 @@ class TELinear(te.pytorch.Linear):
             extra_kwargs["ub_split_rs"] = (
                 self.config.tp_comm_overlap and self.config.tp_comm_split_rs
             )
+
+        # >>>
+        # from lutil import pax
+        # pax("extra_kwargs")
+        # <<<
 
         super().__init__(
             in_features=input_size,

@@ -25,8 +25,8 @@ set -u
 # gpt3-43b-multi-1.1t-gtc/training_gpt3_43b_gtc.sh      ... 8
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
-# KEY=2b   DIR=gpt3-2b-multi-1.1t-gtc       TP=1
+# KEY=843m DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
+KEY=2b   DIR=gpt3-2b-multi-1.1t-gtc       TP=1
 # KEY=8b   DIR=gpt3-8b-multi-1.1t-gtc       TP=4
 # KEY=22b  DIR=gpt3-22b-multi-1.1t-gtc      TP=8
 # KEY=43b  DIR=gpt3-43b-multi-1.1t-gtc      TP=8
