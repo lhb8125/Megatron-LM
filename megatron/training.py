@@ -49,6 +49,10 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 
+# >>>
+from lutil import pax, print_args
+# <<<
+
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -103,18 +107,10 @@ def pretrain(train_valid_test_dataset_provider,
     # from scripts.compare_gpt_models import compare_gpt_models
     # compare_gpt_models()
     # raise Exception("hi.")
+    # <<<
 
-    if torch.distributed.get_rank() == 0:
-        def default_dump(obj):
-            if isinstance(obj, torch.dtype):
-                return str(obj)
-            else:
-                raise Exception("specialize for <%s>." % type(obj).__name__)
-
-        import json
-        print(json.dumps(vars(get_args()), indent=2, sort_keys=True, default=default_dump))
-    torch.distributed.barrier()
-    exit()
+    # >>>
+    # print_args(get_args())
     # <<<
 
     # Adjust the startup time so it reflects the largest value.

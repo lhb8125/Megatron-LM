@@ -73,18 +73,27 @@ unset NCCL_DEBUG
 
 # echo $LOAD_DIR
 
-ARGS=""
+TRANSFORMER_IMPL="local"
+# TRANSFORMER_IMPL="transformer_engine"
 
+SIZE=843m SHARED_LOAD_DIR=gpt3-843m-multi-1.1t-gtc-llr TP=1
+# SIZE=2b   SHARED_LOAD_DIR=gpt3-2b-multi-1.1t-gtc       TP=1
+# SIZE=8b   SHARED_LOAD_DIR=gpt3-8b-multi-1.1t-gtc       TP=4
+# SIZE=22b  SHARED_LOAD_DIR=gpt3-22b-multi-1.1t-gtc      TP=8
+# SIZE=43b SHARED_LOAD_DIR=gpt3-43b-multi-1.1t-gtc/tp8pp1 TP=8
+
+ARGS=""
 if [ "$USE_CORE" = "0" ]; then
     # TP=1 LOAD_DIR="/lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-843m-multi-1.1t-gtc-llr"
-    TP=8 LOAD_DIR="/lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-43b-multi-1.1t-gtc/tp8pp1"
+    # TP=8 LOAD_DIR="/lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/gpt3-43b-multi-1.1t-gtc/tp8pp1"
+    LOAD_DIR="/lustre/fs3/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/checkpoints/${SHARED_LOAD_DIR}"
 else
-    echo "m-lm only, right now."
-    exit 1
-
-    ARGS+=" --transformer-impl transformer_engine"
+    # ARGS+=" --transformer-impl transformer_engine"
+    ARGS+=" --transformer-impl ${TRANSFORMER_IMPL}"
     ARGS+=" --use-mcore-models"
-    LOAD_DIR="/lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/843m"
+
+    # LOAD_DIR="/lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/843m"
+    LOAD_DIR="/lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter/scripts/checkpoints/${TRANSFORMER_IMPL}/${SIZE}"
 fi
 
 # >>>
@@ -157,52 +166,103 @@ LOAD_OPTION+=" --skip-train"
 #     --log-num-zeros-in-grad \
 #     --bf16 \
 # "
+# ARGS+=" \
+#     --load ${LOAD_DIR} ${LOAD_OPTION} \
+#     \
+#     --use-flash-attn \
+#     --apply-layernorm-1p \
+#     --untie-embeddings-and-output-weights \
+#     --disable-bias-linear \
+#     --no-position-embedding \
+#     --use-rotary-position-embeddings \
+#     --rotary-percent 0.5 \
+#     --swiglu \
+#     --recompute-activations \
+#     --attention-dropout 0.0 \
+#     --hidden-dropout 0.0 \
+#     --exit-duration-in-mins 220 \
+#     --tensor-model-parallel-size ${TP} \
+#     --pipeline-model-parallel-size 1 \
+#     --num-layers 48 \
+#     --hidden-size 8192 \
+#     --num-attention-heads 64 \
+#     --seq-length 4096 \
+#     --max-position-embeddings 4096 \
+#     --micro-batch-size 1 \
+#     --global-batch-size 768 \
+#     --train-samples 25000000 \
+#     --lr-decay-samples 23750000 \
+#     --lr-warmup-samples 16667 \
+#     --lr 9.0e-6 \
+#     --min-lr 9e-7 \
+#     --lr-decay-style cosine \
+#     --log-interval 1 \
+#     --eval-iters 32 \
+#     --eval-interval 1260 \
+#     --tokenizer-type GPTSentencePieceTokenizer \
+#     --tokenizer-model /lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/utils/mt_nlg_plus_multilingual_ja_zh_the_stack_frac_015_256k.model \
+#     --data-path ${DATA_BLEND} \
+#     --split 98,2,0 \
+#     --clip-grad 1.0 \
+#     --weight-decay 0.1 \
+#     --adam-beta1 0.9 \
+#     --adam-beta2 0.95 \
+#     --init-method-std 0.007 \
+#     --log-params-norm \
+#     --log-num-zeros-in-grad \
+#     --bf16 \
+#     --use-distributed-optimizer \
+# "
+
+
+#     --use-flash-attn \
+#     --apply-layernorm-1p \
+#     --untie-embeddings-and-output-weights \
+#     --disable-bias-linear \
+#     --no-position-embedding \
+#     --use-rotary-position-embeddings \
+#     --rotary-percent 0.5 \
+#     --swiglu \
+#     --attention-dropout 0.0 \
+#     --hidden-dropout 0.0 \
+#     --tensor-model-parallel-size ${TP} \
+#     --pipeline-model-parallel-size 1 \
+#     --num-layers 48 \
+#     --hidden-size 8192 \
+#     --num-attention-heads 64 \
+#     --seq-length 4096 \
+#     --max-position-embeddings 4096 \
+#     --tokenizer-type GPTSentencePieceTokenizer \
+#     --clip-grad 1.0 \
+#     --weight-decay 0.1 \
+#     --adam-beta1 0.9 \
+#     --adam-beta2 0.95 \
+#     --init-method-std 0.007 \
+#     --bf16 \
+#     --use-distributed-optimizer \
+
+#     --recompute-activations \
 ARGS+=" \
     --load ${LOAD_DIR} ${LOAD_OPTION} \
+    --use-checkpoint-args \
     \
-    --use-flash-attn \
-    --apply-layernorm-1p \
-    --untie-embeddings-and-output-weights \
-    --disable-bias-linear \
-    --no-position-embedding \
-    --use-rotary-position-embeddings \
-    --rotary-percent 0.5 \
-    --swiglu \
-    --recompute-activations \
-    --attention-dropout 0.0 \
-    --hidden-dropout 0.0 \
     --exit-duration-in-mins 220 \
-    --tensor-model-parallel-size ${TP} \
-    --pipeline-model-parallel-size 1 \
-    --num-layers 48 \
-    --hidden-size 8192 \
-    --num-attention-heads 64 \
-    --seq-length 4096 \
-    --max-position-embeddings 4096 \
     --micro-batch-size 1 \
     --global-batch-size 768 \
+    --tokenizer-model /lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/utils/mt_nlg_plus_multilingual_ja_zh_the_stack_frac_015_256k.model \
+    --data-path ${DATA_BLEND} \
     --train-samples 25000000 \
+    --eval-iters 32 \
+    --eval-interval 1260 \
+    --split 98,2,0 \
     --lr-decay-samples 23750000 \
     --lr-warmup-samples 16667 \
     --lr 9.0e-6 \
     --min-lr 9e-7 \
     --lr-decay-style cosine \
     --log-interval 1 \
-    --eval-iters 32 \
-    --eval-interval 1260 \
-    --tokenizer-type GPTSentencePieceTokenizer \
-    --tokenizer-model /lustre/fsw/portfolios/adlr/projects/adlr_nlp_arch/adlr_nlp_sharing/nvllm-1.1t/utils/mt_nlg_plus_multilingual_ja_zh_the_stack_frac_015_256k.model \
-    --data-path ${DATA_BLEND} \
-    --split 98,2,0 \
-    --clip-grad 1.0 \
-    --weight-decay 0.1 \
-    --adam-beta1 0.9 \
-    --adam-beta2 0.95 \
-    --init-method-std 0.007 \
     --log-params-norm \
     --log-num-zeros-in-grad \
-    --bf16 \
-    --use-distributed-optimizer \
 "
 
 ######## retro. ########
@@ -238,7 +298,6 @@ SCRIPT=pretrain_gpt.py
 #      --output=$LOG_DIR/"%j_${NAME}_r${ADD_RETRIEVER}.log" \
 #      sh -c "${CMD}"
 
-# NPROCS=8
 CMD="\
     cd ${REPO_DIR} && \
     export PYTHONPATH=${REPO_DIR}:/home/lmcafee/src && \
