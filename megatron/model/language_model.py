@@ -16,6 +16,10 @@ from .transformer import ParallelTransformer
 from .utils import get_linear_layer
 from .utils import init_method_normal, scaled_init_method_normal
 
+# >>>
+from lutil import pax
+# <<<
+
 
 def parallel_lm_logits(input_, word_embeddings_weight, parallel_output,
                        bias=None):
@@ -262,9 +266,15 @@ class Embedding(MegatronModule):
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
 
+        # pax("state_dict", {
+        #     # "word key" : self._word_embeddings_key,
+        #     # "pos key" : self._position_embeddings_key,
+        # })
+
         # Word embedding.
         if self._word_embeddings_key in state_dict:
             state_dict_ = state_dict[self._word_embeddings_key]
+            # pax("state_dict_")
         else:
             # for backward compatibility.
             state_dict_ = {}
@@ -272,6 +282,7 @@ class Embedding(MegatronModule):
                 if 'word_embeddings' in key:
                     state_dict_[key.split('word_embeddings.')[1]] \
                         = state_dict[key]
+            pax("state_dict_")
         self.word_embeddings.load_state_dict(state_dict_, strict=strict)
 
         # Position embedding.
@@ -285,10 +296,7 @@ class Embedding(MegatronModule):
                     if 'position_embeddings' in key:
                         state_dict_[key.split('position_embeddings.')[1]] \
                             = state_dict[key]
-            # >>>
-            from lutil import pax
             pax("state_dict_")
-            # <<<
             self.position_embeddings.load_state_dict(state_dict_, strict=strict)
 
         # Tokentype embedding.
@@ -566,22 +574,23 @@ class TransformerLanguageModel(MegatronModule):
     def load_state_dict(self, state_dict, strict=True):
         """Customized load."""
 
-        # >>>
-        from lutil import pax
-        pax("state_dict")
-        # <<<
+        # pax("state_dict")
 
         # Embedding.
         if self.pre_process:
             if self._embedding_key in state_dict:
                 state_dict_ = state_dict[self._embedding_key]
+                # pax("state_dict, state_dict_", {"_embedding_key": self._embedding_key})
             else:
+                raise Exception("hi.")
                 # for backward compatibility.
                 state_dict_ = {}
                 for key in state_dict.keys():
                     if '_embeddings' in key:
                         state_dict_[key] = state_dict[key]
+            # pax("state_dict_", {"embedding": list(self.embedding.parameters())})
             self.embedding.load_state_dict(state_dict_, strict=strict)
+            # pax("state_dict_", {"embedding": list(self.embedding.parameters())})
 
         # Encoder.
         if self.add_encoder:

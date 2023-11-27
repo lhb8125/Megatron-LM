@@ -402,8 +402,8 @@ def validate_args(args, defaults={}):
     # })
     # <<<
     # >>>
-    # if not args.add_position_embedding and args.position_embedding_type != 'rope':
-    if not args.add_position_embedding and args.position_embedding_type not in ('rope', 'learned_absolute'):
+    if not args.add_position_embedding and args.position_embedding_type != 'rope':
+    # if not args.add_position_embedding and args.position_embedding_type not in ('rope', 'learned_absolute'):
     # <<<
         raise RuntimeError('--no-position-embedding is deprecated, use --position-embedding-type')
 

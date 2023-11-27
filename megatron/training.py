@@ -103,6 +103,18 @@ def pretrain(train_valid_test_dataset_provider,
     # from scripts.compare_gpt_models import compare_gpt_models
     # compare_gpt_models()
     # raise Exception("hi.")
+
+    if torch.distributed.get_rank() == 0:
+        def default_dump(obj):
+            if isinstance(obj, torch.dtype):
+                return str(obj)
+            else:
+                raise Exception("specialize for <%s>." % type(obj).__name__)
+
+        import json
+        print(json.dumps(vars(get_args()), indent=2, sort_keys=True, default=default_dump))
+    torch.distributed.barrier()
+    exit()
     # <<<
 
     # Adjust the startup time so it reflects the largest value.

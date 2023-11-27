@@ -377,6 +377,10 @@ def save_checkpoint(queue, args):
     else:
         raise Exception(f'unrecognized model type: {args.model_type}')
 
+    # >>>
+    # print_argsssssss(margs)
+    # <<<
+
     # fake initializing distributed
     mpu.set_tensor_model_parallel_world_size(args.target_tensor_parallel_size)
     mpu.set_pipeline_model_parallel_world_size(args.target_pipeline_parallel_size)

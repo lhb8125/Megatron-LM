@@ -8,7 +8,7 @@ import types
 import torch
 
 # >>>
-from lutil import pax
+from lutil import pax, print_args
 # <<<
 
 
@@ -22,8 +22,22 @@ def add_arguments(parser):
                        'trim padding from the embedding table.')
     group.add_argument('--megatron-path', type=str, default=None,
                        help='Base directory of deepspeed repository')
+    # >>>
+    # group.add_argument('--num-layers-per-virtual-pipeline-stage',
+    #                    type=int,
+    #                    # default=None,
+    #                    default=1,
+    #                    help='Number of layers per virtual pipeline stage')
+    group.add_argument('--position-embedding-type',
+                       type=str,
+                       default='learned_absolute',
+                       choices=['learned_absolute', 'rope'],
+                       help='Position embedding type.')
+    # <<<
 
 def _load_checkpoint(queue, args):
+
+    # pax("args")
 
     # Search in directory above this
     sys.path.append(os.path.abspath(
@@ -58,12 +72,17 @@ def _load_checkpoint(queue, args):
                 '--no-save-optim',
                 '--no-save-rng',
                 '--no-initialization',
-                '--load', args.load_dir
+                '--load', args.load_dir,
+                # >>>
+                '--position-embedding-type', args.position_embedding_type,
+                # <<<
                 ]
 
     margs = parse_args()
     margs, checkpoint_args = load_args_from_checkpoint(margs)
 
+    # pax({"vp": margs.num_layers_per_virtual_pipeline_stage})
+    # pax({"pos emb ty": margs.position_embedding_type})
     # >>>
     # pax({
     #     "margs / apply_query_key_layer_scaling" :
@@ -133,6 +152,10 @@ def _load_checkpoint(queue, args):
         margs.model_type = ModelType.encoder_or_decoder
     else:
         raise Exception(f'unrecognized model type: {args.model_type}')
+
+    # >>>
+    # print_args(margs)
+    # <<<
 
     # supress warning about torch.distributed not being initialized
     module.MegatronModule.embedding_warning_printed = True
