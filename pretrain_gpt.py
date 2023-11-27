@@ -32,10 +32,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     gpt_layer_local_spec_moe,
 )
 
-# >>>
-from lutil import pax, print_model
-# <<<
-
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.model.GPTModel]:
     """Builds the model.
@@ -51,17 +47,11 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         Union[GPTModel, megatron.model.GPTModel]: The returned model
     """
     args = get_args()
-    # >>>
-    # pax({"init": args.perform_initialization})
-    # <<<
     use_te = args.transformer_impl == "transformer_engine"
 
     print_rank_0('building GPT model ...')
     config = core_transformer_config_from_args(get_args())
 
-    # >>>
-    # pax({"use_mcore_models": args.use_mcore_models})
-    # <<<
     if args.use_mcore_models:
         if args.model_spec is not None:
             transformer_layer_spec = import_module(args.model_spec)
@@ -77,13 +67,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 else:
                     transformer_layer_spec = gpt_layer_local_spec_moe
 
-        # >>>
-        # pax({
-        #     "args / init" : args.perform_initialization,
-        #     "config / init" : config.perform_initialization,
-        # })
-        # raise Exception("no.")
-        # <<<
         model = GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
@@ -97,14 +80,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             position_embedding_type=args.position_embedding_type,
             rotary_percent=args.rotary_percent
         )
-        # >>>
-        # pax("args")
-        # pax("model")
-        # <<<
-        # >>>
-        # pax({"use_mcore_models": args.use_mcore_models})
-        # raise Exception("hi.")
-        # <<<
     else:
         assert(args.context_parallel_size == 1), "Context parallelism is only supported with Megatron Core!"
 
@@ -115,16 +90,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             pre_process=pre_process,
             post_process=post_process
         )
-        # >>>
-        # raise Exception("hi.")
-        # <<<
-
-    # >>>
-    # from lutil import pax, print_model
-    # print_model("model", model)
-    # pax({"use_mcore_models": args.use_mcore_models})
-    # exit()
-    # <<<
 
     return model
 

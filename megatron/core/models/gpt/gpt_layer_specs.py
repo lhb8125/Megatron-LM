@@ -53,10 +53,7 @@ gpt_layer_local_spec = ModuleSpec(
             ),
         ),
         self_attn_bda=get_bias_dropout_add,
-        # >>>
         pre_mlp_layernorm=FusedLayerNorm,
-        # pre_cross_attn_layernorm=FusedLayerNorm,
-        # <<<
         mlp=ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(

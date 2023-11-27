@@ -84,6 +84,7 @@ class CudaRNGStatesTracker:
     def reset(self):
         """Set to the initial state (no tracker)."""
 
+        # Track if initialized.
         self._is_initialized = False
 
         # Map from a string name to the cuda rng state.
@@ -150,9 +151,6 @@ _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
 
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
-    # >>>
-    # raise Exception("hi.")
-    # <<<
     return _CUDA_RNG_STATE_TRACKER
 
 

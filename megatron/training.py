@@ -49,10 +49,6 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 
-# >>>
-from lutil import pax, print_args
-# <<<
-
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -103,16 +99,6 @@ def pretrain(train_valid_test_dataset_provider,
     # Set pytorch JIT layer fusion options and warmup JIT functions.
     set_jit_fusion_options()
 
-    # >>>
-    # from scripts.compare_gpt_models import compare_gpt_models
-    # compare_gpt_models()
-    # raise Exception("hi.")
-    # <<<
-
-    # >>>
-    # print_args(get_args())
-    # <<<
-
     # Adjust the startup time so it reflects the largest value.
     # This will be closer to what scheduler will see (outside of
     # image ... launches.
@@ -136,12 +122,6 @@ def pretrain(train_valid_test_dataset_provider,
     print_datetime('after model, optimizer, and learning rate '
                    'scheduler are built')
     config = get_model_config(model[0])
-
-    # >>>
-    # from lutil import print_model
-    # print_model("model", model[0])
-    # exit()
-    # <<<
 
     # Data stuff.
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
@@ -281,22 +261,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 post_process=post_process,
                 add_encoder=add_encoder,
                 add_decoder=add_decoder)
-            # >>>
-            from lutil import print_model
-            # print_model("model", model)
-            raise Exception("hi.")
-            # <<<
         else:
             model = model_provider_func(
                 pre_process=pre_process,
                 post_process=post_process
             )
-            # >>>
-            # from lutil import pax, print_model
-            # pax({"model_type": model_type}, "model_provider_func")
-            # print_model("model", model)
-            # raise Exception("hi.")
-            # <<<
         model.model_type = model_type
 
     if not isinstance(model, list):
@@ -304,14 +273,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Disallow training and inference with Transformer Engine
     # for non-GPT models
-    # >>>
-    # from lutil import pax
-    # pax("model")
-    # <<<
-    # >>>
-    # args.allow_transformer_engine = all([type(m) == GPTModel for m in model])
     args.allow_transformer_engine = all([isinstance(m, (GPTModel_mlm, GPTModel_mcore)) for m in model])
-    # <<<
     assert args.allow_transformer_engine or args.transformer_impl == 'local', \
         'Transformer Engine is only approved for GPT models'
 
@@ -421,12 +383,6 @@ def setup_model_and_optimizer(model_provider_func,
 
     model = get_model(model_provider_func, model_type)
     unwrapped_model = unwrap_model(model)
-
-    # >>>
-    # from lutil import print_model
-    # print_model("model", unwrapped_model[0])
-    # exit()
-    # <<<
 
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,
                                        scale_lr_cond, lr_mult)
