@@ -26,15 +26,10 @@ from megatron.utils import (
 )
 from megatron.arguments import core_transformer_config_from_args
 from megatron.core.models.gpt.gpt_layer_specs import (
-<<<<<<< HEAD
-    gpt_layer_with_transformer_engine_spec,
-    gpt_layer_with_transformer_engine_spec_moe,
-    gpt_layer_local_spec,
-    gpt_layer_local_spec_moe,
-=======
     get_gpt_layer_with_transformer_engine_spec,
-    gpt_layer_with_transformer_engine_spec_moe
->>>>>>> origin/main
+    gpt_layer_with_transformer_engine_spec_moe,
+    get_gpt_layer_local_spec,
+    gpt_layer_local_spec_moe,
 )
 
 
