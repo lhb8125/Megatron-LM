@@ -416,8 +416,11 @@ def train_step(forward_step_func, data_iterator,
     timers = get_timers()
 
     # Set grad to zero.
-    for partition in model:
-        partition.zero_grad_buffer()
+    for model_chunk in model:
+        # If using distributed optimizer, don't zero buffer here; zeroing of buffer is
+        # handled automatically by the optimizer after all-gathers finish.
+        # Otherwise, zero the buffer.
+        model_chunk.zero_grad_buffer(zero_buffer=(not args.use_distributed_optimizer))
     optimizer.zero_grad()
 
     # Forward pass.
@@ -445,10 +448,6 @@ def train_step(forward_step_func, data_iterator,
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
     timers('optimizer').stop()
-
-    # Gather params.
-    if update_successful:
-        optimizer.gather_model_params(args, timers)
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
@@ -721,6 +720,11 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             config.grad_sync_func = [model_chunk.start_grad_sync for model_chunk in model]
             if len(model) == 1:
                 config.grad_sync_func = config.grad_sync_func[0]
+    if args.overlap_param_gather and args.delay_param_gather:
+        config.param_sync_func = [lambda x: optimizer.finish_param_sync(model_index, x)
+                                  for model_index in range(len(model))]
+        if len(model) == 1:
+            config.param_sync_func = config.param_sync_func[0]
     config.finalize_model_grads_func = finalize_model_grads
 
     timers('interval-time', log_level=0).start(barrier=True)
@@ -777,6 +781,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         # Evaluation
         if args.eval_interval and iteration % args.eval_interval == 0 and \
            args.do_valid:
+            timers('interval-time').stop()
             if args.manual_gc and args.manual_gc_eval:
                 # Collect all objects.
                 gc.collect()
@@ -788,6 +793,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             if args.manual_gc and args.manual_gc_eval:
                 # Collect only the objects created and used in evaluation.
                 gc.collect(generation=0)
+            timers('interval-time', log_level=0).start(barrier=True)
 
         # Checkpointing
         saved_checkpoint = False
@@ -802,9 +808,11 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
         if args.save and args.save_interval and \
            iteration % args.save_interval == 0:
+            timers('interval-time').stop()
             save_checkpoint_and_time(iteration, model, optimizer,
                                      opt_param_scheduler)
             saved_checkpoint = True
+            timers('interval-time', log_level=0).start(barrier=True)
 
         # Exiting based on duration
         if args.exit_duration_in_mins:
@@ -864,6 +872,9 @@ def evaluate(forward_step_func,
              verbose=False):
     """Evaluation."""
     args = get_args()
+    timers = get_timers()
+
+    timers('evaluate', log_level=0).start(barrier=True)
 
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
         compute_feature_bank(model)
@@ -938,9 +949,6 @@ def evaluate(forward_step_func,
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True,
                 collect_non_loss_data=True)
-        
-        
-
 
     # Move model back to the train mode.
     for model_module in model:
@@ -948,6 +956,9 @@ def evaluate(forward_step_func,
 
     for key in total_loss_dict:
         total_loss_dict[key] /= args.eval_iters * eval_num_microbatches
+
+    timers('evaluate').stop()
+    timers.log(['evaluate'])
 
     return total_loss_dict, collected_non_loss_data, False
 
