@@ -1,69 +1,96 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
-from abc import ABC, abstractmethod
 
-class ModelSetter(ABC):
+class ModelSetter:
+    '''Model parameter setter.
+
+    See convert.py for a full list of supported parameters and their names.
+    '''
 
     @classmethod
     def set_tensor(cls, dst, src):
+        '''Copy (in-place) src tensor to dst tensor.'''
         if src is not None:
             dst.data.copy_(src)
 
     @classmethod
-    @abstractmethod
     def has_position_embeddings(cls, model):
-        pass
+        '''
+        Return True if learned parameters exist for position embeddings (e.g.,
+        learned absolute), and False otherwise (e.g., RoPE).
+        '''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
     def set_embeddings(
         cls,
         model,
         word=None,
         pos=None,
     ):
-        pass
+        '''Set word and position embeddings.'''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
+    def set_output_word_embeddings(
+        cls,
+        model,
+        emb=None,
+    ):
+        '''Set output word embeddings for final pipeline stage.'''
+        raise NotImplementedError
+
+    @classmethod
+    def set_layer(
+        cls,
+        model,
+        layer_idx,
+        self_attn_norm_weight=None,
+        self_attn_norm_bias=None,
+        self_attn_qkv_weight=None,
+        self_attn_qkv_bias=None,
+        self_attn_proj_weight=None,
+        self_attn_proj_bias=None,
+        mlp_norm_weight=None,
+        mlp_norm_bias=None,
+        mlp_fc1_weight=None,
+        mlp_fc1_bias=None,
+        mlp_fc2_weight=None,
+        mlp_fc2_bias=None,
+    ):
+        '''Set layer parameters.'''
+        raise NotImplementedError
+
+    @classmethod
     def set_final_norm(
         cls,
         model,
         weight=None,
         bias=None,
     ):
-        pass
+        '''Set final norm parameters (i.e., after last transformer layer).'''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
-    def set_output_word_embeddings(
-        cls,
-        model,
-        emb=None,
-    ):
-        pass
-
-    @classmethod
-    @abstractmethod
     def set_output_layer(
         cls,
         model,
         weight=None,
     ):
-        pass
+        '''Set output (i.e., 'dense') weights.'''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
     def set_pooler(
         cls,
         model,
         weight=None,
         bias=None,
     ):
-        pass
+        '''Set pooler parameters (e.g., for Bert).'''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
     def set_lm_head(
         cls,
         model,
@@ -72,14 +99,15 @@ class ModelSetter(ABC):
         norm_weight=None,
         norm_bias=None,
     ):
-        pass
+        '''Set LM head parameters.'''
+        raise NotImplementedError
 
     @classmethod
-    @abstractmethod
     def set_binary_head(
         cls,
         model,
         weight=None,
         bias=None,
     ):
-        pass
+        '''Set binary head parameters.'''
+        raise NotImplementedError
