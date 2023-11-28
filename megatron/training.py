@@ -114,39 +114,6 @@ def pretrain(train_valid_test_dataset_provider,
     args = get_args()
     timers = get_timers()
 
-    # >>>
-    # from lutil import pax
-    # pax()
-    # pax({
-    #     "use_flash_attn" : args.use_flash_attn,
-    #     "apply_layernorm_1p" : args.apply_layernorm_1p,
-    #     "untie_embeddings_and_output_weights" : args.untie_embeddings_and_output_weights,
-    #     "add_bias_linear" : args.add_bias_linear,
-    #     "add_position_embedding" : args.add_position_embedding,
-    #     "position_embedding_type" : args.position_embedding_type,
-    #     "use_rotary_position_embeddings" : args.use_rotary_position_embeddings,
-    #     "rotary_percent 0.5" : args.rotary_percent,
-    #     "swiglu" : args.swiglu,
-    #     "attention_dropout 0.0" : args.attention_dropout,
-    #     "hidden_dropout 0.0" : args.hidden_dropout,
-    #     "tensor_model_parallel_size ${TP}" : args.tensor_model_parallel_size,
-    #     "pipeline_model_parallel_size 1" : args.pipeline_model_parallel_size,
-    #     "num_layers 48" : args.num_layers,
-    #     "hidden_size 8192" : args.hidden_size,
-    #     "num_attention_heads 64" : args.num_attention_heads,
-    #     "seq_length 4096" : args.seq_length,
-    #     "max_position_embeddings 4096" : args.max_position_embeddings,
-    #     "tokenizer_type GPTSentencePieceTokenizer" : args.tokenizer_type,
-    #     "clip_grad 1.0" : args.clip_grad,
-    #     "weight_decay 0.1" : args.weight_decay,
-    #     "adam_beta1 0.9" : args.adam_beta1,
-    #     "adam_beta2 0.95" : args.adam_beta2,
-    #     "init_method_std 0.007" : args.init_method_std,
-    #     "use_distributed_optimizer" : args.use_distributed_optimizer,
-    #     "recompute_granularity" : args.recompute_granularity,
-    # })
-    # <<<
-
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
@@ -1014,10 +981,6 @@ def evaluate_and_print_results(prefix, forward_step_func,
     # Timelimit hit during evaluation
     if timelimit:
         return
-    # >>>
-    # string = ' validation loss at {} | '.format(prefix)
-    string = "%d, %4s, %5s | " % (args.tensor_model_parallel_size * sum(p.numel() for m in model for p in m.parameters()), "core" if args.use_mcore_models else "mlm", "local" if args.transformer_impl == "local" else "te")
-    # <<<
     for key in total_loss_dict:
         string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
         ppl = math.exp(min(20, total_loss_dict[key].item()))
