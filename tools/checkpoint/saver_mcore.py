@@ -6,16 +6,13 @@ from pkg_resources import packaging
 import sys
 import torch
 
+from .setter import ModelSetter
 
-class MCoreSetter:
 
-    @classmethod
-    def set_tensor(cls, dst, src):
-        if src is not None:
-            dst.data.copy_(src)
+class MCoreSetter(ModelSetter):
 
     @classmethod
-    def has_position_embeddings(cls, model):
+    def has_position_embeddingss(cls, model):
         return hasattr(model.embedding, "position_embeddings")
 
     @classmethod
