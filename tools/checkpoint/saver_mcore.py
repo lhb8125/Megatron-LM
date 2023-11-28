@@ -6,10 +6,6 @@ from pkg_resources import packaging
 import sys
 import torch
 
-# >>>
-from lutil import pax, print_model
-# <<<
-
 
 class MCoreSetter:
 
@@ -49,11 +45,7 @@ class MCoreSetter:
         model,
         emb=None,
     ):
-        # >>>
-        print_model("model", model)
-        exit()
-        # <<<
-        cls.set_tensor(model.word_embeddings.weight, weight)
+        cls.set_tensor(model.embedding.word_embeddings.weight, emb)
 
     @classmethod
     def set_output_layer(
@@ -350,9 +342,7 @@ def save_checkpoint(queue, args):
     margs.save = args.save_dir
     margs.tensorboard_dir = None
     margs.tokenizer_model = None
-    # >>>
     margs.transformer_impl = args.transformer_impl
-    # <<<
 
     set_global_variables(margs, build_tokenizer=False)
 
@@ -376,10 +366,6 @@ def save_checkpoint(queue, args):
         margs.model_type = ModelType.encoder_or_decoder
     else:
         raise Exception(f'unrecognized model type: {args.model_type}')
-
-    # >>>
-    # print_argsssssss(margs)
-    # <<<
 
     # fake initializing distributed
     mpu.set_tensor_model_parallel_world_size(args.target_tensor_parallel_size)
@@ -542,9 +528,6 @@ def save_checkpoint(queue, args):
                     bias=final_norm_bias if md.norm_has_bias else None,
                 )
                 if pp_rank != 0 and not md.output_layer:
-                    # >>>
-                    raise Exception("hi.")
-                    # <<<
                     # Copy word embeddings to final pipeline rank
                     setter.set_output_word_embeddings(
                         model,
@@ -568,9 +551,6 @@ def save_checkpoint(queue, args):
 
             msg = queue_get()
             if msg != "done" and msg["name"] == "pooler":
-                # >>>
-                raise Exception("hi.")
-                # <<<
                 if not hasattr(models[0], 'pooler'):
                     print("ERROR: got a pooler, but model does not have one")
                     exit(1)
@@ -578,17 +558,17 @@ def save_checkpoint(queue, args):
                 pooler_weight = msg.pop("weight")
                 pooler_bias = msg.pop("bias")
                 for tp_rank in range(args.target_tensor_parallel_size):
-                    models[tp_rank].pooler.dense.weight.data.copy_(pooler_weight)
-                    models[tp_rank].pooler.dense.bias.data.copy_(pooler_bias)
+                    setter.set_pooler(
+                        model=models[tp_rank],
+                        weight=pooler_weight,
+                        bias=pooler_bias,
+                    )
                 del pooler_weight
                 del pooler_bias
                 check_message(msg)
                 msg = queue_get()
 
             if msg != "done" and msg["name"] == "lm head":
-                # >>>
-                raise Exception("hi.")
-                # <<<
                 if not hasattr(models[0], 'lm_head'):
                     print("ERROR: got an lm head, but model does not have one")
                     exit(1)
@@ -599,18 +579,17 @@ def save_checkpoint(queue, args):
                 if md.norm_has_bias:
                     lm_head_norm_bias = msg.pop("norm bias")
                 for tp_rank in range(args.target_tensor_parallel_size):
-                    models[tp_rank].lm_head.dense.weight.data.copy_(lm_head_dense_weight)
-                    models[tp_rank].lm_head.dense.bias.data.copy_(lm_head_dense_bias)
-                    models[tp_rank].lm_head.norm.weight.data.copy_(lm_head_norm_weight)
-                    if md.norm_has_bias:
-                        models[tp_rank].lm_head.norm.bias.data.copy_(lm_head_norm_bias)
+                    setter.set_lm_head(
+                        model=models[tp_rank],
+                        dense_weight=lm_head_dense_weight,
+                        dense_bias=lm_head_dense_bias,
+                        norm_weight=lm_head_norm_weight,
+                        norm_bias=lm_head_norm_bias if md.norm_has_bias else None,
+                    )
                 check_message(msg)
                 msg = queue_get()
 
             if msg != "done" and msg["name"] == "binary head":
-                # >>>
-                raise Exception("hi.")
-                # <<<
                 if not hasattr(models[0], 'binary_head'):
                     print("ERROR: got a binary head, but model does not have one")
                     exit(1)
@@ -618,8 +597,11 @@ def save_checkpoint(queue, args):
                 binary_head_weight = msg.pop("weight")
                 binary_head_bias = msg.pop("bias")
                 for tp_rank in range(args.target_tensor_parallel_size):
-                    models[tp_rank].binary_head.weight.data.copy_(binary_head_weight)
-                    models[tp_rank].binary_head.bias.data.copy_(binary_head_bias)
+                    setter.set_binary_head(
+                        model=models[tp_rank],
+                        weight=binary_head_weight,
+                        bias=binary_head_bias,
+                    )
                 check_message(msg)
                 msg = queue_get()
 

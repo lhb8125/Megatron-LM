@@ -7,10 +7,6 @@ import types
 
 import torch
 
-# >>>
-from lutil import pax, print_args
-# <<<
-
 
 def add_arguments(parser):
     group = parser.add_argument_group(title='Megatron loader')
@@ -22,22 +18,13 @@ def add_arguments(parser):
                        'trim padding from the embedding table.')
     group.add_argument('--megatron-path', type=str, default=None,
                        help='Base directory of deepspeed repository')
-    # >>>
-    # group.add_argument('--num-layers-per-virtual-pipeline-stage',
-    #                    type=int,
-    #                    # default=None,
-    #                    default=1,
-    #                    help='Number of layers per virtual pipeline stage')
     group.add_argument('--position-embedding-type',
                        type=str,
                        default='learned_absolute',
                        choices=['learned_absolute', 'rope'],
                        help='Position embedding type.')
-    # <<<
 
 def _load_checkpoint(queue, args):
-
-    # pax("args")
 
     # Search in directory above this
     sys.path.append(os.path.abspath(
@@ -73,48 +60,15 @@ def _load_checkpoint(queue, args):
                 '--no-save-rng',
                 '--no-initialization',
                 '--load', args.load_dir,
-                # >>>
                 '--position-embedding-type', args.position_embedding_type,
-                # <<<
                 ]
 
     margs = parse_args()
     margs, checkpoint_args = load_args_from_checkpoint(margs)
 
-    # pax({"vp": margs.num_layers_per_virtual_pipeline_stage})
-    # pax({"pos emb ty": margs.position_embedding_type})
-    # >>>
-    # pax({
-    #     "margs / apply_query_key_layer_scaling" :
-    #     margs.apply_query_key_layer_scaling,
-    #     "checkpoint_args / apply_query_key_layer_scaling" :
-    #     checkpoint_args.apply_query_key_layer_scaling,
-    #     "margs / use_rotary_position_embeddings" :
-    #     margs.use_rotary_position_embeddings,
-    #     "checkpoint_args / use_rotary_position_embeddings" :
-    #     checkpoint_args.use_rotary_position_embeddings,
-    # })
-    # pax("margs, checkpoint_args")
-    # <<<
-
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
-
-    # >>>
-    # margs.use_rotary_position_embeddings = True
-    # checkpoint_args.use_rotary_position_embeddings = True
-    # pax({
-    #     "load" : "/".join(margs.load.strip("/").split("/")[-2:]),
-    #     "margs": {k:v for k,v in vars(margs).items() if "position" in k.lower()},
-    #     "chkpt": {k:v for k,v in vars(checkpoint_args).items() if "position" in k.lower()},
-    # })
-    # pax({
-    #     "margs / load" : margs.load,
-    #     "margs / add_position_embedding" : margs.add_position_embedding,
-    #     "margs / position_embedding_type" : margs.position_embedding_type,
-    # })
-    # <<<
 
     margs = validate_args(margs)
 
@@ -153,10 +107,6 @@ def _load_checkpoint(queue, args):
     else:
         raise Exception(f'unrecognized model type: {args.model_type}')
 
-    # >>>
-    # print_args(margs)
-    # <<<
-
     # supress warning about torch.distributed not being initialized
     module.MegatronModule.embedding_warning_printed = True
 
@@ -184,27 +134,15 @@ def _load_checkpoint(queue, args):
                         pre_process=pre_process,
                         post_process=post_process
                     ).to(dtype)
-                    # >>>
-                    pax("this_model")
-                    # <<<
                     model_.append(this_model)
             else:
                 pre_process = mpu.is_pipeline_first_stage()
                 post_process = mpu.is_pipeline_last_stage()
                 model_rank = 0
-                # >>>
-                # margs.use_mcore_models = True
-                # pax({"use_mcore_models": margs.use_mcore_models})
-                # <<<
                 model_ = [model_provider(pre_process, post_process).to(dtype)]
-                # >>>
-                # pax("model_")
-                # <<<
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
-            # >>>
             margs.exit_on_missing_checkpoint = True
-            # <<<
             load_checkpoint(model_, None, None)
 
             if consumed_train_samples is not None:
@@ -282,12 +220,6 @@ def _load_checkpoint(queue, args):
 
     md.consumed_train_samples = consumed_train_samples
     md.consumed_valid_samples = consumed_valid_samples
-    # >>>
-    # pax({
-    #     "md" : md,
-    #     "checkpoint_args" : md.checkpoint_args,
-    # })
-    # <<<
     queue.put(md)
 
     def queue_put(name, msg):
