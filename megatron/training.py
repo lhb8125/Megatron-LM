@@ -981,6 +981,7 @@ def evaluate_and_print_results(prefix, forward_step_func,
     # Timelimit hit during evaluation
     if timelimit:
         return
+    string = ' validation loss at {} | '.format(prefix)
     for key in total_loss_dict:
         string += '{} value: {:.6E} | '.format(key, total_loss_dict[key].item())
         ppl = math.exp(min(20, total_loss_dict[key].item()))
