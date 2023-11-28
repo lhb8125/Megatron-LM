@@ -124,7 +124,9 @@ class TELinear(te.pytorch.Linear):
             fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             tp_size=self.config.tensor_model_parallel_size,
-            get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
+            get_rng_state_tracker=get_cuda_rng_tracker
+            if get_cuda_rng_tracker().is_initialized()
+            else None,
             init_method=init_method,
             bias=bias,
             return_bias=self.te_return_bias,
@@ -213,7 +215,9 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             tp_size=self.config.tensor_model_parallel_size,
-            get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
+            get_rng_state_tracker=get_cuda_rng_tracker
+            if get_cuda_rng_tracker().is_initialized()
+            else None,
             init_method=init_method,
             bias=bias,
             return_bias=self.te_return_bias,
@@ -409,7 +413,9 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
             tp_size=self.config.tensor_model_parallel_size,
-            get_rng_state_tracker=get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None,
+            get_rng_state_tracker=get_cuda_rng_tracker
+            if get_cuda_rng_tracker().is_initialized()
+            else None,
             tp_group=get_tensor_model_parallel_group(check_initialized=False),
             layer_number=layer_number,
             **extra_kwargs,
