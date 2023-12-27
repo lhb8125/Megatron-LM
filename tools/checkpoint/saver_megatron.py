@@ -163,6 +163,9 @@ def save_checkpoint(queue, args):
 
     validate_args(margs)
 
+    margs.use_mcore_models = False
+    margs.transformer_impl = "local"
+    margs.fp8 = None
     set_global_variables(margs, build_tokenizer=False)
 
     # margs = megatron args
