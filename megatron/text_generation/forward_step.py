@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import torch
 
 from megatron import get_args
-from megatron.core import mpu, InferenceParams
+from megatron.core import mpu, InferenceParams, tensor_parallel
 from .communication import (
     send_to_next_pipeline_rank,
     recv_from_prev_pipeline_rank_)
@@ -97,11 +97,10 @@ def _forward_step_helper(model, tokens, position_ids, attention_mask,
     model.set_input_tensor(recv_buffer)
     output_tensor = model(tokens, position_ids, attention_mask,
                           inference_params=inference_params)
-
     # Send output to the next stage.
     send_to_next_pipeline_rank(output_tensor)
 
-    return output_tensor
+    return tensor_parallel.gather_from_tensor_model_parallel_region(output_tensor)
 
 
 
