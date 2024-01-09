@@ -84,7 +84,7 @@ class MCoreSetter(ModelSetter):
         bias=None,
     ):
         cls.set_tensor(model.binary_head.weight, weight)
-        cls.set_tensor(model.binary_head.bias, binary_head_bias)
+        cls.set_tensor(model.binary_head.bias, bias)
 
 
 class MCoreLocalSetter(MCoreSetter):
