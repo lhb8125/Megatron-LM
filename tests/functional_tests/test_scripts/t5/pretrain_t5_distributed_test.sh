@@ -87,13 +87,18 @@ torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     --transformer-impl $TRANSFORMER_IMPL \
     --use-mcore-models \
     --data-path $DATA_PATH \
-    --vocab-file /workspace/data/bert-large-cased-vocab.txt \
+    --vocab-file $VOCAB_PATH \
     --tokenizer-type BertWordPieceCase \
     --split 99982,9,9 \
     --save $CHECKPOINT_PATH \
     --load $CHECKPOINT_PATH \
-    --log-interval 100 \
     --tensorboard-dir ${TENSORBOARD_DIR} \
+    --log-params-norm \
+    --log-num-zeros-in-grad \
+    --log-validation-ppl-to-tensorboard \
+    --log-timers-to-tensorboard \
+    --timing-log-level 2 \
+    --log-interval 1 \
     --save-interval 5000 \
     --eval-interval 1000 \
     --eval-iters 10 \
