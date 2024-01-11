@@ -116,10 +116,16 @@ class TransformerBlock(MegatronModule):
             return build_module(layer_spec, config=self.config, layer_number=layer_number,)
 
         # offset is implicit in TransformerLayer
+        # >>>
+        from tqdm import tqdm
+        # <<<
         self.layers = torch.nn.ModuleList(
             [
                 build_layer(layer_spec, i + 1)
-                for i, layer_spec in enumerate(self.submodules.layer_specs)
+                # >>>
+                # for i, layer_spec in enumerate(self.submodules.layer_specs)
+                for i, layer_spec in enumerate(tqdm(self.submodules.layer_specs, "build layers"))
+                # <<<
             ]
         )
 

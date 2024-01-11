@@ -89,6 +89,11 @@ def set_attn_state(args, layer, hf_layer):
     dim = args.kv_channels
     assert nh % ng == 0
 
+    # >>>
+    # from lutil import pax
+    # pax("args")
+    # <<<
+
     # Copy weights (re-order dimensions for Megatron).
     attn.query_key_value.weight.data.copy_(torch.cat([ 
         hf_attn.q_proj.weight.reshape((ng, dim*nh//ng, -1)),

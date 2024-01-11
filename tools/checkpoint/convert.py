@@ -128,13 +128,22 @@ def main():
                         dest='checking')
 
     known_args, _ = parser.parse_known_args()
-    loader = load_plugin('loader', known_args.loader)
+    # >>>
+    # loader = load_plugin('loader', known_args.loader)
+    # +++
+    import loader_llama2_hf as loader
+    # <<<
     saver = load_plugin('saver', known_args.saver)
 
     loader.add_arguments(parser)
     saver.add_arguments(parser)
 
     args = parser.parse_args()
+
+    # >>>
+    # from lutil import pax
+    # pax("known_args, args")
+    # <<<
 
     queue = mp.Queue(maxsize=args.max_queue_size)
 
