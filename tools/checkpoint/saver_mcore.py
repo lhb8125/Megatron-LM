@@ -8,10 +8,6 @@ import torch
 
 from setter import ModelSetter
 
-# >>>
-from lutil import pax
-# <<<
-
 
 class MCoreSetter(ModelSetter):
 
@@ -242,10 +238,6 @@ def save_checkpoint(queue, args):
         exit(1)
 
     def queue_get(name=None):
-        # >>>
-        # if name is not None:
-        #     print(f"********* receiving {name}")
-        # <<<
         val = queue.get()
         if val == "exit":
             print("Loader exited, exiting saver")
