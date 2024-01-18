@@ -64,7 +64,10 @@ def _load_checkpoint(queue, args):
                 ]
 
     margs = parse_args()
-    margs, checkpoint_args = load_args_from_checkpoint(margs)
+    # >>>
+    # margs, checkpoint_args = load_args_from_checkpoint(margs)
+    margs, checkpoint_args = load_args_from_checkpoint(margs, exit_on_missing_checkpoint=True)
+    # <<<
 
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
