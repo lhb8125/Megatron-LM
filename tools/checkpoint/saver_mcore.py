@@ -34,7 +34,8 @@ class MCoreSetter(ModelSetter):
         bias=None,
     ):
         cls.set_tensor(model.decoder.final_layernorm.weight, weight)
-        cls.set_tensor(model.decoder.final_layernorm.bias, bias)
+        if bias is not None:
+            cls.set_tensor(model.decoder.final_layernorm.bias, bias)
 
     @classmethod
     def set_output_word_embeddings(
@@ -60,7 +61,8 @@ class MCoreSetter(ModelSetter):
         bias=None,
     ):
         cls.set_tensor(model.pooler.dense.weight, weight)
-        cls.set_tensor(model.pooler.dense.bias, bias)
+        if bias is not None:
+            cls.set_tensor(model.pooler.dense.bias, bias)
 
     @classmethod
     def set_lm_head(
@@ -71,10 +73,14 @@ class MCoreSetter(ModelSetter):
         norm_weight=None,
         norm_bias=None,
     ):
+
         cls.set_tensor(model.lm_head.dense.weight, dense_weight)
-        cls.set_tensor(model.lm_head.dense.bias, dense_bias)
+        if dense_bias is not None:
+            cls.set_tensor(model.lm_head.dense.bias, dense_bias)
+
         cls.set_tensor(model.lm_head.norm.weight, norm_weight)
-        cls.set_tensor(model.lm_head.norm.bias, norm_bias)
+        if norm_bias is not None:
+            cls.set_tensor(model.lm_head.norm.bias, norm_bias)
 
     @classmethod
     def set_binary_head(
@@ -84,7 +90,8 @@ class MCoreSetter(ModelSetter):
         bias=None,
     ):
         cls.set_tensor(model.binary_head.weight, weight)
-        cls.set_tensor(model.binary_head.bias, binary_head_bias)
+        if bias is not None:
+            cls.set_tensor(model.binary_head.bias, bias)
 
 
 class MCoreLocalSetter(MCoreSetter):
@@ -112,19 +119,29 @@ class MCoreLocalSetter(MCoreSetter):
 
         # Self attention.
         cls.set_tensor(l.input_layernorm.weight, self_attn_norm_weight)
-        cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+        if self_attn_norm_bias is not None:
+            cls.set_tensor(l.input_layernorm.bias, self_attn_norm_bias)
+
         cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
-        cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+        if self_attn_qkv_bias is not None:
+            cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+
         cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
-        cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
+        if self_attn_proj_bias is not None:
+            cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
         # MLP.
         cls.set_tensor(l.pre_mlp_layernorm.weight, mlp_norm_weight)
-        cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+        if mlp_norm_bias is not None:
+            cls.set_tensor(l.pre_mlp_layernorm.bias, mlp_norm_bias)
+
         cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
-        cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+        if mlp_fc1_bias is not None:
+            cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+
         cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
-        cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
+        if mlp_fc2_bias is not None:
+            cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
 
 
 class MCoreTESetter(MCoreSetter):
@@ -152,19 +169,29 @@ class MCoreTESetter(MCoreSetter):
 
         # Self attention.
         cls.set_tensor(l.self_attention.linear_qkv.layer_norm_weight, self_attn_norm_weight)
-        cls.set_tensor(l.self_attention.linear_qkv.layer_norm_bias, self_attn_norm_bias)
+        if self_attn_norm_bias is not None:
+            cls.set_tensor(l.self_attention.linear_qkv.layer_norm_bias, self_attn_norm_bias)
+
         cls.set_tensor(l.self_attention.linear_qkv.weight, self_attn_qkv_weight)
-        cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+        if self_attn_qkv_bias is not None:
+            cls.set_tensor(l.self_attention.linear_qkv.bias, self_attn_qkv_bias)
+
         cls.set_tensor(l.self_attention.linear_proj.weight, self_attn_proj_weight)
-        cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
+        if self_attn_proj_bias is not None:
+            cls.set_tensor(l.self_attention.linear_proj.bias, self_attn_proj_bias)
 
         # MLP.
         cls.set_tensor(l.mlp.linear_fc1.layer_norm_weight, mlp_norm_weight)
-        cls.set_tensor(l.mlp.linear_fc1.layer_norm_bias, mlp_norm_bias)
+        if mlp_norm_bias is not None:
+            cls.set_tensor(l.mlp.linear_fc1.layer_norm_bias, mlp_norm_bias)
+
         cls.set_tensor(l.mlp.linear_fc1.weight, mlp_fc1_weight)
-        cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+        if mlp_fc1_bias is not None:
+            cls.set_tensor(l.mlp.linear_fc1.bias, mlp_fc1_bias)
+
         cls.set_tensor(l.mlp.linear_fc2.weight, mlp_fc2_weight)
-        cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
+        if mlp_fc2_bias is not None:
+            cls.set_tensor(l.mlp.linear_fc2.bias, mlp_fc2_bias)
 
 
 def add_arguments(parser):

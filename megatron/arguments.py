@@ -171,6 +171,8 @@ def validate_args(args, defaults={}):
     if args.overlap_param_gather:
         assert args.use_distributed_optimizer, \
             '--overlap-param-gather only supported with distributed optimizer'
+        assert args.overlap_grad_reduce, \
+            '--overlap-grad-reduce should be turned on when using --overlap-param-gather'
 
     # Parameters dtype.
     args.params_dtype = torch.float
@@ -366,7 +368,8 @@ def validate_args(args, defaults={}):
         assert args.pipeline_model_parallel_size == 1, \
             "retro currently does not support pipeline parallelism."
 
-        # Load retro args.
+    # Load retro args (used by both Retro & GPT).
+    if args.retro_workdir:
         retro_args_path = get_retro_args_path(args.retro_workdir)
         assert os.path.exists(retro_args_path), "retro workdir missing args.json"
         with open(retro_args_path) as f:
@@ -558,6 +561,8 @@ def _add_retro_args(parser):
                        'database.')
     group.add_argument("--retro-return-doc-ids", action="store_true",
                        help="Turn this on when preprocessing retro data.")
+    group.add_argument("--retro-attention-gate", type=float, default=1,
+                       help="Gated cross attention.")
     group.add_argument("--retro-no-verify-neighbor-count", action="store_false",
                        dest="retro_verify_neighbor_count",
                        help="Skip verifying that len(GPT dataset) == len(saved "
@@ -658,6 +663,8 @@ def _add_logging_args(parser):
                        help='If set, calculate and log parameters norm.')
     group.add_argument('--log-num-zeros-in-grad', action='store_true',
                        help='If set, calculate and log the number of zeros in gradient.')
+    group.add_argument('--log-throughput', action='store_true',
+                       help='If set, calculate and log throughput per GPU.')
     group.add_argument('--timing-log-level', type=int,
                        default=0, choices=range(0,3),
                        help='Granularity level to measure and report timing. '

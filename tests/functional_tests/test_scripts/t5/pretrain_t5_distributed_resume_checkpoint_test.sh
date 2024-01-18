@@ -58,7 +58,7 @@ pip install pydantic==2.2.1
 # Runs the "220M" parameter model
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NUM_NODES"
 
-# Run for 1000 iterations and save checkpoint at 500
+# Run for 100 iterations and save checkpoint at 50
 torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     pretrain_t5.py \
     --encoder-num-layers 12 \
@@ -75,7 +75,7 @@ torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     --micro-batch-size ${MBS:-4} \
     --global-batch-size ${GBS:-32} \
     --lr 0.0001 \
-    --train-iters 501 \
+    --train-iters 100 \
     --lr-decay-iters $MAX_STEPS \
     --lr-decay-style linear \
     --min-lr 0.00001 \
@@ -88,20 +88,32 @@ torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     --transformer-impl $TRANSFORMER_IMPL \
     --use-mcore-models \
     --data-path $DATA_PATH \
-    --vocab-file /workspace/data/bert-large-cased-vocab.txt \
+    --vocab-file $VOCAB_PATH \
     --tokenizer-type BertWordPieceCase \
     --split 99982,9,9 \
     --save $CHECKPOINT_PATH \
     --load $CHECKPOINT_PATH \
-    --log-interval 100 \
     --tensorboard-dir ${TENSORBOARD_DIR} \
-    --save-interval 500 \
+    --log-params-norm \
+    --log-num-zeros-in-grad \
+    --log-validation-ppl-to-tensorboard \
+    --log-timers-to-tensorboard \
+    --timing-log-level 2 \
+    --log-interval 1 \
+    --save-interval 50 \
     --eval-interval 1000 \
     --eval-iters 10 \
     --distributed-backend nccl \
     ${ADDITIONAL_PARAMS:+$ADDITIONAL_PARAMS}"
 
-echo 500 > $CHECKPOINT_PATH/latest_checkpointed_iteration.txt
+command1="$command $torch_run_cmd"
+echo "-------------------- THE FINAL PRETRAIN SCRIPT COMMAND THAT WILL BE RUN ------------"
+echo "$command1"
+echo "-----------------------------------------------------------------------------"
+echo "$command1" >> $SCRIPTS_DIR/pretrain_t5_distributed_command.sh
+eval $command1
+
+echo 50 > $CHECKPOINT_PATH/latest_checkpointed_iteration.txt
 
 # Resume from 50th iteration ckpt and continue to 100 iterations
 torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
@@ -120,7 +132,7 @@ torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     --micro-batch-size ${MBS:-4} \
     --global-batch-size ${GBS:-32} \
     --lr 0.0001 \
-    --train-iters 1001 \
+    --train-iters 100 \
     --lr-decay-iters $MAX_STEPS \
     --lr-decay-style linear \
     --min-lr 0.00001 \
@@ -133,23 +145,28 @@ torch_run_cmd="torchrun $DISTRIBUTED_ARGS \
     --transformer-impl $TRANSFORMER_IMPL \
     --use-mcore-models \
     --data-path $DATA_PATH \
-    --vocab-file /workspace/data/bert-large-cased-vocab.txt \
+    --vocab-file $VOCAB_PATH \
     --tokenizer-type BertWordPieceCase \
     --split 99982,9,9 \
     --save $CHECKPOINT_PATH \
     --load $CHECKPOINT_PATH \
-    --log-interval 100 \
     --tensorboard-dir ${TENSORBOARD_DIR} \
-    --save-interval 500 \
+    --log-params-norm \
+    --log-num-zeros-in-grad \
+    --log-validation-ppl-to-tensorboard \
+    --log-timers-to-tensorboard \
+    --timing-log-level 2 \
+    --log-interval 1 \
+    --save-interval 50 \
     --eval-interval 1000 \
     --eval-iters 10 \
     --distributed-backend nccl \
     ${ADDITIONAL_PARAMS:+$ADDITIONAL_PARAMS}"
 
-command="$command $torch_run_cmd"
+command2="$command $torch_run_cmd"
 echo "-------------------- THE FINAL PRETRAIN SCRIPT COMMAND THAT WILL BE RUN ------------"
-echo "$command"
+echo "$command2"
 echo "-----------------------------------------------------------------------------"
 
-echo "$command" > $SCRIPTS_DIR/pretrain_t5_distributed_command.sh
-eval $command
+echo "$command2" >> $SCRIPTS_DIR/pretrain_t5_distributed_command.sh
+eval $command2
