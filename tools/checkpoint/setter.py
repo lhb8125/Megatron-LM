@@ -10,6 +10,10 @@ class ModelSetter:
     @classmethod
     def set_tensor(cls, dst, src):
         '''Copy (in-place) src tensor to dst tensor.'''
+        # >>>
+        # from lutil import pax
+        # pax("src, dst")
+        # <<<
         if src is not None:
             dst.data.copy_(src)
 

@@ -1,10 +1,11 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
-from importlib.metadata import version
 import os
-from pkg_resources import packaging
+import psutil
 import sys
 import torch
+from importlib.metadata import version
+from pkg_resources import packaging
 
 from setter import ModelSetter
 
@@ -308,6 +309,9 @@ def save_checkpoint(queue, args):
                 '--no-save-optim',
                 '--no-save-rng',
                 '--no-initialization',
+                # >>>
+                # '--apply-query-key-layer-scaling', args
+                # <<<
                 '--save-interval', '1',
                 '--save', args.save_dir
                 ]
@@ -328,6 +332,14 @@ def save_checkpoint(queue, args):
         sys.argv.append('--bert-no-binary-head')
 
     margs = parse_args()
+
+    # >>>
+    # from lutil import pax
+    # pax({
+    #     "md / apply" : md.checkpoint_args.apply_query_key_layer_scaling,
+    #     "margs / apply" : margs.apply_query_key_layer_scaling,
+    # })
+    # <<<
 
     if hasattr (md, 'checkpoint_args'):
         # These are arguments that we are either changing, or cause problems for validation if they are set
@@ -355,6 +367,20 @@ def save_checkpoint(queue, args):
             if getattr(margs, arg) != value:
                 print(f"Overwriting default {arg} value {getattr(margs, arg)} with value from checkpoint {value}.")
                 setattr(margs, arg, value)
+
+    # >>>
+    margs.sequence_parallel = md.checkpoint_args.sequence_parallel
+    # margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
+    # <<<
+
+    # >>>
+    # from lutil import pax
+    # pax({
+    #     "margs / sequence parallel" : margs.sequence_parallel,
+    #     "checkpoint_args / sequence_parallel" : md.checkpoint_args.sequence_parallel,
+    #     "tp_comm" : {k:v for k,v in vars(margs).items() if "tp_comm" in k},
+    # })
+    # <<<
 
     validate_args(margs)
 
@@ -446,7 +472,20 @@ def save_checkpoint(queue, args):
 
     # Get models.
     def get_models(count, dtype, pre_process, post_process):
-        return [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
+        # >>>
+        # from lutil import pax
+        # pax("dtype")
+        # <<<
+        models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
+        # >>>
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        print("\n........ saver mem, %.1f/%.1f gb ........\n" % (
+            mem_info.rss / 1024**3,
+	    mem_info.rss / process.memory_percent() / 1024**3,
+        ))
+        # <<<
+        return models
 
     # Make models for first pipeline stage and fill in embeddings
     mpu.set_pipeline_model_parallel_rank(0)

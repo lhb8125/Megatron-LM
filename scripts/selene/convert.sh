@@ -26,6 +26,7 @@ set -u
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 export NVTE_APPLY_QK_LAYER_SCALING=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1 # new
 
 # TRANSFORMER_IMPL=local
 TRANSFORMER_IMPL=transformer_engine
@@ -55,7 +56,11 @@ if [ "0" = "0" ]; then
     # LOAD_DIR="${SHARING_ROOT}/nvllm-3.5t/checkpoints/${DIR}"
     # LOAD_DIR="/lustre/fsw/adlr/adlr-nlp/adlr-nlp-sharing/nvllm-3.5t/checkpoints/gpt3-8b-multi-3.5t"
     LOAD_DIR="/lustre/fsw/adlr/adlr-nlp/adlr-nlp-sharing/nvllm-3.5t/checkpoints/gpt3-8b-multi-3.5t/base/tp4pp1"
+
+    # >>>
     SAVE_DIR="${SHARING_ROOT}/nvllm-3.5t-mcore/${TRANSFORMER_IMPL}/${KEY}"
+    # SAVE_DIR="/lustre/fsw/adlr/adlr-nlp/lmcafee/data/retro/megatrons/core-converter/scripts/checkpoints/8b"
+    # <<<
 
     # python -m tools.checkpoint.convert \
     python tools/checkpoint/convert.py \

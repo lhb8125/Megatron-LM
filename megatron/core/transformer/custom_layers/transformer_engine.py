@@ -117,6 +117,16 @@ class TELinear(te.pytorch.Linear):
                     ), "Buffer name should be set to configure communication overlap settings"
                     extra_kwargs["ub_name"] = tp_comm_buffer_name
 
+        # >>>
+        # extra_kwarg_keys = set(extra_kwargs.keys()) - set(("params_dtype", "device"))
+        # if extra_kwarg_keys:
+        #     from lutil import pax
+        #     pax("extra_kwargs, extra_kwarg_keys")
+        # <<<
+        # >>>
+        # from lutil import pax
+        # pax("init_method")
+        # <<<
         super().__init__(
             in_features=input_size,
             out_features=output_size,
@@ -127,7 +137,11 @@ class TELinear(te.pytorch.Linear):
             get_rng_state_tracker=get_cuda_rng_tracker
             if get_cuda_rng_tracker().is_initialized()
             else None,
+            # >>>
             init_method=init_method,
+            # init_method=None,
+            # init_method=lambda w : None,
+            # <<<
             bias=bias,
             return_bias=self.te_return_bias,
             parallel_mode=parallel_mode,

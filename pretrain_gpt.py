@@ -67,6 +67,9 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 else:
                     transformer_layer_spec = gpt_layer_local_spec_moe
 
+        # >>>
+        # print(".................... 0")
+        # <<<
         model = GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,
@@ -80,6 +83,9 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
             position_embedding_type=args.position_embedding_type,
             rotary_percent=args.rotary_percent
         )
+        # >>>
+        # print(".................... 3")
+        # <<<
     else:
         assert(args.context_parallel_size == 1), "Context parallelism is only supported with Megatron Core!"
 
