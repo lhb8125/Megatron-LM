@@ -309,9 +309,6 @@ def save_checkpoint(queue, args):
                 '--no-save-optim',
                 '--no-save-rng',
                 '--no-initialization',
-                # >>>
-                # '--apply-query-key-layer-scaling', args
-                # <<<
                 '--save-interval', '1',
                 '--save', args.save_dir
                 ]
@@ -332,14 +329,6 @@ def save_checkpoint(queue, args):
         sys.argv.append('--bert-no-binary-head')
 
     margs = parse_args()
-
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "md / apply" : md.checkpoint_args.apply_query_key_layer_scaling,
-    #     "margs / apply" : margs.apply_query_key_layer_scaling,
-    # })
-    # <<<
 
     if hasattr (md, 'checkpoint_args'):
         # These are arguments that we are either changing, or cause problems for validation if they are set
@@ -371,15 +360,6 @@ def save_checkpoint(queue, args):
     # >>>
     margs.sequence_parallel = md.checkpoint_args.sequence_parallel
     # margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
-    # <<<
-
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "margs / sequence parallel" : margs.sequence_parallel,
-    #     "checkpoint_args / sequence_parallel" : md.checkpoint_args.sequence_parallel,
-    #     "tp_comm" : {k:v for k,v in vars(margs).items() if "tp_comm" in k},
-    # })
     # <<<
 
     validate_args(margs)
@@ -472,10 +452,6 @@ def save_checkpoint(queue, args):
 
     # Get models.
     def get_models(count, dtype, pre_process, post_process):
-        # >>>
-        # from lutil import pax
-        # pax("dtype")
-        # <<<
         models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
         # >>>
         process = psutil.Process()

@@ -383,20 +383,13 @@ def fix_query_key_value_ordering(model, checkpoint_version):
                      " checkpoint version {}".format(checkpoint_version))
 
 
-def _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=False,
-# >>>
-                          debug=False,
-# <<<
-):
+def _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=False):
     """ Load the base state_dict from the given directory
 
     If rank0 is true, just loads rank 0 checkpoint, ignoring arguments.
     """
 
     # Read the tracker file and set the iteration.
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
     tracker_filename = get_checkpoint_tracker_filename(load_dir)
 
     # If no tracker file, return nothing
@@ -431,9 +424,6 @@ def _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=Fals
             print_rank_0(f' loading checkpoint from {load_dir} at iteration {iteration}')
 
     # Load the checkpoint.
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
     try:
         state_dict = torch.load(checkpoint_name, map_location='cpu')
     except ModuleNotFoundError:
@@ -452,23 +442,6 @@ def _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=Fals
         print_rank_0('could not load the checkpoint')
         print_rank_0(e)
         sys.exit()
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
-
-    # >>>
-    # if debug:
-    #     params = [ p for p in state_dict["model"].values() if isinstance(p, torch.Tensor) ]
-    #     num_params = sum([ p.numel() for p in params ])
-    #     num_bytes = sum([ p.numel() * p.element_size() for p in params ])
-    #     from lutil import pax
-    #     pax("state_dict", {
-    #         # "model" : {k:v for k,v in state_dict["model"].items() if isinstance(v, torch.Tensor)},
-    #         # "model / param" : list(state_dict["model"].values())[1],
-    #         "num_params" : num_params,
-    #         "num_bytes" : num_bytes / 1024**3,
-    #     })
-    # <<<
 
     return state_dict, checkpoint_name, release
 
@@ -565,11 +538,7 @@ def load_args_from_checkpoint(args, load_arg='load',
     return args, checkpoint_args
 
 
-def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', strict=True,
-# >>>
-debug=False
-# <<<
-):
+def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', strict=True):
     """Load a model checkpoint and return the iteration.
     strict (bool): whether to strictly enforce that the keys in
         :attr:`state_dict` of the checkpoint match the names of
@@ -580,20 +549,7 @@ debug=False
 
     model = unwrap_model(model)
 
-    # >>>
-    # dtypes =  [ p.dtype for m in model for p in m.parameters() ]
-    # if debug: from lutil import pax; pax("dtypes")
-    # <<<
-
-    state_dict, checkpoint_name, release = _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=args.exit_on_missing_checkpoint,
-    # >>>
-    debug=debug,
-    # <<<
-    )
-
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
+    state_dict, checkpoint_name, release = _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=args.exit_on_missing_checkpoint)
 
     # Checkpoint not loaded.
     if state_dict is None:
@@ -627,10 +583,6 @@ debug=False
                                  checkpoint_name))
                 sys.exit()
 
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
-
     # Check arguments.
     assert args.consumed_train_samples == 0
     assert args.consumed_valid_samples == 0
@@ -645,38 +597,19 @@ debug=False
     else:
         print_rank_0('could not find arguments in the checkpoint ...')
 
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
-
     # Model.
     strict = False if args.retro_add_retriever or args.transformer_impl == 'transformer_engine' else strict
-    # >>>
-    # strict = True
-    # if debug: from lutil import pax; pax("strict")
-    # <<<
     if len(model) == 1:
-        # >>>
         model[0].load_state_dict(state_dict['model'], strict=strict)
-        # pass
-        # <<<
     else:
         for i in range(len(model)):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
             model[i].load_state_dict(state_dict['model%d' % i], strict=strict)
 
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
-
     # Fix up query/key/value matrix ordering if needed.
     checkpoint_version = get_checkpoint_version()
     print_rank_0(f' checkpoint version {checkpoint_version}')
     fix_query_key_value_ordering(model, checkpoint_version)
-
-    # >>>
-    # if debug: from lutil import pax; pax()
-    # <<<
 
     # Optimizer.
     if not release and not args.finetune and not args.no_load_optim:
@@ -756,10 +689,6 @@ debug=False
     #              f'at iteration {iteration}')
     print_rank_0(f'  successfully loaded checkpoint from {args.load} [ t {mpu.get_tensor_model_parallel_rank()}, p {mpu.get_pipeline_model_parallel_rank()} ] '
                  f'at iteration {iteration}')
-    # <<<
-
-    # >>>
-    # if debug: from lutil import pax; pax()
     # <<<
 
     return iteration

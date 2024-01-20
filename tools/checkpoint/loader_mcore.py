@@ -6,7 +6,9 @@ import psutil
 import sys
 import torch
 import types
+# >>>
 from tqdm import tqdm
+# <<<
 
 
 def add_arguments(parser):
@@ -71,18 +73,6 @@ def _load_checkpoint(queue, args):
     margs = parse_args()
     margs, checkpoint_args = load_args_from_checkpoint(margs)
 
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "margs / sequence parallel" : margs.sequence_parallel,
-    #     "checkpoint_args / sequence parallel" : checkpoint_args.sequence_parallel,
-    #     "margs / bf16" : margs.bf16,
-    #     "checkpoint_args / bf16" : checkpoint_args.bf16,
-    #     # "margs / params_dtype" : margs.params_dtype,
-    #     "checkpoint_args / params_dtype" : checkpoint_args.params_dtype,
-    # })
-    # <<<
-
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
@@ -136,10 +126,6 @@ def _load_checkpoint(queue, args):
     consumed_train_samples = None
     consumed_valid_samples = None
     def get_models(count, dtype):
-        # >>>
-        # from lutil import pax
-        # pax("dtype")
-        # <<<
         nonlocal consumed_train_samples
         nonlocal consumed_valid_samples
         model_array_len = margs.virtual_pipeline_model_parallel_size
@@ -173,28 +159,7 @@ def _load_checkpoint(queue, args):
             margs.consumed_train_samples = 0
             margs.consumed_valid_samples = 0
             margs.exit_on_missing_checkpoint = True
-            # >>>
-            # from lutil import pax; pax()
-            # <<<
-            # >>>
-            # load_checkpoint(model_, None, None)
-            load_checkpoint(model_, None, None, debug=True)
-            # <<<
-            # >>>
-            # from lutil import pax; pax()
-            # <<<
-
-            # >>>
-            # model_ = [ m.to(dtype) for m in model_ ]
-            # [ m.to(dtype) for m in model_ ]
-            # <<<
-
-            # >>>
-            # from lutil import pax
-            # pax({
-            #     "dtypes" : [ p.dtype for m in model_ for p in m.parameters() ],
-            # })
-            # <<<
+            load_checkpoint(model_, None, None)
 
             if consumed_train_samples is not None:
                 assert(margs.consumed_train_samples == consumed_train_samples)
@@ -206,20 +171,6 @@ def _load_checkpoint(queue, args):
                 consumed_valid_samples = margs.consumed_valid_samples
             for vp_rank in range(model_array_len):
                 models[vp_rank].append(model_[vp_rank])
-            # >>>
-            # from lutil import pax
-            # pax()
-            # <<<
-        # >>>
-        # from lutil import pax
-        # pax({
-        #     "models" : models,
-        #     # "models / 0" : models[0],
-        #     "models / param" : list(models[0][0].parameters())[1],
-        #     # "model / grad_buffers" : models[0][0].grad_buffers,
-        #     "dtypes" : [ p.dtype for p in models[0][0].parameters() ],
-        # })
-        # <<<
         # >>>
         process = psutil.Process()
         mem_info = process.memory_info()
@@ -290,15 +241,6 @@ def _load_checkpoint(queue, args):
     md.checkpoint_args = checkpoint_args
     md.use_mcore_models = margs.use_mcore_models
 
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "checkpoint_args / params_dtype" : checkpoint_args.params_dtype,
-    #     "margs / params_dtype" : margs.params_dtype,
-    #     "md / params_dtype" : md.params_dtype,
-    # })
-    # <<<
-
     # Get first pipe stage
     mpu.set_pipeline_model_parallel_rank(0)
     all_models = [get_models(tp_size, md.params_dtype)]
@@ -323,12 +265,6 @@ def _load_checkpoint(queue, args):
         message["position embeddings"] = models[0].embedding.position_embeddings.weight.data
     else:
         assert not hasattr(models[0].embedding, 'position_embeddings')
-
-    # >>>
-    # from lutil import pax
-    # pax("message", {
-    # })
-    # <<<
 
     queue_put("embeddings", message)
 

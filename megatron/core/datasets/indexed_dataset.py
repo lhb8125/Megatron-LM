@@ -223,9 +223,6 @@ class _IndexReader(object):
 
         log_single_rank(logger, logging.INFO, f"Load the {type(self).__name__} from {idx_path}")
 
-        # >>>
-        # raise Exception("idx_path = %s." % idx_path)
-        # <<<
         with open(idx_path, "rb") as stream:
             header = stream.read(9)
             assert header == _INDEX_HEADER, f"bad header, cannot read: {idx_path}"
