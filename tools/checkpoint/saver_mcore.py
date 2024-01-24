@@ -34,7 +34,8 @@ class MCoreSetter(ModelSetter):
         bias=None,
     ):
         cls.set_tensor(model.decoder.final_layernorm.weight, weight)
-        cls.set_tensor(model.decoder.final_layernorm.bias, bias)
+        if bias is not None:
+            cls.set_tensor(model.decoder.final_layernorm.bias, bias)
 
     @classmethod
     def set_output_word_embeddings(
