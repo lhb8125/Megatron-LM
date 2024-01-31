@@ -27,6 +27,8 @@ set -u
 
 export NVTE_APPLY_QK_LAYER_SCALING=1
 
+MEGATRON_PATH="/lustre/fsw/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter"
+
 # TRANSFORMER_IMPL=local
 TRANSFORMER_IMPL=transformer_engine
 
@@ -47,7 +49,7 @@ if [ "0" = "0" ]; then
     # <<<
 
     # python -m tools.checkpoint.convert \
-    python tools/checkpoint/convert.py \
+    cd ${MEGATRON_PATH} && python tools/checkpoint/convert.py \
         --model-type GPT \
         --loader megatron \
         --saver mcore \
@@ -55,7 +57,7 @@ if [ "0" = "0" ]; then
         --transformer-impl ${TRANSFORMER_IMPL} \
         --target-tensor-parallel-size ${TP} \
         --target-pipeline-parallel-size 1 \
-        --megatron-path /lustre/fs6/portfolios/adlr/users/lmcafee/retro/megatrons/core-converter \
+        --megatron-path ${MEGATRON_PATH} \
         --load-dir ${LOAD_DIR} \
         --save-dir ${SAVE_DIR}
 

@@ -358,8 +358,13 @@ def save_checkpoint(queue, args):
                 setattr(margs, arg, value)
 
     # >>>
-    margs.sequence_parallel = md.checkpoint_args.sequence_parallel
-    # margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
+    from lutil import pax
+    pax({
+        "md / seq par" : md.checkpoint_args.sequence_parallel,
+        "margs / seq par" : margs.sequence_parallel,
+        "md / apply qk" : md.checkpoint_args.apply_query_key_layer_scaling,
+        "margs / apply qk" : margs.apply_query_key_layer_scaling,
+    })
     # <<<
 
     validate_args(margs)
@@ -373,6 +378,10 @@ def save_checkpoint(queue, args):
     margs.tensorboard_dir = None
     margs.tokenizer_model = None
     margs.transformer_impl = args.transformer_impl
+    # >>>
+    # margs.sequence_parallel = md.checkpoint_args.sequence_parallel
+    # margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
+    # <<<
 
     set_global_variables(margs, build_tokenizer=False)
 

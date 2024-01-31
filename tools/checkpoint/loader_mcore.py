@@ -77,12 +77,29 @@ def _load_checkpoint(queue, args):
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
 
+    # >>>
+    # Data types need to be explicitly copied from the checkpoint.
+    margs.fp16 = checkpoint_args.fp16
+    margs.bf16 = checkpoint_args.bf16
+    # margs.params_dtype = checkpoint_args.params_dtype
+    # <<<
+
     margs = validate_args(margs)
 
     # >>>
-    margs.fp16 = checkpoint_args.fp16
-    margs.bf16 = checkpoint_args.bf16
-    margs.params_dtype = checkpoint_args.params_dtype
+    # from lutil import pax
+    # pax({
+    #     "checkpoint_args" : "f %s, b %s ... %s." % (
+    #         checkpoint_args.fp16,
+    #         checkpoint_args.bf16,
+    #         checkpoint_args.params_dtype,
+    #     ),
+    #     "margs" : "f %s, b %s ... %s." % (
+    #         margs.fp16,
+    #         margs.bf16,
+    #         margs.params_dtype,
+    #     ),
+    # })
     # <<<
 
     def check_for_arg(arg_name, default=None):
@@ -107,8 +124,19 @@ def _load_checkpoint(queue, args):
     check_for_arg('iteration')
     check_for_arg('bert_binary_head')
     check_for_arg('disable_bias_linear', False)
+    # >>>
     check_for_arg('params_dtype')
+    # check_for_arg('params_dtype', checkpoint_args.params_dtype)
+    # <<<
     check_for_arg('swiglu', False)
+
+    # >>>
+    # from lutil import pax
+    # pax({
+    #     "checkpoint_args / params_dtype" : str(checkpoint_args.params_dtype),
+    #     "margs / params_dtype" : str(margs.params_dtype),
+    # })
+    # <<<
 
     # Determine how to make our models
     if args.model_type == 'GPT':

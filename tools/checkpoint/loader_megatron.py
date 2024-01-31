@@ -73,6 +73,13 @@ def _load_checkpoint(queue, args):
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
 
+    # >>>
+    # Data types need to be explicitly copied from the checkpoint.
+    margs.fp16 = checkpoint_args.fp16
+    margs.bf16 = checkpoint_args.bf16
+    # margs.params_dtype = checkpoint_args.params_dtype
+    # <<<
+
     margs = validate_args(margs)
 
     def check_for_arg(arg_name, default=None):
