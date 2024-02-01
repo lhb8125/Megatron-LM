@@ -1,13 +1,13 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 import os
-import psutil
 import sys
 import torch
 from importlib.metadata import version
 from pkg_resources import packaging
 
 from setter import ModelSetter
+from utils import print_memory_usage
 
 
 class MCoreSetter(ModelSetter):
@@ -461,14 +461,13 @@ def save_checkpoint(queue, args):
 
     # Get models.
     def get_models(count, dtype, pre_process, post_process):
-        models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
         # >>>
-        process = psutil.Process()
-        mem_info = process.memory_info()
-        print("\n........ saver mem, %.1f/%.1f gb ........\n" % (
-            mem_info.rss / 1024**3,
-	    mem_info.rss / process.memory_percent() / 1024**3,
-        ))
+        # models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
+        # +++
+        models = []
+        for rank in range(count):
+            models.append(model_provider(pre_process, post_process).to(dtype))
+            print_memory_usage("saver", rank, count)
         # <<<
         return models
 

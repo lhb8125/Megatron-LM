@@ -1,11 +1,12 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import json
 import os
-import psutil
 import sys
 import torch
 import types
+
+from utils import print_memory_usage
 
 
 def add_arguments(parser):
@@ -26,18 +27,6 @@ def add_arguments(parser):
 
 
 def _load_checkpoint(queue, args):
-
-    # >>>
-    # process = psutil.Process()
-    # mem_info = process.memory_info()
-    # mem_perc = process.memory_percent()
-    # print("\n........ loader mem, %.1f/%.1f gb ........\n" % (
-    #     mem_info.rss / 1024**3,
-    #     100 * mem_info.rss / mem_perc / 1024**3,
-    # ))
-    # from lutil import pax
-    # pax("mem_info, mem_perc")
-    # <<<
 
     # Search in directory above this
     sys.path.append(os.path.abspath(
@@ -174,13 +163,8 @@ def _load_checkpoint(queue, args):
             for vp_rank in range(model_array_len):
                 models[vp_rank].append(model_[vp_rank])
 
-        # Print memory usage.
-        process = psutil.Process()
-        mem_info = process.memory_info()
-        print("\n........ loader mem, %.1f/%.1f gb ........\n" % (
-            mem_info.rss / 1024**3,
-	    100 * mem_info.rss / process.memory_percent() / 1024**3,
-        ))
+            # Print memory usage.
+            print_memory_usage("loader", rank, count)
 
         return models
 
