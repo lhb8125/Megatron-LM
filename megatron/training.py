@@ -395,10 +395,7 @@ def setup_model_and_optimizer(model_provider_func,
     """Setup model and optimizer."""
     args = get_args()
 
-    # >>>
-    # model = get_model(model_provider_func, model_type)
-    model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
-    # <<<
+    model = get_model(model_provider_func, model_type)
     unwrapped_model = unwrap_model(model)
 
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,

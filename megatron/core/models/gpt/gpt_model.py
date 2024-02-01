@@ -180,10 +180,6 @@ class GPTModel(LanguageModule):
             output_weight = self.shared_embedding_or_output_weight()
         logits, _ = self.output_layer(hidden_states, weight=output_weight)
 
-        # >>>
-        print("... logits : %s." % ", ".join(map(str, logits.view(-1)[0:logits.numel():(logits.numel()//10)].tolist())))
-        # <<<
-
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()

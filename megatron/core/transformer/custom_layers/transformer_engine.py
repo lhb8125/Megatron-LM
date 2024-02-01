@@ -127,11 +127,7 @@ class TELinear(te.pytorch.Linear):
             get_rng_state_tracker=get_cuda_rng_tracker
             if get_cuda_rng_tracker().is_initialized()
             else None,
-            # >>>
             init_method=init_method,
-            # init_method=None,
-            # init_method=lambda w : None,
-            # <<<
             bias=bias,
             return_bias=self.te_return_bias,
             parallel_mode=parallel_mode,

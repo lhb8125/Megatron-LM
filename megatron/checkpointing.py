@@ -399,14 +399,14 @@ def _load_base_checkpoint(load_dir, rank0=False, exit_on_missing_checkpoint=Fals
                 tracker_filename))
             print_rank_0('    will not load any checkpoints and will start from '
                          'random')
-        # >>>
+
         # Conditionally exit if checkpoint not found.
         if exit_on_missing_checkpoint:
             print_rank_0(">> '--exit-on-missing-checkpoint' set ... exiting. <<")
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
             sys.exit()
-        # <<<
+
         return None, "", False
 
     # Otherwise, read the tracker file and either set the iteration or
@@ -532,9 +532,6 @@ def load_args_from_checkpoint(args, load_arg='load',
         _set_arg('pipeline_model_parallel_size', force=True)
         _set_arg('virtual_pipeline_model_parallel_size', force=True)
         _set_arg('num_layers_per_virtual_pipeline_stage')
-    # >>>
-    # _set_arg('sequence_parallel', force=True)
-    # <<<
     return args, checkpoint_args
 
 
@@ -553,15 +550,6 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
 
     # Checkpoint not loaded.
     if state_dict is None:
-
-        # >>>
-        # # Conditionally exit at this point.
-        # if args.exit_on_missing_checkpoint:
-        #     print_rank_0(">> '--exit-on-missing-checkpoint' set ... exiting. <<")
-        #     torch.distributed.barrier()
-        #     sys.exit()
-        # <<<
-
         # Iteration defaults to 0.
         return 0
 
@@ -684,12 +672,8 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
-    # >>>
-    # print_rank_0(f'  successfully loaded checkpoint from {args.load} '
-    #              f'at iteration {iteration}')
     print_rank_0(f'  successfully loaded checkpoint from {args.load} [ t {mpu.get_tensor_model_parallel_rank()}, p {mpu.get_pipeline_model_parallel_rank()} ] '
                  f'at iteration {iteration}')
-    # <<<
 
     return iteration
 
