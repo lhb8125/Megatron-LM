@@ -23,12 +23,21 @@ def add_arguments(parser):
                        default='learned_absolute',
                        choices=['learned_absolute', 'rope'],
                        help='Position embedding type.')
-    # >>>
-    # group.add_argument('--sequence-parallel', action='store_true',
-    #                    help='Enable sequence parallel optimization.')
-    # <<<
+
 
 def _load_checkpoint(queue, args):
+
+    # >>>
+    # process = psutil.Process()
+    # mem_info = process.memory_info()
+    # mem_perc = process.memory_percent()
+    # print("\n........ loader mem, %.1f/%.1f gb ........\n" % (
+    #     mem_info.rss / 1024**3,
+    #     100 * mem_info.rss / mem_perc / 1024**3,
+    # ))
+    # from lutil import pax
+    # pax("mem_info, mem_perc")
+    # <<<
 
     # Search in directory above this
     sys.path.append(os.path.abspath(
@@ -81,22 +90,6 @@ def _load_checkpoint(queue, args):
     # Validate margs.
     margs = validate_args(margs)
 
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "checkpoint_args" : "f %s, b %s ... %s." % (
-    #         checkpoint_args.fp16,
-    #         checkpoint_args.bf16,
-    #         checkpoint_args.params_dtype,
-    #     ),
-    #     "margs" : "f %s, b %s ... %s." % (
-    #         margs.fp16,
-    #         margs.bf16,
-    #         margs.params_dtype,
-    #     ),
-    # })
-    # <<<
-
     def check_for_arg(arg_name, default=None):
         if getattr(margs, arg_name, None) is None:
             if default is not None:
@@ -119,19 +112,8 @@ def _load_checkpoint(queue, args):
     check_for_arg('iteration')
     check_for_arg('bert_binary_head')
     check_for_arg('disable_bias_linear', False)
-    # >>>
     check_for_arg('params_dtype')
-    # check_for_arg('params_dtype', checkpoint_args.params_dtype)
-    # <<<
     check_for_arg('swiglu', False)
-
-    # >>>
-    # from lutil import pax
-    # pax({
-    #     "checkpoint_args / params_dtype" : str(checkpoint_args.params_dtype),
-    #     "margs / params_dtype" : str(margs.params_dtype),
-    # })
-    # <<<
 
     # Determine how to make our models
     if args.model_type == 'GPT':
@@ -191,14 +173,15 @@ def _load_checkpoint(queue, args):
                 consumed_valid_samples = margs.consumed_valid_samples
             for vp_rank in range(model_array_len):
                 models[vp_rank].append(model_[vp_rank])
-        # >>>
+
+        # Print memory usage.
         process = psutil.Process()
         mem_info = process.memory_info()
         print("\n........ loader mem, %.1f/%.1f gb ........\n" % (
             mem_info.rss / 1024**3,
-	    mem_info.rss / process.memory_percent() / 1024**3,
+	    100 * mem_info.rss / process.memory_percent() / 1024**3,
         ))
-        # <<<
+
         return models
 
     margs.use_mcore_models = True
