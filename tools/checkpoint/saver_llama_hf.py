@@ -161,6 +161,7 @@ def save_checkpoint(queue, args):
     margs.save = args.save_dir
     margs.tensorboard_dir = None
     margs.tokenizer_model = None
+    margs.wandb_project = None
 
     set_global_variables(margs, build_tokenizer=False)
 
@@ -271,6 +272,6 @@ def save_checkpoint(queue, args):
     #logging.info(f"Weights saved to {args.out_file}")
     model = AutoModelForCausalLM.from_pretrained(args.hf_in_path, local_files_only=True, ignore_mismatched_sizes=True)
     model.load_state_dict(checkpoint)
-    model.save_pretrained(args.hf_out_path)
+    model.save_pretrained(args.save_dir)
     print(f"Full HF model saved to {args.hf_out_path}")
     print("Done!")
