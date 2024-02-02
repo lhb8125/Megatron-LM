@@ -59,7 +59,6 @@ def _load_checkpoint(queue, args):
                 '--no-bias-gelu-fusion',
                 '--no-bias-dropout-fusion',
                 '--no-async-tensor-model-parallel-allreduce',
-                '--use-cpu-initialization',
                 '--micro-batch-size', '1',
                 '--no-load-optim',
                 '--no-load-rng',
@@ -71,6 +70,7 @@ def _load_checkpoint(queue, args):
                 ]
 
     margs = parse_args()
+    margs.padded_vocab_size = args.true_vocab_size
     margs, checkpoint_args = load_args_from_checkpoint(margs)
 
     # Arguments do sanity checks on the world size, but we don't care,
@@ -224,6 +224,8 @@ def _load_checkpoint(queue, args):
     md.hidden_size = margs.hidden_size
     md.seq_length = margs.seq_length
     md.num_attention_heads = margs.num_attention_heads
+    md.ffn_hidden_size = margs.ffn_hidden_size
+    md.num_query_groups = margs.num_query_groups
     md.max_position_embeddings = margs.max_position_embeddings
     md.tokenizer_type = margs.tokenizer_type
     md.iteration = margs.iteration
@@ -237,6 +239,7 @@ def _load_checkpoint(queue, args):
     md.previous_tensor_parallel_size = margs.tensor_model_parallel_size
     md.previous_pipeline_parallel_size = margs.pipeline_model_parallel_size
     md.true_vocab_size = true_vocab_size
+    md.padded_vocab_size = true_vocab_size
     md.make_vocab_size_divisible_by = margs.make_vocab_size_divisible_by
     md.checkpoint_args = checkpoint_args
     md.use_mcore_models = margs.use_mcore_models
