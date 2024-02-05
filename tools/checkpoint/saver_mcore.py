@@ -452,14 +452,10 @@ def save_checkpoint(queue, args):
 
     # Get models.
     def get_models(count, dtype, pre_process, post_process):
-        # >>>
-        # models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
-        # +++
         models = []
         for rank in range(count):
             models.append(model_provider(pre_process, post_process).to(dtype))
             print_memory_usage("saver", rank, count)
-        # <<<
         return models
 
     # Make models for first pipeline stage and fill in embeddings
