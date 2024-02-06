@@ -1,3 +1,5 @@
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+
 from abc import abstractmethod
 from typing import List
 
@@ -64,7 +66,9 @@ class MoEDroplessTokenDispatcher(MoETokenDispatcher):
         """
         super().__init__(config=config)
         self.num_local_experts = num_local_experts
+        assert self.num_local_experts > 0, "Expected at least one expert"
         self.local_expert_indices = local_expert_indices
+        assert len(self.local_expert_indices) > 0, "Expected at least one local expert index"
         self.router_topk = config.moe_router_topk
         self.add_bias = config.add_bias_linear
 
