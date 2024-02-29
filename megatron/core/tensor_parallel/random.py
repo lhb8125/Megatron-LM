@@ -115,6 +115,7 @@ class CudaRNGStatesTracker:
 
     def add(self, name, seed):
         """Track the rng state."""
+        self._is_initialized = True
         # Check seed is not already used.
         if seed in self.seeds_:
             raise Exception('seed {} already exists'.format(seed))
