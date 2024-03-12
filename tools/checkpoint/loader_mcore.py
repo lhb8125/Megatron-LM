@@ -1,14 +1,12 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import json
 import os
-import psutil
 import sys
 import torch
 import types
-# >>>
-from tqdm import tqdm
-# <<<
+
+from utils import print_memory_usage
 
 
 def add_arguments(parser):
@@ -26,10 +24,7 @@ def add_arguments(parser):
                        default='learned_absolute',
                        choices=['learned_absolute', 'rope'],
                        help='Position embedding type.')
-    # >>>
-    # group.add_argument('--sequence-parallel', action='store_true',
-    #                    help='Enable sequence parallel optimization.')
-    # <<<
+
 
 def _load_checkpoint(queue, args):
 
@@ -70,20 +65,18 @@ def _load_checkpoint(queue, args):
                 ]
 
     margs = parse_args()
-    margs.padded_vocab_size = args.true_vocab_size
-    margs, checkpoint_args = load_args_from_checkpoint(margs)
+    margs, checkpoint_args = load_args_from_checkpoint(margs, exit_on_missing_checkpoint=True)
 
     # Arguments do sanity checks on the world size, but we don't care,
     # so trick it into thinking we are plenty of processes
     margs.world_size = margs.tensor_model_parallel_size * margs.pipeline_model_parallel_size
 
-    margs = validate_args(margs)
-
-    # >>>
+    # Explicitly copy data types from checkpoint.
     margs.fp16 = checkpoint_args.fp16
     margs.bf16 = checkpoint_args.bf16
-    margs.params_dtype = checkpoint_args.params_dtype
-    # <<<
+
+    # Validate margs.
+    margs = validate_args(margs)
 
     def check_for_arg(arg_name, default=None):
         if getattr(margs, arg_name, None) is None:
@@ -134,10 +127,7 @@ def _load_checkpoint(queue, args):
         models = [[] for _ in range(model_array_len)]
         pre_process = mpu.is_pipeline_first_stage()
         post_process = mpu.is_pipeline_last_stage()
-        # >>>
-        # for rank in range(count):
-        for rank in tqdm(range(count), desc="load tensor ranks"):
-        # <<<
+        for rank in range(count):
             mpu.set_tensor_model_parallel_rank(rank)
             if margs.virtual_pipeline_model_parallel_size is not None:
                 model_ = []
@@ -171,14 +161,10 @@ def _load_checkpoint(queue, args):
                 consumed_valid_samples = margs.consumed_valid_samples
             for vp_rank in range(model_array_len):
                 models[vp_rank].append(model_[vp_rank])
-        # >>>
-        process = psutil.Process()
-        mem_info = process.memory_info()
-        print("\n........ loader mem, %.1f/%.1f gb ........\n" % (
-            mem_info.rss / 1024**3,
-	    mem_info.rss / process.memory_percent() / 1024**3,
-        ))
-        # <<<
+
+            # Print memory usage.
+            print_memory_usage("loader", rank, count)
+
         return models
 
     margs.use_mcore_models = True

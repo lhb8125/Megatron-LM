@@ -1,13 +1,13 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 import os
-import psutil
 import sys
 import torch
 from importlib.metadata import version
 from pkg_resources import packaging
 
 from setter import ModelSetter
+from utils import print_memory_usage
 
 
 class MCoreSetter(ModelSetter):
@@ -216,7 +216,8 @@ def save_checkpoint(queue, args):
 
     # Transformer engine >= 0.12.0, for CPU initialization.
     te_version = packaging.version.Version(version("transformer-engine"))
-    assert te_version >= packaging.version.Version("0.12.0")
+    assert te_version >= packaging.version.Version("0.12.0"), \
+        "transformer engine version: %s (>=0.12.0 required)." % te_version
 
     # Search in directory above this
     sys.path.append(os.path.abspath(
@@ -357,10 +358,9 @@ def save_checkpoint(queue, args):
                 print(f"Overwriting default {arg} value {getattr(margs, arg)} with value from checkpoint {value}.")
                 setattr(margs, arg, value)
 
-    # >>>
+    # Explicitly copy sequence_parallel, apply_query_key_layer_scaling.
     margs.sequence_parallel = md.checkpoint_args.sequence_parallel
-    # margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
-    # <<<
+    margs.apply_query_key_layer_scaling = md.checkpoint_args.apply_query_key_layer_scaling
 
     validate_args(margs)
 
@@ -452,15 +452,10 @@ def save_checkpoint(queue, args):
 
     # Get models.
     def get_models(count, dtype, pre_process, post_process):
-        models = [model_provider(pre_process, post_process).to(dtype) for _ in range(count)]
-        # >>>
-        process = psutil.Process()
-        mem_info = process.memory_info()
-        print("\n........ saver mem, %.1f/%.1f gb ........\n" % (
-            mem_info.rss / 1024**3,
-	    mem_info.rss / process.memory_percent() / 1024**3,
-        ))
-        # <<<
+        models = []
+        for rank in range(count):
+            models.append(model_provider(pre_process, post_process).to(dtype))
+            print_memory_usage("saver", rank, count)
         return models
 
     # Make models for first pipeline stage and fill in embeddings
@@ -649,6 +644,7 @@ def save_checkpoint(queue, args):
 
         for tp_rank in range(args.target_tensor_parallel_size):
             mpu.set_tensor_model_parallel_rank(tp_rank)
-            save_checkpoint(md.iteration, [models[tp_rank]], None, None)
+            save_checkpoint(md.iteration, [models[tp_rank]], None, None,
+                            num_floating_point_operations_so_far=0)
 
     print("Done!")

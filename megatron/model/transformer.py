@@ -25,6 +25,7 @@ from megatron.core.tensor_parallel import (
     get_data_parallel_rng_tracker_name
 )
 from megatron.core.parallel_state import get_tensor_model_parallel_group, get_tensor_and_expert_parallel_group
+from megatron.core.jit import jit_fuser
 
 try:
     from einops import rearrange
@@ -508,7 +509,7 @@ class ParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.params_dtype = config.params_dtype
         self.sequence_parallel = config.sequence_parallel
-
+        self.config = config
         self.group_query_attention = args.group_query_attention
         self.num_query_groups = args.num_query_groups
 
@@ -555,7 +556,7 @@ class ParallelAttention(MegatronModule):
                 query_projection_size + 2 * kv_projection_size,
                 config=config,
                 init_method=config.init_method,
-                bias=args.add_bias_linear,
+                bias=args.add_bias_linear or args.add_qkv_bias,
                 gather_output=False)
         else:
             assert attention_type == AttnType.cross_attn
@@ -782,8 +783,8 @@ class ParallelAttention(MegatronModule):
         # apply relative positional encoding (rotary embedding)
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb,self.config)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb,self.config)
             # TODO, can apply positional embedding to value_layer so it has
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
@@ -830,7 +831,7 @@ def get_bias_dropout_add(training):
     return _bias_dropout_add
 
 
-@torch.jit.script
+@jit_fuser
 def bias_dropout_add_fused_train(x: torch.Tensor,
                                  bias: Optional[torch.Tensor],
                                  residual: torch.Tensor,
@@ -838,7 +839,7 @@ def bias_dropout_add_fused_train(x: torch.Tensor,
     return bias_dropout_add(x, bias, residual, prob, True)
 
 
-@torch.jit.script
+@jit_fuser
 def bias_dropout_add_fused_inference(x: torch.Tensor,
                                      bias: Optional[torch.Tensor],
                                      residual: torch.Tensor,

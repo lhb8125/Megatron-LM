@@ -1,15 +1,17 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 import logging
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
 
 from megatron.core import InferenceParams, parallel_state, tensor_parallel
+from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.enums import AttnMaskType, ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
@@ -80,6 +82,7 @@ class GPTModel(LanguageModule):
             self.rotary_pos_emb = RotaryEmbedding(
                 kv_channels=self.config.kv_channels,
                 rotary_percent=rotary_percent,
+                rotary_interleaved=self.config.rotary_interleaved,
                 seq_len_interpolation_factor=seq_len_interpolation_factor,
                 rotary_base=rotary_base,
             )
@@ -133,6 +136,7 @@ class GPTModel(LanguageModule):
         decoder_input: Tensor = None,
         labels: Tensor = None,
         inference_params: InferenceParams = None,
+        packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
     ) -> Tensor:
         """Forward function of the GPT Model This function passes the input tensors
@@ -168,6 +172,7 @@ class GPTModel(LanguageModule):
             attention_mask=attention_mask,
             inference_params=inference_params,
             rotary_pos_emb=rotary_pos_emb,
+            packed_seq_params=packed_seq_params,
             **(extra_block_kwargs or {}),
         )
 
@@ -180,10 +185,6 @@ class GPTModel(LanguageModule):
             output_weight = self.shared_embedding_or_output_weight()
         logits, _ = self.output_layer(hidden_states, weight=output_weight)
 
-        # >>>
-        #print("... logits : %s." % ", ".join(map(str, logits.view(-1)[0:logits.numel():(logits.numel()//10)].tolist())))
-        # <<<
-
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
@@ -192,7 +193,8 @@ class GPTModel(LanguageModule):
 
         return loss
 
-    def sharded_state_dict(self, prefix: str = '') -> dict:
+    def sharded_state_dict(self, prefix: str = '', sharded_offsets: tuple = ()) -> ShardedStateDict:
+        assert not sharded_offsets, "Unexpected sharded offsets"
         sharded_state_dict = {}
 
         if self.pre_process:
@@ -218,7 +220,7 @@ class GPTModel(LanguageModule):
                     last_stage_word_emb_replica_id = (
                         1,  # copy of first stage embedding
                         0,
-                        parallel_state.get_data_parallel_rank(),
+                        parallel_state.get_data_parallel_rank(with_context_parallel=True),
                     )
 
                     sharded_output_layer_tensor = make_tp_sharded_tensor_for_checkpoint(
