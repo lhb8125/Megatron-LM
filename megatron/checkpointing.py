@@ -176,6 +176,12 @@ def read_metadata(tracker_filename):
     # mark it as a release checkpoint.
     iteration = 0
     release = False
+    try:
+        args = get_args()
+        if args.iteration is not None:
+            return args.iteration, False
+    except:
+        pass
     with open(tracker_filename, 'r') as f:
         metastring = f.read().strip()
         try:

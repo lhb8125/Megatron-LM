@@ -8,7 +8,7 @@ from importlib.metadata import version
 from pkg_resources import packaging
 
 from setter import ModelSetter
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from collections import OrderedDict
 
 
@@ -271,7 +271,9 @@ def save_checkpoint(queue, args):
     #torch.save(checkpoint, args.out_file)
     #logging.info(f"Weights saved to {args.out_file}")
     model = AutoModelForCausalLM.from_pretrained(args.hf_in_path, local_files_only=True, ignore_mismatched_sizes=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.hf_in_path)
     model.load_state_dict(checkpoint)
     model.save_pretrained(args.save_dir)
+    tokenizer.save_pretrained(args.save_dir)
     print(f"Full HF model saved to {args.hf_out_path}")
     print("Done!")

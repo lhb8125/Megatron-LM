@@ -181,7 +181,7 @@ class GPTModel(LanguageModule):
         logits, _ = self.output_layer(hidden_states, weight=output_weight)
 
         # >>>
-        print("... logits : %s." % ", ".join(map(str, logits.view(-1)[0:logits.numel():(logits.numel()//10)].tolist())))
+        #print("... logits : %s." % ", ".join(map(str, logits.view(-1)[0:logits.numel():(logits.numel()//10)].tolist())))
         # <<<
 
         if labels is None:
