@@ -26,6 +26,11 @@ def add_arguments(parser):
                        choices=['LlamaForCausalLM'],
                        help='Which model structure to convert.')
 
+def quantize(weight, scale, fp8):
+    if fp8:
+        return (weight * scale).to(torch.float8_e4m3fn).view(torch.int8)
+    else:
+        return weight
 
 def save_checkpoint(queue, args):
 
@@ -128,7 +133,7 @@ def save_checkpoint(queue, args):
                 '--no-save-rng',
                 '--no-initialization',
                 '--save-interval', '1',
-                '--save', args.save_dir
+                '--save', args.save_dir,
                 ]
 
     if md.make_vocab_size_divisible_by is not None:
@@ -287,7 +292,7 @@ def save_checkpoint(queue, args):
         'rotary_scaling': None,
         'norm_epsilon': margs.norm_epsilon,
         'quantization': {
-            'quant_algo': None,
+            'quant_algo': "FP8" if md.fp8 else None,
             'kv_cache_quant_algo': None,
             'exclude_modules': ['lm_head'],
         },
@@ -359,7 +364,7 @@ def save_checkpoint(queue, args):
                 dense_bias = msg.pop("dense bias")
                 mlp_l1_bias = msg.pop("mlp l1 bias")
 
-            # Split up the parallel tensors
+           # Split up the parallel tensors
             qkv_weight = msg.pop("qkv weight")
             qkv_weight = qkv_weight.reshape([qkv_total_dim, head_size, margs.hidden_size])
             #qkv_weight = torch.chunk(msg.pop("qkv weight"), args.target_tensor_parallel_size, dim=0)
@@ -401,18 +406,41 @@ def save_checkpoint(queue, args):
 
             # Save them to the model
             prefix = f'transformer.layers.{layer}.'
+            # Check out fp8 scaling factors
+            if md.fp8:
+                qkv_fwd_scale = msg.pop("qkv fwd scale")
+                qkv_bwd_scale = msg.pop("qkv bwd scale")
+                dense_fwd_scale = msg.pop("dense fwd scale")
+                dense_bwd_scale = msg.pop("dense bwd scale")
+                mlp_l1_fwd_scale = msg.pop("mlp l1 fwd scale")
+                mlp_l1_bwd_scale = msg.pop("mlp l1 bwd scale")
+                mlp_l0_fwd_scale = msg.pop("mlp l0 fwd scale")
+                mlp_l0_bwd_scale = msg.pop("mlp l0 bwd scale")
+
             for tp_rank in range(args.target_tensor_parallel_size):
+                if md.fp8:
+                    dst_weight[tp_rank][f"{prefix}attention.qkv.activation_scaling_factor"] = 1 / qkv_fwd_scale[0].view(1)
+                    dst_weight[tp_rank][f"{prefix}attention.qkv.weights_scaling_factor"] = 1 / qkv_fwd_scale[1].view(1)
+                    dst_weight[tp_rank][f"{prefix}attention.dense.activation_scaling_factor"] = 1 / dense_fwd_scale[0].view(1)
+                    dst_weight[tp_rank][f"{prefix}attention.dense.weights_scaling_factor"] = 1 / dense_fwd_scale[1].view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.fc.activation_scaling_factor"] = 1 / mlp_l0_fwd_scale[0].view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.fc.weights_scaling_factor"] = 1 / mlp_l0_fwd_scale[1].view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.gate.activation_scaling_factor"] = 1 / mlp_l0_fwd_scale[0].clone().view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.gate.weights_scaling_factor"] = 1 / mlp_l0_fwd_scale[1].clone().view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.proj.activation_scaling_factor"] = 1 / mlp_l1_fwd_scale[0].view(1)
+                    dst_weight[tp_rank][f"{prefix}mlp.proj.weights_scaling_factor"] = 1 / mlp_l1_fwd_scale[1].view(1)
+
                 params_dict = {
                     f"{prefix}input_layernorm.weight" : input_norm_weight.contiguous(),
-                    f"{prefix}attention.qkv.weight" : qkv_weight[tp_rank].contiguous(),
-                    f"{prefix}attention.dense.weight" : dense_weight[tp_rank].contiguous(),
+                    f"{prefix}attention.qkv.weight" : quantize(qkv_weight[tp_rank].contiguous(), qkv_fwd_scale[1].view(1), md.fp8),
+                    f"{prefix}attention.dense.weight" : quantize(dense_weight[tp_rank].contiguous(), dense_fwd_scale[1].view(1), md.fp8),
                     f"{prefix}post_layernorm.weight" : post_norm_weight.contiguous(),
-                    f"{prefix}mlp.fc.weight" : mlp_l0_weight_W[tp_rank].contiguous(),
-                    f"{prefix}mlp.proj.weight" : mlp_l1_weight[tp_rank].contiguous(),
+                    f"{prefix}mlp.fc.weight" : quantize(mlp_l0_weight_W[tp_rank].contiguous(), mlp_l0_fwd_scale[1].view(1), md.fp8),
+                    f"{prefix}mlp.proj.weight" : quantize(mlp_l1_weight[tp_rank].contiguous(), mlp_l1_fwd_scale[1].view(1), md.fp8),
                 }
                 if md.swiglu:
                     params_dict.update({
-                        f"{prefix}mlp.gate.weight": mlp_l0_weight_V[tp_rank].contiguous(),
+                        f"{prefix}mlp.gate.weight": quantize(mlp_l0_weight_V[tp_rank].contiguous(), mlp_l0_fwd_scale[1].clone().view(1), md.fp8),
                     })
                 if md.norm_has_bias:
                     params_dict.update({
