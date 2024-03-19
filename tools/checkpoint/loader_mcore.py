@@ -298,18 +298,20 @@ def _load_checkpoint(queue, args):
                 mlp_l1_bwd_scale = []
                 for tp_rank, model in enumerate(models):
                     layer = model.decoder.layers[layer_num]
+                    if md.fp8:
+                        qkv_fwd_scale.append(layer.self_attention.linear_qkv.fp8_meta['scaling_fwd'].scale.cpu())
+                        qkv_bwd_scale.append(layer.self_attention.linear_qkv.fp8_meta['scaling_bwd'].scale.cpu())
+                        dense_fwd_scale.append(layer.self_attention.linear_proj.fp8_meta['scaling_fwd'].scale.cpu())
+                        dense_bwd_scale.append(layer.self_attention.linear_proj.fp8_meta['scaling_bwd'].scale.cpu())
+                        mlp_l0_fwd_scale.append(layer.mlp.linear_fc1.fp8_meta['scaling_fwd'].scale.cpu())
+                        mlp_l0_bwd_scale.append(layer.mlp.linear_fc1.fp8_meta['scaling_bwd'].scale.cpu())
+                        mlp_l1_fwd_scale.append(layer.mlp.linear_fc2.fp8_meta['scaling_fwd'].scale.cpu())
+                        mlp_l1_bwd_scale.append(layer.mlp.linear_fc2.fp8_meta['scaling_bwd'].scale.cpu())
+
                     qkv_weight.append(layer.self_attention.linear_qkv.weight.data)
-                    qkv_fwd_scale.append(layer.self_attention.linear_qkv.fp8_meta['scaling_fwd'].scale.cpu())
-                    qkv_bwd_scale.append(layer.self_attention.linear_qkv.fp8_meta['scaling_bwd'].scale.cpu())
                     dense_weight.append(layer.self_attention.linear_proj.weight.data)
-                    dense_fwd_scale.append(layer.self_attention.linear_proj.fp8_meta['scaling_fwd'].scale.cpu())
-                    dense_bwd_scale.append(layer.self_attention.linear_proj.fp8_meta['scaling_bwd'].scale.cpu())
                     mlp_l0_weight.append(layer.mlp.linear_fc1.weight.data)
-                    mlp_l0_fwd_scale.append(layer.mlp.linear_fc1.fp8_meta['scaling_fwd'].scale.cpu())
-                    mlp_l0_bwd_scale.append(layer.mlp.linear_fc1.fp8_meta['scaling_bwd'].scale.cpu())
                     mlp_l1_weight.append(layer.mlp.linear_fc2.weight.data)
-                    mlp_l1_fwd_scale.append(layer.mlp.linear_fc2.fp8_meta['scaling_fwd'].scale.cpu())
-                    mlp_l1_bwd_scale.append(layer.mlp.linear_fc2.fp8_meta['scaling_bwd'].scale.cpu())
                     if md.linear_bias:
                         qkv_bias.append(layer.self_attention.linear_qkv.bias.data)
                         mlp_l0_bias.append(layer.mlp.linear_fc1.bias.data)
@@ -325,17 +327,19 @@ def _load_checkpoint(queue, args):
                     message["mlp l0 weight"] = torch.cat(mlp_l0_weight, dim=0)
 
                 # simple concat of the rest
+                if md.fp8:
+                    message["qkv fwd scale"] = torch.cat(qkv_fwd_scale, dim=0)
+                    message["qkv bwd scale"] = torch.cat(qkv_bwd_scale, dim=0)
+                    message["dense fwd scale"] = torch.cat(dense_fwd_scale, dim=0)
+                    message["dense bwd scale"] = torch.cat(dense_bwd_scale, dim=0)
+                    message["mlp l0 fwd scale"] = torch.cat(mlp_l0_fwd_scale, dim=0)
+                    message["mlp l0 bwd scale"] = torch.cat(mlp_l0_bwd_scale, dim=0)
+                    message["mlp l1 fwd scale"] = torch.cat(mlp_l1_fwd_scale, dim=0)
+                    message["mlp l1 bwd scale"] = torch.cat(mlp_l1_bwd_scale, dim=0)
+
                 message["qkv weight"] = torch.cat(qkv_weight, dim=0)
-                message["qkv fwd scale"] = torch.cat(qkv_fwd_scale, dim=0)
-                message["qkv bwd scale"] = torch.cat(qkv_bwd_scale, dim=0)
                 message["dense weight"] = torch.cat(dense_weight, dim=1)
-                message["dense fwd scale"] = torch.cat(dense_fwd_scale, dim=0)
-                message["dense bwd scale"] = torch.cat(dense_bwd_scale, dim=0)
                 message["mlp l1 weight"] = torch.cat(mlp_l1_weight, dim=1)
-                message["mlp l0 fwd scale"] = torch.cat(mlp_l0_fwd_scale, dim=0)
-                message["mlp l0 bwd scale"] = torch.cat(mlp_l0_bwd_scale, dim=0)
-                message["mlp l1 fwd scale"] = torch.cat(mlp_l1_fwd_scale, dim=0)
-                message["mlp l1 bwd scale"] = torch.cat(mlp_l1_bwd_scale, dim=0)
                 if md.linear_bias:
                     message["qkv bias"] = torch.cat(qkv_bias, dim=0)
                     if md.swiglu:

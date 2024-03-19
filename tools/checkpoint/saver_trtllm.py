@@ -26,11 +26,8 @@ def add_arguments(parser):
                        choices=['LlamaForCausalLM'],
                        help='Which model structure to convert.')
 
-def quantize(weight, scale, fp8):
-    if fp8:
-        return (weight * scale).to(torch.float8_e4m3fn).view(torch.int8)
-    else:
-        return weight
+def quantize(weight, scale):
+    return (weight * scale).to(torch.float8_e4m3fn).view(torch.int8)
 
 def save_checkpoint(queue, args):
 
@@ -319,6 +316,8 @@ def save_checkpoint(queue, args):
         'attn_bias': False,
         'mlp_bias': False,
     }
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
     with open(os.path.join(args.save_dir, 'config.json'), 'w') as f:
         import json
         json.dump(config, f, indent=4)
@@ -384,16 +383,16 @@ def save_checkpoint(queue, args):
             v_weight = torch.chunk(v_weight, args.target_tensor_parallel_size, dim=0)
             qkv_weight = [torch.cat(weights, dim=0) for weights in zip(q_weight, k_weight, v_weight)]
 
-            dense_weight = torch.chunk(msg.pop("dense weight"), args.target_tensor_parallel_size, dim=1)
-            mlp_l1_weight = torch.chunk(msg.pop("mlp l1 weight"), args.target_tensor_parallel_size, dim=1)
+            dense_weight = list(torch.chunk(msg.pop("dense weight"), args.target_tensor_parallel_size, dim=1))
+            mlp_l1_weight = list(torch.chunk(msg.pop("mlp l1 weight"), args.target_tensor_parallel_size, dim=1))
 
             # Special handling for swiglu
             if md.swiglu:
-                mlp_l0_weight_W = torch.chunk(msg.pop("mlp l0 weight W"), args.target_tensor_parallel_size, dim=0)
-                mlp_l0_weight_V = torch.chunk(msg.pop("mlp l0 weight V"), args.target_tensor_parallel_size, dim=0)
+                mlp_l0_weight_W = list(torch.chunk(msg.pop("mlp l0 weight W"), args.target_tensor_parallel_size, dim=0))
+                mlp_l0_weight_V = list(torch.chunk(msg.pop("mlp l0 weight V"), args.target_tensor_parallel_size, dim=0))
                 mlp_l0_weight = [torch.cat(weights, dim=0) for weights in zip(mlp_l0_weight_W, mlp_l0_weight_V)]
             else:
-                mlp_l0_weight_W = torch.chunk(msg.pop("mlp l0 weight"), args.target_tensor_parallel_size, dim=0)
+                mlp_l0_weight_W = list(torch.chunk(msg.pop("mlp l0 weight"), args.target_tensor_parallel_size, dim=0))
 
             if md.linear_bias:
                 qkv_bias = torch.chunk(msg.pop("qkv bias"), args.target_tensor_parallel_size, dim=0)
@@ -429,18 +428,24 @@ def save_checkpoint(queue, args):
                     dst_weight[tp_rank][f"{prefix}mlp.gate.weights_scaling_factor"] = 1 / mlp_l0_fwd_scale[1].clone().view(1)
                     dst_weight[tp_rank][f"{prefix}mlp.proj.activation_scaling_factor"] = 1 / mlp_l1_fwd_scale[0].view(1)
                     dst_weight[tp_rank][f"{prefix}mlp.proj.weights_scaling_factor"] = 1 / mlp_l1_fwd_scale[1].view(1)
+                    qkv_weight[tp_rank] = quantize(qkv_weight[tp_rank].contiguous(), qkv_fwd_scale[1].view(1))
+                    dense_weight[tp_rank] = quantize(dense_weight[tp_rank].contiguous(), dense_fwd_scale[1].view(1))
+                    mlp_l0_weight_W[tp_rank] = quantize(mlp_l0_weight_W[tp_rank].contiguous(), mlp_l0_fwd_scale[1].view(1))
+                    mlp_l1_weight[tp_rank] = quantize(mlp_l1_weight[tp_rank].contiguous(), mlp_l1_fwd_scale[1].view(1))
+                    if md.swiglu:
+                        mlp_l0_weight_V[tp_rank] = quantize(mlp_l0_weight_V[tp_rank].contiguous(), mlp_l0_fwd_scale[1].clone().view(1))
 
                 params_dict = {
                     f"{prefix}input_layernorm.weight" : input_norm_weight.contiguous(),
-                    f"{prefix}attention.qkv.weight" : quantize(qkv_weight[tp_rank].contiguous(), qkv_fwd_scale[1].view(1), md.fp8),
-                    f"{prefix}attention.dense.weight" : quantize(dense_weight[tp_rank].contiguous(), dense_fwd_scale[1].view(1), md.fp8),
+                    f"{prefix}attention.qkv.weight" : qkv_weight[tp_rank].contiguous(),
+                    f"{prefix}attention.dense.weight" : dense_weight[tp_rank].contiguous(),
                     f"{prefix}post_layernorm.weight" : post_norm_weight.contiguous(),
-                    f"{prefix}mlp.fc.weight" : quantize(mlp_l0_weight_W[tp_rank].contiguous(), mlp_l0_fwd_scale[1].view(1), md.fp8),
-                    f"{prefix}mlp.proj.weight" : quantize(mlp_l1_weight[tp_rank].contiguous(), mlp_l1_fwd_scale[1].view(1), md.fp8),
+                    f"{prefix}mlp.fc.weight" : mlp_l0_weight_W[tp_rank].contiguous(),
+                    f"{prefix}mlp.proj.weight" : mlp_l1_weight[tp_rank].contiguous(),
                 }
                 if md.swiglu:
                     params_dict.update({
-                        f"{prefix}mlp.gate.weight": quantize(mlp_l0_weight_V[tp_rank].contiguous(), mlp_l0_fwd_scale[1].clone().view(1), md.fp8),
+                        f"{prefix}mlp.gate.weight": mlp_l0_weight_V[tp_rank].contiguous(),
                     })
                 if md.norm_has_bias:
                     params_dict.update({
