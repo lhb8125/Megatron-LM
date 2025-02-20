@@ -46,14 +46,24 @@ class ScheduleNode:
         self.inputs = None
         self.outputs = None
 
-    def forward(self, *inputs):
+    def forward(self, inputs=()):
+
+        if not isinstance(inputs, tuple):
+            inputs = (inputs,)
+        return self._forward(*inputs)
+
+    def _forward(self, *inputs):
         torch.cuda.nvtx.range_push(f"{self.name} forward")
         self.inputs = [e.detach() if e is not None else None for e in inputs]
         for i, input in enumerate(self.inputs):
             if input is not None:
                 input.requires_grad = inputs[i].requires_grad
-
-        data = StreamAcquire.apply(self.event, self.stream, *self.inputs)
+        if len(inputs):
+            data = StreamAcquire.apply(self.event, self.stream, *self.inputs)
+        else:
+            # empty input, alse need wait stream
+            data = inputs
+            self.event.wait(self.stream)
         # pack args to tuple
         if not isinstance(data, tuple):
             data = (data,)
@@ -73,7 +83,12 @@ class ScheduleNode:
     def get_output(self):
         return self.output
 
-    def backward(self, *output_grad):
+    def backward(self, output_grad):
+        if not isinstance(output_grad, tuple):
+            output_grad = (output_grad,)
+        return self._forward(*output_grad)
+
+    def _backward(self, *output_grad):
 
         torch.cuda.nvtx.range_push(f"{self.name} backward")
         # not multiple input
@@ -81,6 +96,11 @@ class ScheduleNode:
             output_grad = output_grad[0]
         with torch.cuda.stream(self.stream):
             torch.autograd.backward(self.output, grad_tensors=output_grad)
+        if not len(self.inputs):
+            # empty input, alse need record stream
+            self.event.record(self.stream)
+
+
         torch.cuda.nvtx.range_pop()
         return self.get_grad()
 
