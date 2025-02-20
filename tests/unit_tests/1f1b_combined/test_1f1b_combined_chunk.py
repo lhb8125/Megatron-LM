@@ -430,10 +430,13 @@ def schedule_chunk_forward(schedule_plan):
 
 
 def schedule_chunk_backward(schedule_plan, grad):
+    if schedule_plan.post_process is not None:
+        grad =  schedule_plan.post_process.backward(grad)
     num_layers = schedule_plan.num_layers()
     for i in range(num_layers):
         b_layer = schedule_plan.get_layer(num_layers - 1 - i)
         f_input, grad = schedule_layer_1f1b(None, b_layer, None, grad)
+    schedule_plan.preprocess.backward(grad)
     pass
 
 def schudule_chunk_1f1b(f_schedule_plan, b_schedule_plan,  grad):
@@ -445,6 +448,7 @@ def schudule_chunk_1f1b(f_schedule_plan, b_schedule_plan,  grad):
         f_layer = f_schedule_plan.get_layer(i)
         b_layer = b_schedule_plan.get_layer(num_layers - 1 - i)
         f_input, grad = schedule_layer_1f1b(f_layer, b_layer, f_input, grad)
+    b_schedule_plan.preprocess.backward(grad)
     return f_input
 
 
