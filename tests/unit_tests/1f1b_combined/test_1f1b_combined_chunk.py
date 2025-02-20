@@ -19,6 +19,7 @@ from functools import partial
 class TransformerLayerState(MoEAlltoAllPerBatchState):
     pass
 
+
 class ModelChunkSate:
     pass
 
@@ -41,14 +42,14 @@ class ModelChunkSchedulePlan:
         self._transformer_layers = []
         self._event = torch.cuda.Event()
 
-
     @property
     def event(self):
         return self._event
 
     @property
-    def  pre_process(self):
+    def pre_process(self):
         return self._pre_process
+
     @pre_process.setter
     def pre_process(self, value):
         self._pre_process = value
@@ -58,18 +59,18 @@ class ModelChunkSchedulePlan:
         return self._post_process
 
     @pre_process.setter
-    def  post_process(self, value):
+    def post_process(self, value):
         self._post_process = value
 
     def get_layer(self, i):
         assert i < self.num_layers()
         return self._transformer_layers[i]
+
     def num_layers(self):
         return len(self._transformer_layers)
 
     def add_layer(self, layer):
         self._transformer_layers.append(layer)
-
 
     @property
     def state(self):
@@ -106,7 +107,10 @@ class PreProcessScheduleNode(ScheduleNode):
         rotary_pos_emb = None
         rotary_pos_cos = None
         rotary_pos_sin = None
-        if gpt_model.position_embedding_type == 'rope' and not gpt_model.config.multi_latent_attention:
+        if (
+            gpt_model.position_embedding_type == 'rope'
+            and not gpt_model.config.multi_latent_attention
+        ):
             if not gpt_model.training and gpt_model.config.flash_decode and inference_params:
                 # Flash decoding uses precomputed cos and sin for RoPE
                 rotary_pos_cos, rotary_pos_sin = gpt_model.rotary_pos_emb_cache.setdefault(
@@ -115,17 +119,21 @@ class PreProcessScheduleNode(ScheduleNode):
                 )
             else:
                 rotary_seq_len = gpt_model.rotary_pos_emb.get_rotary_seq_len(
-                    inference_params, gpt_model.decoder, decoder_input, gpt_model.config, packed_seq_params
+                    inference_params,
+                    gpt_model.decoder,
+                    decoder_input,
+                    gpt_model.config,
+                    packed_seq_params,
                 )
                 rotary_pos_emb = gpt_model.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None
-                               and packed_seq_params.qkv_format == 'thd',
+                    and packed_seq_params.qkv_format == 'thd',
                 )
         if (
-                (gpt_model.config.enable_cuda_graph or gpt_model.config.flash_decode)
-                and rotary_pos_cos is not None
-                and inference_params
+            (gpt_model.config.enable_cuda_graph or gpt_model.config.flash_decode)
+            and rotary_pos_cos is not None
+            and inference_params
         ):
             sequence_len_offset = torch.tensor(
                 [inference_params.sequence_len_offset] * inference_params.current_batch_size,
@@ -141,7 +149,6 @@ class PreProcessScheduleNode(ScheduleNode):
         self.model_chunk_state.rotary_pos_sin = rotary_pos_sin
         self.model_chunk_state.sequence_len_offset = sequence_len_offset
         return decoder_input
-
 
 
 class PostProcessScheduleNode(ScheduleNode):
@@ -167,6 +174,8 @@ class PostProcessScheduleNode(ScheduleNode):
             return logits.transpose(0, 1).contiguous()
         loss = gpt_model.compute_language_model_loss(labels, logits)
         return loss
+
+
 class TransformerNode(ScheduleNode):
 
     def __init__(self, common_state, layer, stream, event):
@@ -178,15 +187,15 @@ class TransformerNode(ScheduleNode):
 class AttnNode(TransformerNode):
 
     def forward_impl(self, hidden_states):
-        attention_mask=None
-        context=None
-        context_mask=None
-        rotary_pos_emb=None
-        rotary_pos_cos=None
-        rotary_pos_sin=None
-        attention_bias=None
-        inference_params=None
-        packed_seq_params=None
+        attention_mask = None
+        context = None
+        context_mask = None
+        rotary_pos_emb = None
+        rotary_pos_cos = None
+        rotary_pos_sin = None
+        attention_bias = None
+        inference_params = None
+        packed_seq_params = None
 
         # Residual connection.
         residual = hidden_states
@@ -209,9 +218,9 @@ class AttnNode(TransformerNode):
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.self_attn_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                attention_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.self_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
 
         # Residual connection.
         residual = hidden_states
@@ -233,9 +242,9 @@ class AttnNode(TransformerNode):
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.cross_attn_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                attention_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.cross_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
 
         # Residual connection.
         residual = hidden_states
@@ -249,15 +258,21 @@ class AttnNode(TransformerNode):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            tokens_per_expert = token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
-            permutated_local_input_tokens = token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
+            tokens_per_expert = token_dispatcher.meta_prepare(
+                pre_mlp_layernorm_output, probs, routing_map
+            )
+            permutated_local_input_tokens = token_dispatcher.dispatch_preprocess(
+                pre_mlp_layernorm_output, routing_map
+            )
         self.common_state.tokens_per_expert = tokens_per_expert
         return residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
 
 
 class DispatchNode(TransformerNode):
 
-    def forward_impl(self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs):
+    def forward_impl(
+        self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
+    ):
 
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
@@ -272,7 +287,9 @@ class MlPNode(TransformerNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             dispatched_input = token_dispatcher.dispatch_postprocess(dispatched_input)
-            expert_output, mlp_bias = self.layer.mlp.experts(dispatched_input, self.common_state.tokens_per_expert)
+            expert_output, mlp_bias = self.layer.mlp.experts(
+                dispatched_input, self.common_state.tokens_per_expert
+            )
             assert mlp_bias is None
             permutated_local_input_tokens = token_dispatcher.combine_preprocess(expert_output)
         shared_output = self.layer.mlp.shared_experts(pre_mlp_layernorm_output)
@@ -284,7 +301,9 @@ class CombineNode(TransformerNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
-            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(permutated_local_input_tokens)
+            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
+                permutated_local_input_tokens
+            )
         return residual, permutated_local_input_tokens, shared_output, probs
 
 
@@ -298,36 +317,39 @@ class CombinePostProcessNode(TransformerNode):
         output += shared_output
         mlp_output_with_bias = (output, None)
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.mlp_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                mlp_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.mlp_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(mlp_output_with_bias, residual, self.layer.hidden_dropout)
         output = transformer_layer.make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
         return output
 
+
 def build_layer_schedule_plan(layer, event, comp_stream, com_stream):
     common_state = TransformerLayerState()
     attn = AttnNode(common_state, layer, comp_stream, event)
     dispatch = DispatchNode(common_state, layer, com_stream, event)
-    mlp = MlPNode(common_state, layer,  comp_stream, event)
-    combine = CombineNode(common_state, layer,  com_stream, event)
-    post_combine = CombinePostProcessNode(common_state, layer,  comp_stream, event)
+    mlp = MlPNode(common_state, layer, comp_stream, event)
+    combine = CombineNode(common_state, layer, com_stream, event)
+    post_combine = CombinePostProcessNode(common_state, layer, comp_stream, event)
     return TransformerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
 
+
 def build_model_chunk_schedule_plan(
-        model,
-        comp_stream,
-        com_stream,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        attention_mask: Tensor,
-        decoder_input: Tensor = None,
-        labels: Tensor = None,
-        inference_params = None,
-        packed_seq_params = None,
-        extra_block_kwargs = None,
-        runtime_gather_output: Optional[bool] = None):
+    model,
+    comp_stream,
+    com_stream,
+    input_ids: Tensor,
+    position_ids: Tensor,
+    attention_mask: Tensor,
+    decoder_input: Tensor = None,
+    labels: Tensor = None,
+    inference_params=None,
+    packed_seq_params=None,
+    extra_block_kwargs=None,
+    runtime_gather_output: Optional[bool] = None,
+):
 
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     state = model_chunk_schedule_plan.state
@@ -342,19 +364,22 @@ def build_model_chunk_schedule_plan(
     state.extra_block_kwargs = extra_block_kwargs
     state.runtime_gather_output = runtime_gather_output
 
-
-
-
     # build preprocess
-    model_chunk_schedule_plan.pre_process = PreProcessScheduleNode(model, model_chunk_schedule_plan.state, comp_stream)
+    model_chunk_schedule_plan.pre_process = PreProcessScheduleNode(
+        model, model_chunk_schedule_plan.state, comp_stream
+    )
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, model_chunk_schedule_plan.state.event, comp_stream, com_stream)
+        layer_plan = build_layer_schedule_plan(
+            layer, model_chunk_schedule_plan.state.event, comp_stream, com_stream
+        )
         model_chunk_schedule_plan.add_layer(layer_plan)
 
     if model.post_process:
-        model_chunk_schedule_plan.pre_process = PostProcessScheduleNode(model, model_chunk_schedule_plan.state, comp_stream)
+        model_chunk_schedule_plan.pre_process = PostProcessScheduleNode(
+            model, model_chunk_schedule_plan.state, comp_stream
+        )
 
 
 def set_deterministic():
@@ -384,13 +409,12 @@ def build_gpt_model(args):
     return transformer_layer
 
 
-
 def test_1f1b_overlap(args):
     layer = build_gpt_model(args)
-    datas = [ build_data(args) for _ in range(16)]
+    datas = [build_data(args) for _ in range(16)]
     events = [torch.cuda.Event() for _ in range(16)]
     com_stream = torch.cuda.Stream(device="cuda")
-    comp_stream = torch.cuda.Stream(device="cuda") # torch.cuda.current_stream()
+    comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
     schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer)
 
 
@@ -415,9 +439,7 @@ def schedule_layer_1f1b(f_layer, b_layer, f_input, b_grad):
         b_grad = b_layer.attn.backward(b_grad)
     if f_layer is not None:
         f_input = f_layer.post_combine.forward(f_input)
-    return  f_input, b_grad
-
-
+    return f_input, b_grad
 
 
 def schedule_chunk_forward(schedule_plan):
@@ -431,7 +453,7 @@ def schedule_chunk_forward(schedule_plan):
 
 def schedule_chunk_backward(schedule_plan, grad):
     if schedule_plan.post_process is not None:
-        grad =  schedule_plan.post_process.backward(grad)
+        grad = schedule_plan.post_process.backward(grad)
     num_layers = schedule_plan.num_layers()
     for i in range(num_layers):
         b_layer = schedule_plan.get_layer(num_layers - 1 - i)
@@ -439,10 +461,11 @@ def schedule_chunk_backward(schedule_plan, grad):
     schedule_plan.preprocess.backward(grad)
     pass
 
-def schudule_chunk_1f1b(f_schedule_plan, b_schedule_plan,  grad):
+
+def schudule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
     f_input = f_schedule_plan.preprocess.forward()
     if b_schedule_plan.post_process is not None:
-        grad =  b_schedule_plan.post_process.backward(grad)
+        grad = b_schedule_plan.post_process.backward(grad)
     num_layers = f_schedule_plan.num_layers()
     for i in range(num_layers):
         f_layer = f_schedule_plan.get_layer(i)
@@ -452,15 +475,16 @@ def schudule_chunk_1f1b(f_schedule_plan, b_schedule_plan,  grad):
     return f_input
 
 
-
 def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     l = len(datas)
     assert l == len(events), f"{l} vs {len(events)}"
     # first f
     pre_stream = torch.cuda.current_stream()
 
-    build_plan_func = partial(build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None)
-    pre_schedule_plan = build_plan_func(decoder_input = datas[0])
+    build_plan_func = partial(
+        build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None
+    )
+    pre_schedule_plan = build_plan_func(decoder_input=datas[0])
     pre_output = schedule_chunk_forward(pre_schedule_plan)
 
     # 1f1b
@@ -468,8 +492,10 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
         grad = torch.ones_like(pre_output)
         grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
 
-        build_plan_func = partial(build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None)
-        schedule_plan = build_plan_func(decoder_input = datas[i])
+        build_plan_func = partial(
+            build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None
+        )
+        schedule_plan = build_plan_func(decoder_input=datas[i])
         torch.cuda.nvtx.range_push(f"1f1b")
         pre_output = schedule_layer_1f1b(schedule_plan, pre_schedule_plan, grad)
         pre_schedule_plan = schedule_plan
@@ -480,18 +506,18 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
     schedule_chunk_backward(pre_schedule_plan, grad)
 
-    for (i, e) in enumerate(events):
+    for i, e in enumerate(events):
         e.wait(torch.cuda.current_stream())
 
     torch.cuda.synchronize()
     print("finish")
+
 
 def main():
 
     torch.cuda.cudart().cudaProfilerStart()
     test_1f1b_overlap(args)
     torch.cuda.cudart().cudaProfilerStop()
-
 
 
 if __name__ == "__main__":
