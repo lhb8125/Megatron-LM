@@ -1,27 +1,27 @@
 # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
 """Pretrain GPT."""
 
+import gc
 import logging
 import os
 import sys
-from megatron.training import get_args
-from megatron.training.initialize import initialize_megatron
-
-from typing import Callable, Union, Any, Tuple, Optional
+import weakref
+from functools import partial
+from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
-from megatron.core.transformer import transformer_layer
-from megatron.core.pipeline_parallel.combined_1f1b import ScheduleNode, StreamRelease, StreamAcquire
-from megatron.training.arguments import core_transformer_config_from_args
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
-from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
-from functools import partial
+
 from megatron.core.models.gpt import GPTModel
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
+from megatron.core.pipeline_parallel.combined_1f1b import ScheduleNode, StreamAcquire, StreamRelease
+from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
+from megatron.training import get_args
+from megatron.training.arguments import core_transformer_config_from_args
+from megatron.training.initialize import initialize_megatron
 from megatron.training.utils import unwrap_model
-import weakref
-import gc
 
 
 def weak_method(method):
@@ -441,8 +441,6 @@ def schedule_layer_1f1b(
         f_input = f_layer.mlp.forward(f_input)
     if f_layer is not None:
         f_input = f_layer.combine.forward(f_input)
-
-
 
     def next_iter_pre_forward():
         if f_layer is not None:
