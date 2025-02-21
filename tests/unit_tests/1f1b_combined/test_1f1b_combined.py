@@ -13,6 +13,8 @@ from megatron.core.pipeline_parallel.combined_1f1b import ScheduleNode, StreamRe
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
+
+
 class TransformerScheduleNode(ScheduleNode):
 
     def __init__(self, common_state, layer, stream, event):
@@ -21,19 +23,18 @@ class TransformerScheduleNode(ScheduleNode):
         self.layer = layer
 
 
-
 class AttnScheduleNode(TransformerScheduleNode):
 
     def forward_impl(self, hidden_states):
-        attention_mask=None
-        context=None
-        context_mask=None
-        rotary_pos_emb=None
-        rotary_pos_cos=None
-        rotary_pos_sin=None
-        attention_bias=None
-        inference_params=None
-        packed_seq_params=None
+        attention_mask = None
+        context = None
+        context_mask = None
+        rotary_pos_emb = None
+        rotary_pos_cos = None
+        rotary_pos_sin = None
+        attention_bias = None
+        inference_params = None
+        packed_seq_params = None
 
         # Residual connection.
         residual = hidden_states
@@ -56,9 +57,9 @@ class AttnScheduleNode(TransformerScheduleNode):
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.self_attn_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                attention_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.self_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
 
         # Residual connection.
         residual = hidden_states
@@ -80,9 +81,9 @@ class AttnScheduleNode(TransformerScheduleNode):
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.cross_attn_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                attention_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.cross_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
 
         # Residual connection.
         residual = hidden_states
@@ -96,15 +97,21 @@ class AttnScheduleNode(TransformerScheduleNode):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            tokens_per_expert = token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
-            permutated_local_input_tokens = token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
+            tokens_per_expert = token_dispatcher.meta_prepare(
+                pre_mlp_layernorm_output, probs, routing_map
+            )
+            permutated_local_input_tokens = token_dispatcher.dispatch_preprocess(
+                pre_mlp_layernorm_output, routing_map
+            )
         self.common_state.tokens_per_expert = tokens_per_expert
         return residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
 
 
 class DispatchScheduleNode(TransformerScheduleNode):
 
-    def forward_impl(self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs):
+    def forward_impl(
+        self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
+    ):
 
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
@@ -119,7 +126,9 @@ class MlPScheduleNode(TransformerScheduleNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             dispatched_input = token_dispatcher.dispatch_postprocess(dispatched_input)
-            expert_output, mlp_bias = self.layer.mlp.experts(dispatched_input, self.common_state.tokens_per_expert)
+            expert_output, mlp_bias = self.layer.mlp.experts(
+                dispatched_input, self.common_state.tokens_per_expert
+            )
             assert mlp_bias is None
             permutated_local_input_tokens = token_dispatcher.combine_preprocess(expert_output)
         shared_output = self.layer.mlp.shared_experts(pre_mlp_layernorm_output)
@@ -131,7 +140,9 @@ class CombinedSchedule(TransformerScheduleNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
-            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(permutated_local_input_tokens)
+            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
+                permutated_local_input_tokens
+            )
         return residual, permutated_local_input_tokens, shared_output, probs
 
 
@@ -145,9 +156,9 @@ class CombinePostProcessSchedule(TransformerScheduleNode):
         output += shared_output
         mlp_output_with_bias = (output, None)
         with self.layer.bias_dropout_add_exec_handler():
-            hidden_states = self.layer.mlp_bda(self.layer.training, self.layer.config.bias_dropout_fusion)(
-                mlp_output_with_bias, residual, self.layer.hidden_dropout
-            )
+            hidden_states = self.layer.mlp_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(mlp_output_with_bias, residual, self.layer.hidden_dropout)
         output = transformer_layer.make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
@@ -157,13 +168,14 @@ class CombinePostProcessSchedule(TransformerScheduleNode):
 class CommonState(MoEAlltoAllPerBatchState):
     pass
 
+
 def build_schedule_nodes(layer, event, comp_stream, com_stream):
     common_state = CommonState()
     attn = AttnScheduleNode(common_state, layer, comp_stream, event)
     dispatch = DispatchScheduleNode(common_state, layer, com_stream, event)
-    mlp = MlPScheduleNode(common_state, layer,  comp_stream, event)
-    combine = CombinedSchedule(common_state, layer,  com_stream, event)
-    post_combine = CombinePostProcessSchedule(common_state, layer,  comp_stream, event)
+    mlp = MlPScheduleNode(common_state, layer, comp_stream, event)
+    combine = CombinedSchedule(common_state, layer, com_stream, event)
+    post_combine = CombinePostProcessSchedule(common_state, layer, comp_stream, event)
     return [attn, dispatch, mlp, combine, post_combine]
 
 
@@ -194,15 +206,13 @@ def build_transformer_layer(args):
     return transformer_layer
 
 
-
 def test_1f1b_overlap(args):
     layer = build_transformer_layer(args)
-    datas = [ build_data(args) for _ in range(16)]
+    datas = [build_data(args) for _ in range(16)]
     events = [torch.cuda.Event() for _ in range(16)]
     com_stream = torch.cuda.Stream(device="cuda")
-    comp_stream = torch.cuda.Stream(device="cuda") # torch.cuda.current_stream()
+    comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
     schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer)
-
 
 
 def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
@@ -217,11 +227,10 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
         output = g.forward(output)
     pre_output = output
 
-
     # 1f1b
     for i in range(1, l):
         grad = torch.ones_like(pre_output)
-        grad = StreamRelease.apply(events[i-1], pre_stream, grad)
+        grad = StreamRelease.apply(events[i - 1], pre_stream, grad)
         data = StreamRelease.apply(events[i], pre_stream, datas[i])
         graphs = build_schedule_nodes(layer, events[i], comp_stream, com_stream)
 
@@ -249,15 +258,13 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
         # post combine
         output = graphs[4].forward(output)
 
-
-
         pre_output = output
         pre_graphs = graphs
         torch.cuda.nvtx.range_pop()
 
     # last b
     grad = torch.ones_like(pre_output)
-    grad = StreamRelease.apply(events[l-1], pre_stream, grad)
+    grad = StreamRelease.apply(events[l - 1], pre_stream, grad)
     grad = (grad,)
     grad = pre_graphs[4].backward(grad)
     grad = pre_graphs[3].backward(grad)
@@ -265,18 +272,18 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
     grad = pre_graphs[1].backward(grad)
     grad = pre_graphs[0].backward(grad)
 
-    for (i, e) in enumerate(events):
+    for i, e in enumerate(events):
         e.wait(torch.cuda.current_stream())
 
     torch.cuda.synchronize()
     print("finish")
+
 
 def main():
 
     torch.cuda.cudart().cudaProfilerStart()
     test_1f1b_overlap(args)
     torch.cuda.cudart().cudaProfilerStop()
-
 
 
 if __name__ == "__main__":
