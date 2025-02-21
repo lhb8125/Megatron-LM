@@ -19,7 +19,6 @@ from functools import partial
 class TransformerLayerState(MoEAlltoAllPerBatchState):
     pass
 
-
 class ModelChunkSate:
     pass
 
@@ -375,47 +374,12 @@ def build_model_chunk_schedule_plan(
             layer, model_chunk_schedule_plan.state.event, comp_stream, com_stream
         )
         model_chunk_schedule_plan.add_layer(layer_plan)
-
+    # build post process
     if model.post_process:
         model_chunk_schedule_plan.pre_process = PostProcessNode(
             model, model_chunk_schedule_plan.state, comp_stream
         )
 
-
-def set_deterministic():
-    torch.use_deterministic_algorithms(True)
-
-
-def build_data(args):
-    s = args.seq_length
-    if args.sequence_parallel:
-        s = s // args.tensor_model_parallel_size
-    b = 1
-    h = args.hidden_size
-
-    hidden_states = torch.randn(*(s, b, h), dtype=torch.bfloat16, device="cuda") * h
-    return hidden_states
-
-
-def build_gpt_model(args):
-    config = core_transformer_config_from_args(args)
-    model_spec = get_gpt_layer_with_transformer_engine_spec(
-        args.num_experts,
-        args.moe_grouped_gemm,
-        multi_latent_attention=args.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=True,
-    )
-    transformer_layer = build_module(model_spec, config=config, layer_number=1)
-    return transformer_layer
-
-
-def test_1f1b_overlap(args):
-    layer = build_gpt_model(args)
-    datas = [build_data(args) for _ in range(16)]
-    events = [torch.cuda.Event() for _ in range(16)]
-    com_stream = torch.cuda.Stream(device="cuda")
-    comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
-    schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer)
 
 
 def schedule_layer_1f1b(f_layer, b_layer, f_input, b_grad):
@@ -530,6 +494,41 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     torch.cuda.synchronize()
     print("finish")
 
+
+def set_deterministic():
+    torch.use_deterministic_algorithms(True)
+
+
+def build_data(args):
+    s = args.seq_length
+    if args.sequence_parallel:
+        s = s // args.tensor_model_parallel_size
+    b = 1
+    h = args.hidden_size
+
+    hidden_states = torch.randn(*(s, b, h), dtype=torch.bfloat16, device="cuda") * h
+    return hidden_states
+
+
+def build_gpt_model(args):
+    config = core_transformer_config_from_args(args)
+    model_spec = get_gpt_layer_with_transformer_engine_spec(
+        args.num_experts,
+        args.moe_grouped_gemm,
+        multi_latent_attention=args.multi_latent_attention,
+        moe_use_legacy_grouped_gemm=True,
+    )
+    transformer_layer = build_module(model_spec, config=config, layer_number=1)
+    return transformer_layer
+
+
+def test_1f1b_overlap(args):
+    model = build_gpt_model(args)
+    datas = [build_data(args) for _ in range(16)]
+    events = [torch.cuda.Event() for _ in range(16)]
+    com_stream = torch.cuda.Stream(device="cuda")
+    comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
+    schedule_1f1b_overlap(datas, events, comp_stream, com_stream, model)
 
 def main():
 
