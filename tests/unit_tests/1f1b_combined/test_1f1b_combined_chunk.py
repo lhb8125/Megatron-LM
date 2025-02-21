@@ -21,6 +21,7 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.transformer.module import Float16Module
 from megatron.training.utils import unwrap_model
 import weakref
+import gc
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -471,15 +472,16 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
 
 
 
-def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
-    l = len(datas)
+def schedule_1f1b_overlap(args, comp_stream, com_stream, model):
+    l = 64
     # first f
     pre_stream = torch.cuda.current_stream()
 
     build_plan_func = partial(
         build_model_chunk_schedule_plan, model, comp_stream, com_stream, None, None, None
     )
-    pre_schedule_plan = build_plan_func(decoder_input=datas[0])
+    data = build_data(args)
+    pre_schedule_plan = build_plan_func(decoder_input=data)
     print("schedule_chunk_forward")
     torch.cuda.nvtx.range_push(f"forward schudule")
     pre_output = schedule_chunk_forward(pre_schedule_plan)
@@ -489,11 +491,15 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
         print("schedule_chunk_1f1b")
         grad = torch.ones_like(pre_output)
         grad = StreamRelease.apply(pre_schedule_plan.event, pre_stream, grad)
-        schedule_plan = build_plan_func(decoder_input=datas[i])
+        data = build_data(args)
+        schedule_plan = build_plan_func(decoder_input=data)
         torch.cuda.nvtx.range_push(f"1f1b schudule")
         pre_output = schedule_chunk_1f1b(schedule_plan, pre_schedule_plan, grad)
         pre_schedule_plan = schedule_plan
         torch.cuda.nvtx.range_pop()
+        # aviod gpu oom
+        gc.collect()
+        #torch.cuda.empty_cache()
 
     # last b
     grad = torch.ones_like(pre_output)
@@ -568,10 +574,9 @@ def build_gpt_model(args):
 
 def test_1f1b_overlap(args):
     model = build_gpt_model(args)
-    datas = [build_data(args) for _ in range(16)]
     com_stream = torch.cuda.Stream(device="cuda")
     comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
-    schedule_1f1b_overlap(datas, comp_stream, com_stream, model)
+    schedule_1f1b_overlap(args, comp_stream, com_stream, model)
 
 def main():
     initialize_megatron()
