@@ -410,17 +410,6 @@ def schedule_layer_1f1b(
     f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None
 ):
 
-    if pre_forward is not None:
-        assert f_input is None
-        # post combine from last iter
-        f_input = pre_forward()
-        del pre_forward
-    if f_layer is not None:
-        f_input = f_layer.attn.forward(f_input)
-
-    if f_layer is not None:
-        f_input = f_layer.dispatch.forward(f_input)
-
     if pre_backward is not None:
         # attn backward from last iter
         assert b_grad is None
@@ -432,15 +421,28 @@ def schedule_layer_1f1b(
     if b_layer is not None:
         b_grad = b_layer.combine.backward(b_grad)
 
+    if pre_forward is not None:
+        assert f_input is None
+        # post combine from last iter
+        f_input = pre_forward()
+        del pre_forward
     if f_layer is not None:
-        f_input = f_layer.mlp.forward(f_input)
+        f_input = f_layer.attn.forward(f_input)
+
     if f_layer is not None:
-        f_input = f_layer.combine.forward(f_input)
+        f_input = f_layer.dispatch.forward(f_input)
 
     if b_layer is not None:
         b_grad = b_layer.mlp.backward(b_grad)
     if b_layer is not None:
         b_grad = b_layer.dispatch.backward(b_grad)
+
+    if f_layer is not None:
+        f_input = f_layer.mlp.forward(f_input)
+    if f_layer is not None:
+        f_input = f_layer.combine.forward(f_input)
+
+
 
     def next_iter_pre_forward():
         if f_layer is not None:
