@@ -4,6 +4,8 @@
 import logging
 import os
 import sys
+from megatron.training import get_args
+from megatron.training.initialize import initialize_megatron
 
 import torch
 from torch import Tensor
@@ -567,7 +569,8 @@ def test_1f1b_overlap(args):
     schedule_1f1b_overlap(datas, comp_stream, com_stream, model)
 
 def main():
-
+    initialize_megatron()
+    args = get_args()
     torch.cuda.cudart().cudaProfilerStart()
     test_1f1b_overlap(args)
     torch.cuda.cudart().cudaProfilerStop()
