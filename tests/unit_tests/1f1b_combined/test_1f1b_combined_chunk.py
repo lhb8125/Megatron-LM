@@ -330,10 +330,15 @@ class CombinePostProcessNode(TransformerNode):
 def build_layer_schedule_plan(layer, event, comp_stream, com_stream):
     common_state = TransformerLayerState()
     attn = AttnNode(common_state, layer, comp_stream, event)
+    attn.name = "attn"
     dispatch = DispatchNode(common_state, layer, com_stream, event)
+    dispatch.name = "dispatch"
     mlp = MlPNode(common_state, layer, comp_stream, event)
+    mlp.name = "mlp"
     combine = CombineNode(common_state, layer, com_stream, event)
+    combine.name = "combine"
     post_combine = CombinePostProcessNode(common_state, layer, comp_stream, event)
+    post_combine.name = "post_combine"
     return TransformerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
 
 
@@ -369,6 +374,7 @@ def build_model_chunk_schedule_plan(
     model_chunk_schedule_plan.pre_process = PreProcessNode(
         model, model_chunk_schedule_plan.state, comp_stream
     )
+    model_chunk_schedule_plan.pre_process.name = "pre_process"
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
@@ -378,9 +384,11 @@ def build_model_chunk_schedule_plan(
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
-        model_chunk_schedule_plan.pre_process = PostProcessNode(
+
+        model_chunk_schedule_plan.post_process = PostProcessNode(
             model, model_chunk_schedule_plan.state, comp_stream
         )
+        model_chunk_schedule_plan.post_process.name = "post_process"
 
 
 
