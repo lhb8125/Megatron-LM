@@ -24,13 +24,12 @@ import weakref
 import gc
 
 
-def weak_method(func, obj):
-    object_ref = weakref.ref(obj)
-    del obj
-
+def weak_method(method):
+    method_ref = weakref.WeakMethod(method)
+    del method
     def wrapped_func(*args, **kwarg):
         # nonlocal object_ref
-        return func(object_ref(), *args, **kwarg)
+        return method_ref()(*args, **kwarg)
 
     return wrapped_func
 
@@ -99,7 +98,7 @@ class ModelChunkSchedulePlan:
 class PreProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(type(self).forward_impl, self), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event)
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -173,7 +172,7 @@ class PreProcessNode(ScheduleNode):
 class PostProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(type(self).forward_impl, self), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event)
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -198,7 +197,7 @@ class PostProcessNode(ScheduleNode):
 class TransformerNode(ScheduleNode):
 
     def __init__(self, common_state, layer, stream, event):
-        super().__init__(weak_method(type(self).forward_impl, self), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event)
         self.common_state = common_state
         self.layer = layer
 
