@@ -7,13 +7,15 @@ import sys
 
 import torch
 from torch import Tensor
-from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer import transformer_layer
 from megatron.core.pipeline_parallel.combined_1f1b import ScheduleNode, StreamRelease, StreamAcquire
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
 from functools import partial
+from megatron.core.models.gpt import GPTModel
+from megatron.core.transformer.module import Float16Module
+from megatron.training.utils import unwrap_model
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -461,7 +463,7 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     pre_stream = torch.cuda.current_stream()
 
     build_plan_func = partial(
-        build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None
+        build_model_chunk_schedule_plan, model, comp_stream, com_stream, None, None, None
     )
     pre_schedule_plan = build_plan_func(decoder_input=datas[0])
     torch.cuda.nvtx.range_push(f"forward schudule")
@@ -471,10 +473,6 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     for i in range(1, l):
         grad = torch.ones_like(pre_output)
         grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
-
-        build_plan_func = partial(
-            build_model_chunk_schedule_plan, comp_stream, com_stream, None, None, None
-        )
         schedule_plan = build_plan_func(decoder_input=datas[i])
         torch.cuda.nvtx.range_push(f"1f1b schudule")
         pre_output = schedule_chunk_1f1b(schedule_plan, pre_schedule_plan, grad)
@@ -512,23 +510,53 @@ def build_data(args):
 
 def build_gpt_model(args):
     config = core_transformer_config_from_args(args)
-    model_spec = get_gpt_layer_with_transformer_engine_spec(
+    extra_args = {}
+    import inspect
+
+    signature = inspect.signature(get_gpt_layer_with_transformer_engine_spec)
+    if "multi_latent_attention" in signature.parameters:
+        extra_args["multi_latent_attention"] = args.multi_latent_attention
+
+    if "qk_layernorm" in signature.parameters:
+        extra_args["qk_layernorm"] = args.qk_layernorm
+
+    if "moe_use_legacy_grouped_gemm" in signature.parameters:
+        extra_args["moe_use_legacy_grouped_gemm"] = True
+
+    transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
         args.num_experts,
         args.moe_grouped_gemm,
-        multi_latent_attention=args.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=True,
+        **extra_args,
     )
-    transformer_layer = build_module(model_spec, config=config, layer_number=1)
-    return transformer_layer
+
+
+    model = GPTModel(
+        config=config,
+        transformer_layer_spec=transformer_layer_spec,
+        vocab_size=args.padded_vocab_size,
+        max_sequence_length=args.max_position_embeddings,
+        pre_process=True,
+        post_process=True,
+        fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
+        parallel_output=True,
+        share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
+        position_embedding_type=args.position_embedding_type,
+        rotary_percent=args.rotary_percent,
+        rotary_base=args.rope_theta,
+    )
+
+    if args.fp16 or args.bf16:
+        model = Float16Module(config, model)
+    model = unwrap_model(model, (Float16Module,))
+    return model
 
 
 def test_1f1b_overlap(args):
     model = build_gpt_model(args)
     datas = [build_data(args) for _ in range(16)]
-    events = [torch.cuda.Event() for _ in range(16)]
     com_stream = torch.cuda.Stream(device="cuda")
     comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
-    schedule_1f1b_overlap(datas, events, comp_stream, com_stream, model)
+    schedule_1f1b_overlap(datas, comp_stream, com_stream, model)
 
 def main():
 
