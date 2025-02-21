@@ -409,28 +409,60 @@ def build_model_chunk_schedule_plan(
     return model_chunk_schedule_plan
 
 
-def schedule_layer_1f1b(f_layer, b_layer, f_input, b_grad):
-    if b_layer is not None:
-        b_grad = b_layer.post_combine.backward(b_grad)
+def schedule_layer_1f1b(f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None):
+    
+    if pre_forward is not None:
+        assert f_input is None
+        # post combine from last iter
+        f_input = pre_forward()
+        del pre_forward
     if f_layer is not None:
         f_input = f_layer.attn.forward(f_input)
+        
+       
+    if f_layer is not None:
+        f_input = f_layer.dispatch.forward(f_input) 
+        
+        
+    if pre_backward is not None:
+        # attn backward from last iter
+        assert b_grad is None
+        b_grad = pre_backward()
+        
+    if b_layer is not None:
+        b_grad = b_layer.post_combine.backward(b_grad)
+        
+        
     if b_layer is not None:
         b_grad = b_layer.combine.backward(b_grad)
+        
+    
     if f_layer is not None:
-        f_input = f_layer.dispatch.forward(f_input)
+        f_input = f_layer.mlp.forward(f_input)    
+    if f_layer is not None:
+        f_input = f_layer.combine.forward(f_input)    
+        
     if b_layer is not None:
         b_grad = b_layer.mlp.backward(b_grad)
-    if f_layer is not None:
-        f_input = f_layer.mlp.forward(f_input)
     if b_layer is not None:
         b_grad = b_layer.dispatch.backward(b_grad)
-    if f_layer is not None:
-        f_input = f_layer.combine.forward(f_input)
-    if b_layer is not None:
-        b_grad = b_layer.attn.backward(b_grad)
-    if f_layer is not None:
-        f_input = f_layer.post_combine.forward(f_input)
-    return f_input, b_grad
+        
+        
+    def next_iter_pre_forward():
+        if f_layer is not None:
+            output = f_layer.post_combine.forward(f_input)
+            return output
+        
+    def next_iter_pre_backward():    
+        if b_layer is not None:
+            grad = b_layer.attn.backward(b_grad)
+            return grad
+            
+    if f_layer and b_layer:
+        return next_iter_pre_forward, next_iter_pre_backward
+    else:
+        return next_iter_pre_forward(), next_iter_pre_backward()
+        
 
 
 def schedule_chunk_forward(schedule_plan):
@@ -440,49 +472,61 @@ def schedule_chunk_forward(schedule_plan):
 
 def schedule_chunk_backward(schedule_plan, grad):
     tmp = schedule_chunk_1f1b(None, schedule_plan, grad)
+    
 
-def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
+def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None):
+    
     f_input = None
     if f_schedule_plan is not None:
         f_input = f_schedule_plan.pre_process.forward()
-    if b_schedule_plan is not None and b_schedule_plan.post_process is not None:
-        grad = b_schedule_plan.post_process.backward(grad)
+        
+    if b_schedule_plan is not None:
+        assert grad is not None
+        if b_schedule_plan.post_process is not None:
+            grad = b_schedule_plan.post_process.backward(grad)
 
     f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
     b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
     overlaped_layers = min(f_num_layers, b_num_layers)
+    
+    pre_forward = lambda : f_input
+    pre_backward = lambda : grad
 
     for i in range(overlaped_layers):
         f_layer = f_schedule_plan.get_layer(i)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
         torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
-        f_input, grad = schedule_layer_1f1b(f_layer, b_layer, f_input, grad)
+        pre_forward, pre_backward = schedule_layer_1f1b(f_layer, b_layer, pre_forward=pre_forward, pre_backward=pre_backward)
         torch.cuda.nvtx.range_pop()
-
-    for i in range(overlaped_layers, b_num_layers):
-        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-        torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-        tmp, grad = schedule_layer_1f1b(None, b_layer, None, grad)
-        torch.cuda.nvtx.range_pop()
-
-    if b_schedule_plan is not None:
-        b_schedule_plan.pre_process.backward(grad)
-
+    
+    # tail forward
+    f_input = pre_forward()
     for i in range(overlaped_layers, f_num_layers):
         f_layer = f_schedule_plan.get_layer(i)
         torch.cuda.nvtx.range_push(f"layer_{i}f")
-        f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input, None)
+        f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input=f_input)
         torch.cuda.nvtx.range_pop()
 
     if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
         f_input = f_schedule_plan.post_process.forward(f_input)
+        
+    # tail backward
+    grad = pre_backward()
+    for i in range(overlaped_layers, b_num_layers):
+        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+        torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
+        tmp, grad = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+        torch.cuda.nvtx.range_pop()
+
+    if b_schedule_plan is not None:
+        b_schedule_plan.pre_process.backward(grad)    
 
     return  f_input
 
 
 
 def schedule_1f1b_overlap(args, comp_stream, com_stream, model):
-    l = 64
+    l = 16
     # first f
     pre_stream = torch.cuda.current_stream()
 
