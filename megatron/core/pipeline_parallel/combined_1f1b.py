@@ -86,7 +86,7 @@ class ScheduleNode:
     def backward(self, output_grad):
         if not isinstance(output_grad, tuple):
             output_grad = (output_grad,)
-        return self._forward(*output_grad)
+        return self._backward(*output_grad)
 
     def _backward(self, *output_grad):
 

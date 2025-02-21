@@ -20,6 +20,7 @@ from functools import partial
 from megatron.core.models.gpt import GPTModel
 from megatron.core.transformer.module import Float16Module
 from megatron.training.utils import unwrap_model
+import weakref
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -63,7 +64,7 @@ class ModelChunkSchedulePlan:
     def post_process(self):
         return self._post_process
 
-    @pre_process.setter
+    @post_process.setter
     def post_process(self, value):
         self._post_process = value
 
@@ -90,7 +91,7 @@ class PreProcessNode(ScheduleNode):
         self.model_chunk_state = model_chunk_state
 
     def forward_impl(self):
-
+        
         gpt_model = self.gpt_model
         decoder_input = self.model_chunk_state.decoder_input
         input_ids = self.model_chunk_state.input_ids
@@ -394,7 +395,8 @@ def build_model_chunk_schedule_plan(
             model, state, event, comp_stream
         )
         model_chunk_schedule_plan.post_process.name = "post_process"
-
+        
+    return model_chunk_schedule_plan
 
 
 def schedule_layer_1f1b(f_layer, b_layer, f_input, b_grad):
@@ -432,7 +434,7 @@ def schedule_chunk_backward(schedule_plan, grad):
 def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
     f_input = None
     if f_schedule_plan is not None:
-        f_input = f_schedule_plan.preprocess.forward()
+        f_input = f_schedule_plan.pre_process.forward()
     if b_schedule_plan is not None and b_schedule_plan.post_process is not None:
         grad = b_schedule_plan.post_process.backward(grad)
 
@@ -454,7 +456,7 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
         torch.cuda.nvtx.range_pop()
 
     if b_schedule_plan is not None:
-        b_schedule_plan.preprocess.backward(grad)
+        b_schedule_plan.pre_process.backward(grad)
 
     for i in range(overlaped_layers, f_num_layers):
         f_layer = f_schedule_plan.get_layer(i)
@@ -478,15 +480,15 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
         build_model_chunk_schedule_plan, model, comp_stream, com_stream, None, None, None
     )
     pre_schedule_plan = build_plan_func(decoder_input=datas[0])
+    print("schedule_chunk_forward")
     torch.cuda.nvtx.range_push(f"forward schudule")
     pre_output = schedule_chunk_forward(pre_schedule_plan)
-    print("schedule_chunk_forward")
     torch.cuda.nvtx.range_pop()
     # 1f1b
     for i in range(1, l):
         print("schedule_chunk_1f1b")
         grad = torch.ones_like(pre_output)
-        grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
+        grad = StreamRelease.apply(pre_schedule_plan.event, pre_stream, grad)
         schedule_plan = build_plan_func(decoder_input=datas[i])
         torch.cuda.nvtx.range_push(f"1f1b schudule")
         pre_output = schedule_chunk_1f1b(schedule_plan, pre_schedule_plan, grad)
@@ -495,15 +497,12 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
 
     # last b
     grad = torch.ones_like(pre_output)
-    grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
+    grad = StreamRelease.apply(pre_schedule_plan.event, pre_stream, grad)
     torch.cuda.nvtx.range_push(f"backward schudule")
     print("schedule_chunk_backward")
     schedule_chunk_backward(pre_schedule_plan, grad)
     torch.cuda.nvtx.range_pop()
-
-    for i, e in enumerate(events):
-        e.wait(torch.cuda.current_stream())
-
+    pre_schedule_plan.event.wait(torch.cuda.current_stream())
     torch.cuda.synchronize()
     print("finish")
 
@@ -520,6 +519,7 @@ def build_data(args):
     h = args.hidden_size
 
     hidden_states = torch.randn(*(s, b, h), dtype=torch.bfloat16, device="cuda") * h
+    hidden_states.requires_grad = True
     return hidden_states
 
 
