@@ -27,6 +27,7 @@ import gc
 def weak_method(method):
     method_ref = weakref.WeakMethod(method)
     del method
+
     def wrapped_func(*args, **kwarg):
         # nonlocal object_ref
         return method_ref()(*args, **kwarg)
