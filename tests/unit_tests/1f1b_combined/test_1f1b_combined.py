@@ -214,7 +214,7 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
     pre_graphs = build_schedule_nodes(layer, events[0], comp_stream, com_stream)
     output = (data_0,)
     for g in pre_graphs:
-        output = g.forward(*output)
+        output = g.forward(output)
     pre_output = output
 
 
@@ -229,25 +229,25 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
         grad = (grad,)
         torch.cuda.nvtx.range_push(f"1f1b")
         # post combine_backward
-        grad = pre_graphs[4].backward(*grad)
+        grad = pre_graphs[4].backward(grad)
         # combine_backward
-        grad = pre_graphs[3].backward(*grad)
+        grad = pre_graphs[3].backward(grad)
         # attn
-        output = graphs[0].forward(*output)
+        output = graphs[0].forward(output)
         # dispatch
-        output = graphs[1].forward(*output)
+        output = graphs[1].forward(output)
         # mlp backward
-        grad = pre_graphs[2].backward(*grad)
+        grad = pre_graphs[2].backward(grad)
         # mlp forward
-        output = graphs[2].forward(*output)
+        output = graphs[2].forward(output)
         # dispatch backward
-        grad = pre_graphs[1].backward(*grad)
+        grad = pre_graphs[1].backward(grad)
         # combine forward
-        output = graphs[3].forward(*output)
+        output = graphs[3].forward(output)
         # attn backward
-        grad = pre_graphs[0].backward(*grad)
+        grad = pre_graphs[0].backward(grad)
         # post combine
-        output = graphs[4].forward(*output)
+        output = graphs[4].forward(output)
 
 
 
@@ -259,11 +259,11 @@ def schedule_1f1b_overlap(datas, events, comp_stream, com_stream, layer):
     grad = torch.ones_like(pre_output)
     grad = StreamRelease.apply(events[l-1], pre_stream, grad)
     grad = (grad,)
-    grad = pre_graphs[4].backward(*grad)
-    grad = pre_graphs[3].backward(*grad)
-    grad = pre_graphs[2].backward(*grad)
-    grad = pre_graphs[1].backward(*grad)
-    grad = pre_graphs[0].backward(*grad)
+    grad = pre_graphs[4].backward(grad)
+    grad = pre_graphs[3].backward(grad)
+    grad = pre_graphs[2].backward(grad)
+    grad = pre_graphs[1].backward(grad)
+    grad = pre_graphs[0].backward(grad)
 
     for (i, e) in enumerate(events):
         e.wait(torch.cuda.current_stream())
