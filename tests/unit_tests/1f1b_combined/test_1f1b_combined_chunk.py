@@ -7,6 +7,8 @@ import sys
 from megatron.training import get_args
 from megatron.training.initialize import initialize_megatron
 
+from typing import Callable, Union, Any, Tuple, Optional
+
 import torch
 from torch import Tensor
 from megatron.core.transformer import transformer_layer
@@ -82,8 +84,8 @@ class ModelChunkSchedulePlan:
 
 class PreProcessNode(ScheduleNode):
 
-    def __init__(self, gpt_model, model_chunk_state, stream):
-        super().__init__(stream, model_chunk_state.event)
+    def __init__(self, gpt_model, model_chunk_state, event, stream):
+        super().__init__(self.forward_impl, stream, event)
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -156,8 +158,8 @@ class PreProcessNode(ScheduleNode):
 
 class PostProcessNode(ScheduleNode):
 
-    def __init__(self, gpt_model, model_chunk_state, stream):
-        super().__init__(stream, model_chunk_state.event)
+    def __init__(self, gpt_model, model_chunk_state, event, stream):
+        super().__init__(self.forward_impl, stream, event)
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -360,6 +362,7 @@ def build_model_chunk_schedule_plan(
 ):
 
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
+    event = model_chunk_schedule_plan.event
     state = model_chunk_schedule_plan.state
     # save for later use
     state.input_ids = input_ids
@@ -374,21 +377,21 @@ def build_model_chunk_schedule_plan(
 
     # build preprocess
     model_chunk_schedule_plan.pre_process = PreProcessNode(
-        model, model_chunk_schedule_plan.state, comp_stream
+        model, state, event, comp_stream
     )
     model_chunk_schedule_plan.pre_process.name = "pre_process"
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
         layer_plan = build_layer_schedule_plan(
-            layer, model_chunk_schedule_plan.state.event, comp_stream, com_stream
+            layer, event, comp_stream, com_stream
         )
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
 
         model_chunk_schedule_plan.post_process = PostProcessNode(
-            model, model_chunk_schedule_plan.state, comp_stream
+            model, state, event, comp_stream
         )
         model_chunk_schedule_plan.post_process.name = "post_process"
 
@@ -468,7 +471,6 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad):
 
 def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     l = len(datas)
-    assert l == len(events), f"{l} vs {len(events)}"
     # first f
     pre_stream = torch.cuda.current_stream()
 
@@ -478,9 +480,11 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     pre_schedule_plan = build_plan_func(decoder_input=datas[0])
     torch.cuda.nvtx.range_push(f"forward schudule")
     pre_output = schedule_chunk_forward(pre_schedule_plan)
+    print("schedule_chunk_forward")
     torch.cuda.nvtx.range_pop()
     # 1f1b
     for i in range(1, l):
+        print("schedule_chunk_1f1b")
         grad = torch.ones_like(pre_output)
         grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
         schedule_plan = build_plan_func(decoder_input=datas[i])
@@ -493,6 +497,7 @@ def schedule_1f1b_overlap(datas, comp_stream, com_stream, model):
     grad = torch.ones_like(pre_output)
     grad = StreamRelease.apply(pre_schedule_plan.state.event, pre_stream, grad)
     torch.cuda.nvtx.range_push(f"backward schudule")
+    print("schedule_chunk_backward")
     schedule_chunk_backward(pre_schedule_plan, grad)
     torch.cuda.nvtx.range_pop()
 
