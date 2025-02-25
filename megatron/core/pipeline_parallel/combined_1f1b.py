@@ -464,15 +464,16 @@ def forward_step(
 
         # Backward pass for loss function
         if output_tensor_grad[0] is None and config.grad_scale_func is not None:
-            loss_func = output_tensor[0].loss_func
-            output_tensor[0] = config.grad_scale_func(output_tensor[0])
-            torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
+            loss_func = b_output_tensor[0].loss_func
+            b_output_tensor[0] = config.grad_scale_func(b_output_tensor[0])
+            torch.autograd.backward(b_output_tensor[0], grad_tensors=output_tensor_grad[0])
             output_tensor_grad[0] = loss_func.get_grad()
 
-
+    f_schedule_plan = output_tensor if f_model else None
+    b_schedule_plan = b_output_tensor[0].schedule_plan if b_model else None
+    grad = output_tensor_grad[0] if b_model else None
     # schedule forward and backward
-    schedule_chunk_1f1b()
-
+    schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad)
     # forward post process
     if f_model:
         num_tokens = torch.tensor(0, dtype=torch.int)
