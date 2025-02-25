@@ -124,26 +124,29 @@ class PostProcessNode(ScheduleNode):
         return loss
 
 
-class TransformerNode(ScheduleNode):
+class TransformerLayerNode(ScheduleNode):
 
-    def __init__(self, common_state, layer, stream, event):
+    def __init__(self, chunk_state, common_state, layer, stream, event):
         super().__init__(weak_method(self.forward_impl), stream, event)
+        # layer state
         self.common_state = common_state
+        # model chunk state
+        self.chunk_state = chunk_state
         self.layer = layer
 
 
-class AttnNode(TransformerNode):
+class AttnNode(TransformerLayerNode):
 
     def forward_impl(self, hidden_states):
-        attention_mask = None
-        context = None
-        context_mask = None
-        rotary_pos_emb = None
-        rotary_pos_cos = None
-        rotary_pos_sin = None
-        attention_bias = None
-        inference_params = None
-        packed_seq_params = None
+        attention_mask = self.chunk_state.attention_mask
+        context = self.chunk_state.context
+        context_mask = self.chunk_state.context_mask
+        rotary_pos_emb = self.chunk_state.rotary_pos_emb
+        rotary_pos_cos = self.chunk_state.rotary_pos_cos
+        rotary_pos_sin = self.chunk_state.rotary_pos_sin
+        attention_bias = self.chunk_state.attention_bias
+        inference_params = self.chunk_state.inference_params
+        packed_seq_params = self.chunk_state.packed_seq_params
 
         # Residual connection.
         residual = hidden_states
@@ -216,7 +219,7 @@ class AttnNode(TransformerNode):
         return residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
 
 
-class DispatchNode(TransformerNode):
+class DispatchNode(TransformerLayerNode):
 
     def forward_impl(
         self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
@@ -229,7 +232,7 @@ class DispatchNode(TransformerNode):
         return residual, pre_mlp_layernorm_output, dispatched_input, probs
 
 
-class MlPNode(TransformerNode):
+class MlPNode(TransformerLayerNode):
     def forward_impl(self, residual, pre_mlp_layernorm_output, dispatched_input, probs):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
@@ -244,7 +247,7 @@ class MlPNode(TransformerNode):
         return residual, permutated_local_input_tokens, shared_output, probs
 
 
-class CombineNode(TransformerNode):
+class CombineNode(TransformerLayerNode):
     def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
         token_dispatcher = self.layer.mlp.token_dispatcher
         self.common_state.probs = probs
@@ -255,7 +258,7 @@ class CombineNode(TransformerNode):
         return residual, permutated_local_input_tokens, shared_output, probs
 
 
-class CombinePostProcessNode(TransformerNode):
+class CombinePostProcessNode(TransformerLayerNode):
     def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
         token_dispatcher = self.layer.mlp.token_dispatcher
         self.common_state.probs = probs
@@ -274,17 +277,17 @@ class CombinePostProcessNode(TransformerNode):
         return output
 
 
-def build_layer_schedule_plan(layer, event, comp_stream, com_stream):
+def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
     common_state = TransformerLayerState()
-    attn = AttnNode(common_state, layer, comp_stream, event)
+    attn = AttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
-    dispatch = DispatchNode(common_state, layer, com_stream, event)
+    dispatch = DispatchNode(chunk_state, common_state, layer, com_stream, event)
     dispatch.name = "dispatch"
-    mlp = MlPNode(common_state, layer, comp_stream, event)
+    mlp = MlPNode(chunk_state, common_state, layer, comp_stream, event)
     mlp.name = "mlp"
-    combine = CombineNode(common_state, layer, com_stream, event)
+    combine = CombineNode(chunk_state, common_state, layer, com_stream, event)
     combine.name = "combine"
-    post_combine = CombinePostProcessNode(common_state, layer, comp_stream, event)
+    post_combine = CombinePostProcessNode(chunk_state, common_state, layer, comp_stream, event)
     post_combine.name = "post_combine"
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
 
@@ -324,7 +327,7 @@ def build_model_chunk_schedule_plan(
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, event, comp_stream, com_stream)
+        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
