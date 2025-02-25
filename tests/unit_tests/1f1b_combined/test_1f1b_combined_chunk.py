@@ -14,10 +14,21 @@ from torch import Tensor
 
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
-from megatron.core.pipeline_parallel.combined_1f1b import ScheduleNode, StreamAcquire, StreamRelease
+from megatron.core.pipeline_parallel.combined_1f1b import (
+    ScheduleNode,
+    TransformerLayerState,
+    TransformerLayerSchedulePlan,
+    ModelChunkSchedulePlan,
+    StreamRelease,
+    schedule_chunk_forward,
+    schedule_chunk_1f1b,
+    schedule_chunk_backward,
+    set_streams,
+    get_com_stream,
+    get_comp_stream,
+)
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import Float16Module
-from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
 from megatron.training import get_args
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.initialize import initialize_megatron
@@ -33,67 +44,6 @@ def weak_method(method):
         return method_ref()(*args, **kwarg)
 
     return wrapped_func
-
-
-class TransformerLayerState(MoEAlltoAllPerBatchState):
-    pass
-
-
-class ModelChunkSate:
-    pass
-
-
-class TransformerSchedulePlan:
-
-    def __init__(self, attn, dispatch, mlp, combine, post_combine):
-        self.attn = attn
-        self.dispatch = dispatch
-        self.mlp = mlp
-        self.combine = combine
-        self.post_combine = post_combine
-
-
-class ModelChunkSchedulePlan:
-    def __init__(self):
-        self._pre_process = None
-        self._post_process = None
-        self._model_chunk_state = ModelChunkSate()
-        self._transformer_layers = []
-        self._event = torch.cuda.Event()
-
-    @property
-    def event(self):
-        return self._event
-
-    @property
-    def pre_process(self):
-        return self._pre_process
-
-    @pre_process.setter
-    def pre_process(self, value):
-        self._pre_process = value
-
-    @property
-    def post_process(self):
-        return self._post_process
-
-    @post_process.setter
-    def post_process(self, value):
-        self._post_process = value
-
-    def get_layer(self, i):
-        assert i < self.num_layers()
-        return self._transformer_layers[i]
-
-    def num_layers(self):
-        return len(self._transformer_layers)
-
-    def add_layer(self, layer):
-        self._transformer_layers.append(layer)
-
-    @property
-    def state(self):
-        return self._model_chunk_state
 
 
 class PreProcessNode(ScheduleNode):
@@ -357,13 +307,11 @@ def build_layer_schedule_plan(layer, event, comp_stream, com_stream):
     combine.name = "combine"
     post_combine = CombinePostProcessNode(common_state, layer, comp_stream, event)
     post_combine.name = "post_combine"
-    return TransformerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
 
 
 def build_model_chunk_schedule_plan(
     model,
-    comp_stream,
-    com_stream,
     input_ids: Tensor,
     position_ids: Tensor,
     attention_mask: Tensor,
@@ -375,6 +323,8 @@ def build_model_chunk_schedule_plan(
     runtime_gather_output: Optional[bool] = None,
 ):
 
+    comp_stream = get_comp_stream()
+    com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     event = model_chunk_schedule_plan.event
     state = model_chunk_schedule_plan.state
@@ -406,126 +356,13 @@ def build_model_chunk_schedule_plan(
     return model_chunk_schedule_plan
 
 
-def schedule_layer_1f1b(
-    f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None
-):
-
-    if pre_backward is not None:
-        # attn backward from last iter
-        assert b_grad is None
-        b_grad = pre_backward()
-
-    if b_layer is not None:
-        b_grad = b_layer.post_combine.backward(b_grad)
-
-    if b_layer is not None:
-        b_grad = b_layer.combine.backward(b_grad)
-
-    if pre_forward is not None:
-        assert f_input is None
-        # post combine from last iter
-        f_input = pre_forward()
-        del pre_forward
-    if f_layer is not None:
-        f_input = f_layer.attn.forward(f_input)
-
-    if f_layer is not None:
-        f_input = f_layer.dispatch.forward(f_input)
-
-    if b_layer is not None:
-        b_grad = b_layer.mlp.backward(b_grad)
-    if b_layer is not None:
-        b_grad = b_layer.dispatch.backward(b_grad)
-
-    if f_layer is not None:
-        f_input = f_layer.mlp.forward(f_input)
-    if f_layer is not None:
-        f_input = f_layer.combine.forward(f_input)
-
-    def next_iter_pre_forward():
-        if f_layer is not None:
-            output = f_layer.post_combine.forward(f_input)
-            return output
-
-    def next_iter_pre_backward():
-        if b_layer is not None:
-            grad = b_layer.attn.backward(b_grad)
-            return grad
-
-    if f_layer and b_layer:
-        return next_iter_pre_forward, next_iter_pre_backward
-    else:
-        return next_iter_pre_forward(), next_iter_pre_backward()
-
-
-def schedule_chunk_forward(schedule_plan):
-    f_input = schedule_chunk_1f1b(schedule_plan, None, None)
-    return f_input
-
-
-def schedule_chunk_backward(schedule_plan, grad):
-    tmp = schedule_chunk_1f1b(None, schedule_plan, grad)
-
-
-def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None):
-
-    f_input = None
-    if f_schedule_plan is not None:
-        f_input = f_schedule_plan.pre_process.forward()
-
-    if b_schedule_plan is not None:
-        assert grad is not None
-        if b_schedule_plan.post_process is not None:
-            grad = b_schedule_plan.post_process.backward(grad)
-
-    f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
-    b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
-    overlaped_layers = min(f_num_layers, b_num_layers)
-
-    pre_forward = lambda: f_input
-    pre_backward = lambda: grad
-
-    for i in range(overlaped_layers):
-        f_layer = f_schedule_plan.get_layer(i)
-        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-        torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
-        pre_forward, pre_backward = schedule_layer_1f1b(
-            f_layer, b_layer, pre_forward=pre_forward, pre_backward=pre_backward
-        )
-        torch.cuda.nvtx.range_pop()
-
-    # tail forward
-    f_input = pre_forward()
-    for i in range(overlaped_layers, f_num_layers):
-        f_layer = f_schedule_plan.get_layer(i)
-        torch.cuda.nvtx.range_push(f"layer_{i}f")
-        f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input=f_input)
-        torch.cuda.nvtx.range_pop()
-
-    if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
-        f_input = f_schedule_plan.post_process.forward(f_input)
-
-    # tail backward
-    grad = pre_backward()
-    for i in range(overlaped_layers, b_num_layers):
-        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-        torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-        tmp, grad = schedule_layer_1f1b(None, b_layer, b_grad=grad)
-        torch.cuda.nvtx.range_pop()
-
-    if b_schedule_plan is not None:
-        b_schedule_plan.pre_process.backward(grad)
-
-    return f_input
-
-
-def schedule_1f1b_overlap(args, comp_stream, com_stream, model):
+def schedule_1f1b_overlap(args, model):
     l = 16
     # first f
     pre_stream = torch.cuda.current_stream()
 
     build_plan_func = partial(
-        build_model_chunk_schedule_plan, model, comp_stream, com_stream, None, None, None
+        build_model_chunk_schedule_plan, model, None, None, None
     )
     data = build_data(args)
     pre_schedule_plan = build_plan_func(decoder_input=data)
@@ -615,9 +452,8 @@ def build_gpt_model(args):
 
 def test_1f1b_overlap(args):
     model = build_gpt_model(args)
-    com_stream = torch.cuda.Stream(device="cuda")
-    comp_stream = torch.cuda.Stream(device="cuda")  # torch.cuda.current_stream()
-    schedule_1f1b_overlap(args, comp_stream, com_stream, model)
+    set_streams()
+    schedule_1f1b_overlap(args, model)
 
 
 def main():
