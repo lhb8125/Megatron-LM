@@ -335,10 +335,14 @@ def get_com_stream():
 def forward_step(
         forward_step_func,
         data_iterator,
-        model,
+        f_model,
         num_microbatches,
-        input_tensor,
+        f_input_tensor,
         forward_data_store,
+        b_model,
+        b_input_tensor,
+        b_output_tensor,
+        b_output_tensor_grad,
         config,
         collect_non_loss_data=False,
         checkpoint_activations_microbatch=None,
@@ -415,70 +419,119 @@ def forward_step(
     if config.timers is not None:
         config.timers('forward-compute', log_level=2).start()
 
-    if is_first_microbatch and hasattr(model, 'set_is_first_microbatch'):
-        model.set_is_first_microbatch()
-    if current_microbatch is not None:
-        set_current_microbatch(model, current_microbatch)
+    # forward preprocess
+    if f_model is not None:
+        if is_first_microbatch and hasattr(f_model, 'set_is_first_microbatch'):
+            f_model.set_is_first_microbatch()
+        if current_microbatch is not None:
+            set_current_microbatch(f_model, current_microbatch)
 
-    unwrap_output_tensor = False
-    if not isinstance(input_tensor, list):
-        input_tensor = [input_tensor]
-        unwrap_output_tensor = True
+        unwrap_output_tensor = False
+        if not isinstance(input_tensor, list):
+            input_tensor = [input_tensor]
+            unwrap_output_tensor = True
 
-    set_input_tensor = get_attr_wrapped_model(model, "set_input_tensor")
-    set_input_tensor(input_tensor)
+        set_input_tensor = get_attr_wrapped_model(model, "set_input_tensor")
+        set_input_tensor(input_tensor)
 
-    if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
-    else:
-        context_manager = contextlib.nullcontext()
-    with context_manager:
-        if checkpoint_activations_microbatch is None:
-            output_tensor, loss_func = forward_step_func(data_iterator, model)
+        if config.enable_autocast:
+            context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
         else:
-            output_tensor, loss_func = forward_step_func(
-                data_iterator, model, checkpoint_activations_microbatch
+            context_manager = contextlib.nullcontext()
+        with context_manager:
+            if checkpoint_activations_microbatch is None:
+                output_tensor, loss_func = forward_step_func(data_iterator, f_model)
+            else:
+                output_tensor, loss_func = forward_step_func(
+                data_iterator, f_model, checkpoint_activations_microbatch
             )
 
-    num_tokens = torch.tensor(0, dtype=torch.int)
-    if parallel_state.is_pipeline_last_stage():
-        if not collect_non_loss_data:
-            outputs = loss_func(output_tensor)
-            if len(outputs) == 3:
-                output_tensor, num_tokens, loss_reduced = outputs
-                if not config.calculate_per_token_loss:
-                    output_tensor /= num_tokens
+    # backward preprocess
+    unwrap_input_tensor_grad = False
+    if b_model is not None:
+        # Retain the grad on the input_tensor.
+        if not isinstance(b_input_tensor, list):
+            b_input_tensor = [b_input_tensor]
+            unwrap_input_tensor_grad = True
+        for x in b_input_tensor:
+            if x is not None:
+                x.retain_grad()
+
+        if not isinstance(b_output_tensor, list):
+            b_output_tensor = [b_output_tensor]
+        if not isinstance(output_tensor_grad, list):
+            output_tensor_grad = [output_tensor_grad]
+
+        # Backward pass for loss function
+        if output_tensor_grad[0] is None and config.grad_scale_func is not None:
+            loss_func = output_tensor[0].loss_func
+            output_tensor[0] = config.grad_scale_func(output_tensor[0])
+            torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
+            output_tensor_grad[0] = loss_func.get_grad()
+
+
+    # schedule forward and backward
+    schedule_chunk_1f1b()
+
+    # forward post process
+    if f_model:
+        num_tokens = torch.tensor(0, dtype=torch.int)
+        if parallel_state.is_pipeline_last_stage():
+            if not collect_non_loss_data:
+                outputs = loss_func(output_tensor)
+                if len(outputs) == 3:
+                    output_tensor, num_tokens, loss_reduced = outputs
+                    if not config.calculate_per_token_loss:
+                        output_tensor /= num_tokens
+                        output_tensor /= num_microbatches
+                else:
+                    # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+                    assert len(outputs) == 2
+                    output_tensor, loss_reduced = outputs
                     output_tensor /= num_microbatches
+                forward_data_store.append(loss_reduced)
             else:
-                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
-                assert len(outputs) == 2
-                output_tensor, loss_reduced = outputs
-                output_tensor /= num_microbatches
-            forward_data_store.append(loss_reduced)
-        else:
-            data = loss_func(output_tensor, non_loss_data=True)
-            forward_data_store.append(data)
+                data = loss_func(output_tensor, non_loss_data=True)
+                forward_data_store.append(data)
+        # attach schedule plan on output tensor
+        output_tensor.schedule_plan = None
+        if config.timers is not None:
+            config.timers('forward-compute').stop()
 
-    if config.timers is not None:
-        config.timers('forward-compute').stop()
-
-    # Set the loss scale for the auxiliary loss of the MoE layer.
-    # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
-    # explicitly.
-    if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
-        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
-        loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
-            if config.grad_scale_func is not None
-            else torch.tensor(1.0)
-        )
-        # Set the loss scale
-        MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+        # Set the loss scale for the auxiliary loss of the MoE layer.
+        # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
+        # explicitly.
+        if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
+            # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+            loss_scale = (
+                config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+                if config.grad_scale_func is not None
+                else torch.tensor(1.0)
+            )
+            # Set the loss scale
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
 
-    if unwrap_output_tensor:
-        return output_tensor, num_tokens
-    return [output_tensor], num_tokens
+        if not unwrap_output_tensor:
+            output_tensor, num_tokens = [output_tensor], num_tokens
+
+    # backward post process
+    if b_model is not None:
+        input_tensor_grad = [None]
+        if input_tensor is not None:
+            input_tensor_grad = []
+            for x in input_tensor:
+                if x is None:
+                    input_tensor_grad.append(None)
+                else:
+                    input_tensor_grad.append(x.grad)
+
+
+        if unwrap_input_tensor_grad:
+            input_tensor_grad = input_tensor_grad[0]
+
+    return output_tensor, num_tokens, input_tensor_grad
+
 
 
 def backward_step(input_tensor, output_tensor, output_tensor_grad,  config):
