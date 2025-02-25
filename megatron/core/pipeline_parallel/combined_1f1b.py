@@ -864,62 +864,80 @@ def forward_backward_pipelining_with_interleaving(
         f_context = contextlib.nullcontext()
         if f_virtual_microbatch_id is not None:
             model_chunk_id = get_model_chunk_id(f_virtual_microbatch_id, forward=True)
-            parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
-
-            # launch param synchronization for next model chunk
-            # Note: Asynchronous communication tends to slow down compute.
-            # To reduce idling from mismatched microbatch times, we launch
-            # asynchronous communication at the same time across the
-            # pipeline-parallel group.
-            if config.param_sync_func is not None:
-                param_sync_virtual_microbatch_id = f_virtual_microbatch_id + pipeline_parallel_rank
-                if (
-                        param_sync_virtual_microbatch_id < total_num_microbatches
-                        and is_first_microbatch_for_model_chunk(param_sync_virtual_microbatch_id)
-                ):
-                    param_sync_chunk_id = (
-                            get_model_chunk_id(param_sync_virtual_microbatch_id, forward=True) + 1
-                    )
-                    if 1 < param_sync_chunk_id < num_model_chunks:
-                        config.param_sync_func[param_sync_chunk_id](
-                            model[param_sync_chunk_id].parameters()
-                        )
-
-            # forward step
-            if parallel_state.is_pipeline_first_stage():
-                if len(input_tensors[model_chunk_id]) == len(output_tensors[model_chunk_id]):
-                    input_tensors[model_chunk_id].append(None)
-
-            # For non-depth-first pipeline schedules, the first rank would buffer multiple received
-            # activation tensors for a model chunk until accessed during warmup.
-            # This input buffering is needed to overlap the computation with the receipt of
-            # the next inputs. To index the proper buffered inputs for forword_step, we use
-            # microbatch_id offset with number of released microbatches that have completed backprop.
-            offset = num_released_microbatches(f_virtual_microbatch_id, model_chunk_id)
-            input_tensor = input_tensors[model_chunk_id][microbatch_id - offset]
             f_model_chunk_id = model_chunk_id
+            @contextlib.contextmanager
+            def context():
+                try:
+                    parallel_state.set_virtual_pipeline_model_parallel_rank(f_model_chunk_id)
+                    yield
+                finally:
+                    pass
+
+            f_context = context()
+            with f_context:
+                # launch param synchronization for next model chunk
+                # Note: Asynchronous communication tends to slow down compute.
+                # To reduce idling from mismatched microbatch times, we launch
+                # asynchronous communication at the same time across the
+                # pipeline-parallel group.
+                if config.param_sync_func is not None:
+                    param_sync_virtual_microbatch_id = f_virtual_microbatch_id + pipeline_parallel_rank
+                    if (
+                            param_sync_virtual_microbatch_id < total_num_microbatches
+                            and is_first_microbatch_for_model_chunk(param_sync_virtual_microbatch_id)
+                    ):
+                        param_sync_chunk_id = (
+                                get_model_chunk_id(param_sync_virtual_microbatch_id, forward=True) + 1
+                        )
+                        if 1 < param_sync_chunk_id < num_model_chunks:
+                            config.param_sync_func[param_sync_chunk_id](
+                                model[param_sync_chunk_id].parameters()
+                            )
+
+                # forward step
+                if parallel_state.is_pipeline_first_stage():
+                    if len(input_tensors[model_chunk_id]) == len(output_tensors[model_chunk_id]):
+                        input_tensors[model_chunk_id].append(None)
+
+                # For non-depth-first pipeline schedules, the first rank would buffer multiple received
+                # activation tensors for a model chunk until accessed during warmup.
+                # This input buffering is needed to overlap the computation with the receipt of
+                # the next inputs. To index the proper buffered inputs for forword_step, we use
+                # microbatch_id offset with number of released microbatches that have completed backprop.
+                offset = num_released_microbatches(f_virtual_microbatch_id, model_chunk_id)
+                input_tensor = input_tensors[model_chunk_id][microbatch_id - offset]
+
 
         # backward prepare
         b_model_chunk_id = None
-        f_context = contextlib.nullcontext()
+        b_context = contextlib.nullcontext()
         if b_virtual_microbatch_id is not None:
             model_chunk_id = get_model_chunk_id(b_virtual_microbatch_id, forward=False)
-            parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
-
-            # launch grad synchronization (default)
-            if config.grad_sync_func is None and is_last_microbatch_for_model_chunk(
-                    b_virtual_microbatch_id
-            ):
-                enable_grad_sync()
-                synchronized_model_chunks.add(model_chunk_id)
-
-            if parallel_state.is_pipeline_last_stage():
-                if len(output_tensor_grads[model_chunk_id]) == 0:
-                    output_tensor_grads[model_chunk_id].append(None)
-            input_tensor = input_tensors[model_chunk_id].pop(0)
-            output_tensor = output_tensors[model_chunk_id].pop(0)
-            output_tensor_grad = output_tensor_grads[model_chunk_id].pop(0)
             b_model_chunk_id = model_chunk_id
+            @contextlib.contextmanager
+            def context():
+                try:
+                    parallel_state.set_virtual_pipeline_model_parallel_rank(b_model_chunk_id)
+                    yield
+                finally:
+                    pass
+
+            b_context = context()
+            with b_context:
+                # launch grad synchronization (default)
+                if config.grad_sync_func is None and is_last_microbatch_for_model_chunk(
+                        b_virtual_microbatch_id
+                ):
+                    enable_grad_sync()
+                    synchronized_model_chunks.add(model_chunk_id)
+
+                if parallel_state.is_pipeline_last_stage():
+                    if len(output_tensor_grads[model_chunk_id]) == 0:
+                        output_tensor_grads[model_chunk_id].append(None)
+                b_input_tensor = input_tensors[model_chunk_id].pop(0)
+                b_output_tensor = output_tensors[model_chunk_id].pop(0)
+                b_output_tensor_grad = output_tensor_grads[model_chunk_id].pop(0)
+
 
 
         output_tensor, num_tokens = forward_step(
@@ -935,41 +953,43 @@ def forward_backward_pipelining_with_interleaving(
             check_first_val_step(
                 first_val_step,
                 forward_only,
-                is_first_microbatch_for_model_chunk(virtual_microbatch_id),
+                is_first_microbatch_for_model_chunk(f_virtual_microbatch_id),
             ),
             current_microbatch=microbatch_id,
         )
 
         # forward post process
         if f_model_chunk_id is not None:
-            output_tensors[f_model_chunk_id].append(output_tensor)
-            nonlocal total_num_tokens
-            total_num_tokens += num_tokens.item()
-        # If forward-only, no need to save tensors for a backward pass.
-            if forward_only:
-                # Release the tensor that have completed forward step.
-                input_tensors[f_model_chunk_id].pop(0)
-                output_tensors[f_model_chunk_id].pop()
+            with f_context:
+                output_tensors[f_model_chunk_id].append(output_tensor)
+                nonlocal total_num_tokens
+                total_num_tokens += num_tokens.item()
+                # If forward-only, no need to save tensors for a backward pass.
+                if forward_only:
+                    # Release the tensor that have completed forward step.
+                    input_tensors[f_model_chunk_id].pop(0)
+                    output_tensors[f_model_chunk_id].pop()
 
         # backward post process
         if b_model_chunk_id:
-            # launch grad synchronization (custom grad sync)
-            # Note: Asynchronous communication tends to slow down compute.
-            # To reduce idling from mismatched microbatch times, we launch
-            # asynchronous communication at the same time across the
-            # pipeline-parallel group.
-            if config.grad_sync_func is not None:
-                grad_sync_virtual_microbatch_id = b_virtual_microbatch_id - pipeline_parallel_rank
-                if grad_sync_virtual_microbatch_id >= 0 and is_last_microbatch_for_model_chunk(
-                        grad_sync_virtual_microbatch_id
-                ):
-                    grad_sync_chunk_id = get_model_chunk_id(
-                        grad_sync_virtual_microbatch_id, forward=False
-                    )
-                    enable_grad_sync()
-                    config.grad_sync_func[grad_sync_chunk_id](model[grad_sync_chunk_id].parameters())
-                    synchronized_model_chunks.add(grad_sync_chunk_id)
-            disable_grad_sync()
+            with b_context:
+                # launch grad synchronization (custom grad sync)
+                # Note: Asynchronous communication tends to slow down compute.
+                # To reduce idling from mismatched microbatch times, we launch
+                # asynchronous communication at the same time across the
+                # pipeline-parallel group.
+                if config.grad_sync_func is not None:
+                    grad_sync_virtual_microbatch_id = b_virtual_microbatch_id - pipeline_parallel_rank
+                    if grad_sync_virtual_microbatch_id >= 0 and is_last_microbatch_for_model_chunk(
+                            grad_sync_virtual_microbatch_id
+                    ):
+                        grad_sync_chunk_id = get_model_chunk_id(
+                            grad_sync_virtual_microbatch_id, forward=False
+                        )
+                        enable_grad_sync()
+                        config.grad_sync_func[grad_sync_chunk_id](model[grad_sync_chunk_id].parameters())
+                        synchronized_model_chunks.add(grad_sync_chunk_id)
+                disable_grad_sync()
 
         return output_tensor, input_tensor_grad
 
