@@ -3,6 +3,9 @@ import torch
 from torch import Tensor
 
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
+from megatron.core.transformer.module import Float16Module
+from megatron.core.distributed import DistributedDataParallel
+
 
 
 import contextlib
@@ -548,6 +551,25 @@ def forward_backward_step(
     return output_tensor, num_tokens, input_tensor_grad
 
 
+def unwrap_model(model, module_instances=(DistributedDataParallel, Float16Module)):
+    return_list = True
+    if not isinstance(model, list):
+        model = [model]
+        return_list = False
+    unwrapped_model = []
+    for model_module in model:
+        while isinstance(model_module, module_instances):
+            model_module = model_module.module
+        unwrapped_model.append(model_module)
+    if not return_list:
+        return unwrapped_model[0]
+    return unwrapped_model
+
+def wrap_forward_func(forward_step_func):
+    def wrapped_func(data_iterator, model):
+        return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
+
+    return wrapped_func
 
 def forward_backward_pipelining_with_interleaving(
         *,
@@ -575,6 +597,9 @@ def forward_backward_pipelining_with_interleaving(
     # microbatch_id in [0, num_microbatches)
     # model_chunk_id in [0, num_model_chunks)
     # virtual_microbatch_id in [0, total_num_microbatches)
+
+    # decorate forward step
+    forward_step_func = wrap_forward_func(forward_step_func)
 
     assert isinstance(model, list), "interleaved pipeline parallelism expected model chunking"
     assert all(isinstance(chunk, torch.nn.Module) for chunk in model), "invalid model chunking"
