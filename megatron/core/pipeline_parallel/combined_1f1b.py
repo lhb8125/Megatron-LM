@@ -27,7 +27,8 @@ from megatron.core.utils import (
 from .schedules import (
     clear_embedding_activation_buffer,
     check_first_val_step,
-    set_current_microbatch
+    set_current_microbatch,
+    finish_embedding_wgrad_compute
 )
 
 # Types
@@ -500,9 +501,11 @@ def forward_backward_step(
 
         # Backward pass for loss function
         b_schedule_plan = b_output_tensor[0].schedule_plan
+        b_output_tensor[0].schedule_plan = None
         if b_output_tensor_grad[0] is None and config.grad_scale_func is not None:
             #backward schedule plan
             loss_node = b_output_tensor[0].loss_func
+            b_output_tensor[0].loss_func = None
             b_output_tensor[0] = config.grad_scale_func(b_output_tensor[0])
             torch.autograd.backward(b_output_tensor[0], grad_tensors=b_output_tensor_grad[0])
             b_output_tensor_grad[0] = loss_node.get_grad()
@@ -512,6 +515,7 @@ def forward_backward_step(
     # schedule forward and backward
     output_tensor = schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad, f_context=f_context, b_context=b_context)
     # forward post process
+    num_tokens = None
     if f_model:
         with f_context:
             num_tokens = torch.tensor(0, dtype=torch.int)
@@ -562,9 +566,9 @@ def forward_backward_step(
     input_tensor_grad = None
     if b_model is not None:
         input_tensor_grad = [None]
-        if input_tensor is not None:
+        if b_input_tensor is not None:
             input_tensor_grad = []
-            for x in input_tensor:
+            for x in b_input_tensor:
                 if x is None:
                     input_tensor_grad.append(None)
                 else:
@@ -592,6 +596,7 @@ def unwrap_model(model, module_instances=(DistributedDataParallel, Float16Module
     return unwrapped_model
 
 def wrap_forward_func(forward_step_func):
+    
     def wrapped_func(data_iterator, model):
         return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
 
@@ -758,7 +763,6 @@ def forward_backward_pipelining_with_interleaving(
             num_warmup_microbatches = total_num_microbatches
             all_warmup_microbatches = True
     num_microbatches_remaining = total_num_microbatches - num_warmup_microbatches
-    print(f"num_warmup_microbatches {num_warmup_microbatches} pp {pipeline_parallel_rank}")
     # Checkpoint the activations of partial Transformer layers in a number of micro-batches
     # within the maximum outstanding micro-batch backpropagations.
     # Micro-batches with the ids less than 'num_microbatches_with_partial_activation_checkpoints'
@@ -1005,7 +1009,7 @@ def forward_backward_pipelining_with_interleaving(
             is_first_microbatch = check_first_val_step(
                 first_val_step,
                 forward_only,
-                is_first_microbatch_for_model_chunk(f_virtual_microbatch_id),
+                is_first_microbatch_for_model_chunk(f_virtual_microbatch_id) if f_virtual_microbatch_id is not None else None,
             ),
             current_microbatch=f_microbatch_id,
         )
@@ -1041,7 +1045,9 @@ def forward_backward_pipelining_with_interleaving(
                         enable_grad_sync()
                         config.grad_sync_func[grad_sync_chunk_id](model[grad_sync_chunk_id].parameters())
                         synchronized_model_chunks.add(grad_sync_chunk_id)
-                disable_grad_sync()
+                disable_grad_sync()     
+                if input_tensor is not None:
+                    assert input_tensor_grad is not None
 
         return output_tensor, input_tensor_grad
 
@@ -1122,9 +1128,7 @@ def forward_backward_pipelining_with_interleaving(
             checkpoint_activations_microbatch = None
 
         microbatch_id = get_microbatch_id_in_model_chunk(k, forward=True)
-        print(f"begin warm up {k}  pp {pipeline_parallel_rank}")
         output_tensor, _ = forward_backward_helper(f_virtual_microbatch_id=k, f_microbatch_id=microbatch_id)
-        print(f"end warm up {k} pp {pipeline_parallel_rank}")
         # Don't send tensor downstream if on last stage.
         if parallel_state.is_pipeline_last_stage():
             output_tensor = None
@@ -1138,11 +1142,11 @@ def forward_backward_pipelining_with_interleaving(
                     and not forward_only
                     and not all_warmup_microbatches
             ):
-                print(f"begin send recv {k} pp {pipeline_parallel_rank}")
                 input_tensor_grad = None
                 recv_next = True
                 if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                     recv_next = False
+                
                 (input_tensor, output_tensor_grad) = (
                     p2p_communication.send_forward_backward_recv_forward_backward(
                         output_tensor,
@@ -1153,7 +1157,7 @@ def forward_backward_pipelining_with_interleaving(
                         config=config,
                     )
                 )
-                print(f"end send recv {k} pp {pipeline_parallel_rank}")
+                
                 output_tensor_grads[num_model_chunks - 1].append(output_tensor_grad)
             else:
                 input_tensor = p2p_communication.send_forward_recv_forward(
@@ -1232,7 +1236,7 @@ def forward_backward_pipelining_with_interleaving(
                 if recv_next:
                     output_tensor_grads[num_model_chunks - 1].append(bwd_recv_buffer[-1])
     
-    print(f"end warm up pp {pipeline_parallel_rank}")
+    
     # Run 1F1B in steady state.
     for k in range(num_microbatches_remaining):
         # Forward pass.
@@ -1370,10 +1374,8 @@ def forward_backward_pipelining_with_interleaving(
         else:  # No p2p overlap.
 
             # fused schedule
-            print(f"begin 1f1b {pipeline_parallel_rank}")
             backward_k = k
             output_tensor, input_tensor_grad = forward_backward_helper(f_virtual_microbatch_id=forward_k, f_microbatch_id=microbatch_id, b_virtual_microbatch_id=backward_k)
-            print(f"end 1f1b {pipeline_parallel_rank}")
 
             # Send output_tensor and input_tensor_grad, receive input_tensor
             # and output_tensor_grad.
@@ -1404,6 +1406,7 @@ def forward_backward_pipelining_with_interleaving(
                 recv_prev = False
 
             # Communicate tensors.
+                
             (input_tensor, output_tensor_grad) = (
                 p2p_communication.send_forward_backward_recv_forward_backward(
                     output_tensor,
@@ -1414,7 +1417,7 @@ def forward_backward_pipelining_with_interleaving(
                     config=config,
                 )
             )
-            deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+            #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
             # Put input_tensor and output_tensor_grad in data structures in the
             # right location.
@@ -1423,7 +1426,7 @@ def forward_backward_pipelining_with_interleaving(
             if recv_next:
                 output_tensor_grads[next_backward_model_chunk_id].append(output_tensor_grad)
 
-    deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+    #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
     # Run cooldown backward passes (flush out pipeline).
     if not forward_only:
