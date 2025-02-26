@@ -741,7 +741,10 @@ class TEGroupedMLP(MegatronModule):
             replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}experts.{name}.')
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
-
+    def wgrad_comp(self):
+        self.linear_fc1.wgrad_comp()
+        self.linear_fc2.wgrad_comp()
+        # pass
 
 class SequentialMLP(MegatronModule):
     """An implementation of the Experts layer using a sequence of MLP layers.

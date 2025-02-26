@@ -168,7 +168,8 @@ class PreProcessNode(ScheduleNode):
         self.model_chunk_state.rotary_pos_sin = rotary_pos_sin
         self.model_chunk_state.sequence_len_offset = sequence_len_offset
         return decoder_input
-
+    def backward_w(self):
+        pass
 
 class PostProcessNode(ScheduleNode):
 
@@ -193,7 +194,8 @@ class PostProcessNode(ScheduleNode):
             return logits.transpose(0, 1).contiguous()
         loss = gpt_model.compute_language_model_loss(labels, logits)
         return loss
-
+    def backward_w(self):
+        pass
 
 class TransformerNode(ScheduleNode):
 
@@ -285,7 +287,8 @@ class AttnNode(TransformerNode):
             )
         self.common_state.tokens_per_expert = tokens_per_expert
         return residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
-
+    def backward_w(self):
+        pass
 
 class DispatchNode(TransformerNode):
 
@@ -298,7 +301,8 @@ class DispatchNode(TransformerNode):
         with token_dispatcher.per_batch_state_context(self.common_state):
             dispatched_input = token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
         return residual, pre_mlp_layernorm_output, dispatched_input, probs
-
+    def backward_w(self):
+        pass
 
 class MlPNode(TransformerNode):
     def forward_impl(self, residual, pre_mlp_layernorm_output, dispatched_input, probs):
@@ -313,6 +317,10 @@ class MlPNode(TransformerNode):
             permutated_local_input_tokens = token_dispatcher.combine_preprocess(expert_output)
         shared_output = self.layer.mlp.shared_experts(pre_mlp_layernorm_output)
         return residual, permutated_local_input_tokens, shared_output, probs
+    def backward_w(self, grad_output):
+        torch.cuda.nvtx.range_push(f"mlp wgrad")
+        self.layer.mlp.experts.wgrad_comp()
+        torch.cuda.nvtx.range_pop()
 
 
 class CombineNode(TransformerNode):
@@ -324,7 +332,8 @@ class CombineNode(TransformerNode):
                 permutated_local_input_tokens
             )
         return residual, permutated_local_input_tokens, shared_output, probs
-
+    def backward_w(self):
+        pass
 
 class CombinePostProcessNode(TransformerNode):
     def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
@@ -343,7 +352,8 @@ class CombinePostProcessNode(TransformerNode):
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
         return output
-
+    def backward_w(self):
+        pass
 
 def build_layer_schedule_plan(layer, event, comp_stream, com_stream):
     common_state = TransformerLayerState()
@@ -435,7 +445,9 @@ def schedule_layer_1f1b(
     if b_layer is not None:
         b_grad = b_layer.mlp.backward(b_grad)
     if b_layer is not None:
-        b_grad = b_layer.dispatch.backward(b_grad)
+        b_grad_o = b_layer.dispatch.backward(b_grad)
+    if b_layer is not None:
+        b_layer.mlp.backward_w(b_grad)
 
     if f_layer is not None:
         f_input = f_layer.mlp.forward(f_input)
@@ -449,7 +461,7 @@ def schedule_layer_1f1b(
 
     def next_iter_pre_backward():
         if b_layer is not None:
-            grad = b_layer.attn.backward(b_grad)
+            grad = b_layer.attn.backward(b_grad_o)
             return grad
 
     if f_layer and b_layer:
@@ -585,8 +597,8 @@ def build_gpt_model(args):
     if "qk_layernorm" in signature.parameters:
         extra_args["qk_layernorm"] = args.qk_layernorm
 
-    if "moe_use_legacy_grouped_gemm" in signature.parameters:
-        extra_args["moe_use_legacy_grouped_gemm"] = True
+    #if "moe_use_legacy_grouped_gemm" in signature.parameters:
+    #    extra_args["moe_use_legacy_grouped_gemm"] = True
 
     transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
         args.num_experts, args.moe_grouped_gemm, **extra_args
@@ -604,12 +616,15 @@ def build_gpt_model(args):
         share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
         position_embedding_type=args.position_embedding_type,
         rotary_percent=args.rotary_percent,
-        rotary_base=args.rope_theta,
+        rotary_base=args.rotary_base,
     )
 
     if args.fp16 or args.bf16:
         model = Float16Module(config, model)
     model = unwrap_model(model, (Float16Module,))
+    for param in model.parameters():
+        param.grad = None
+        param.main_grad = torch.zeros_like(param, dtype=torch.float32)
     return model
 
 
@@ -623,9 +638,11 @@ def test_1f1b_overlap(args):
 def main():
     initialize_megatron()
     args = get_args()
-    torch.cuda.cudart().cudaProfilerStart()
+    if torch.distributed.get_rank()==0:
+        torch.cuda.cudart().cudaProfilerStart()
     test_1f1b_overlap(args)
-    torch.cuda.cudart().cudaProfilerStop()
+    if torch.distributed.get_rank()==0:
+        torch.cuda.cudart().cudaProfilerStop()
 
 
 if __name__ == "__main__":

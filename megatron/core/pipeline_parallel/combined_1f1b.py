@@ -100,7 +100,6 @@ class ScheduleNode:
             # empty input, alse need record stream
             self.event.record(self.stream)
 
-
         torch.cuda.nvtx.range_pop()
         return self.get_grad()
 

@@ -1064,6 +1064,11 @@ if is_te_min_version("1.9.0.dev0"):
                 sh_ten.replica_id = (*replica_id[:2], get_expert_data_parallel_rank())
             return sharded_state_dict
 
+        def wgrad_comp(self):
+            # self.wgrad_store.pop()
+            super().wgrad_comp()
+            # pass
+
     class TEColumnParallelGroupedLinear(TEGroupedLinear):
         """
         Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
