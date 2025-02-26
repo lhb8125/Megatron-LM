@@ -701,7 +701,6 @@ def forward_backward_pipelining_with_interleaving(
         num_warmup_microbatches += (
             num_model_chunks - 1
         ) * config.microbatch_group_size_per_vp_stage
-        num_warmup_microbatches = num_warmup_microbatches + 1
         if num_warmup_microbatches >= total_num_microbatches:
             num_warmup_microbatches = total_num_microbatches
             all_warmup_microbatches = True
