@@ -105,6 +105,8 @@ def get_forward_backward_func():
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
+            from . import combined_1f1b
+            forward_backward_func = combined_1f1b.forward_backward_pipelining_with_interleaving
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
     else:
@@ -697,6 +699,7 @@ def forward_backward_pipelining_with_interleaving(
         num_warmup_microbatches += (
             num_model_chunks - 1
         ) * config.microbatch_group_size_per_vp_stage
+        num_warmup_microbatches = num_warmup_microbatches + 1
         if num_warmup_microbatches >= total_num_microbatches:
             num_warmup_microbatches = total_num_microbatches
             all_warmup_microbatches = True

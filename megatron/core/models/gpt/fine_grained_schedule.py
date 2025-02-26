@@ -320,6 +320,9 @@ def build_model_chunk_schedule_plan(
     state.packed_seq_params = packed_seq_params
     state.extra_block_kwargs = extra_block_kwargs
     state.runtime_gather_output = runtime_gather_output
+    state.context = None
+    state.context_mask = None
+    state.attention_bias = None
 
     # build preprocess
     model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
