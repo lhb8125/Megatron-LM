@@ -22,6 +22,7 @@ from megatron.training.initialize import initialize_megatron
 from megatron.training.utils import unwrap_model
 import numpy as np
 import random
+import hashlib
 
 
 def schedule_1f1b_overlap(datas, model):
@@ -135,8 +136,14 @@ def build_gpt_model(args):
     model = unwrap_model(model, (Float16Module,))
     return model
 
-def check_eq(a, b):
+def md5_hash_tensor(t):
+    return hashlib.md5(t.detach().to(torch.float32).cpu().numpy().tobytes()).hexdigest()
+
+def check_eq(a, b, check_md5=False):
     np.testing.assert_equal(a.detach().float().cpu().numpy(), b.detach().float().cpu().numpy())
+    # time consuming, we only check output and input grad
+    if check_md5:
+        assert md5_hash_tensor(a) == md5_hash_tensor(b)
         
 def test_1f1b_overlap(args):
     model1 = build_gpt_model(args)
@@ -159,11 +166,11 @@ def test_1f1b_overlap(args):
     
     # check output
     for (e1, e2) in zip(outputs1, outputs2):
-        check_eq(e1, e2)
+        check_eq(e1, e2, check_md5=True)
         
     # check data1, data2 grad
     for (e1, e2) in zip(data1, data2):
-        check_eq(e1.grad, e2.grad)
+        check_eq(e1.grad, e2.grad, check_md5=True)
         
     # check parameter weight grad
     for (n1, p1), (n2, p2) in zip(model1.named_parameters(), model2.named_parameters()):
