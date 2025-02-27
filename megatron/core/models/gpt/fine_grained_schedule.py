@@ -1,6 +1,7 @@
 import weakref
 from typing import Any, Callable, Optional, Tuple, Union
 
+import torch
 from torch import Tensor
 
 from megatron.core.pipeline_parallel.combined_1f1b import (
@@ -12,6 +13,8 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
     get_comp_stream,
 )
 from megatron.core.transformer import transformer_layer
+from megatron.core.transformer.module import float16_to_fp32
+
 
 
 def weak_method(method):
@@ -107,6 +110,17 @@ class PostProcessNode(ScheduleNode):
         self.model_chunk_state = model_chunk_state
 
     def forward_impl(self, hidden_states):
+        
+         # Final layer norm.
+        if self.gpt_model.decoder.final_layernorm is not None:
+            hidden_states = self.gpt_model.decoder.final_layernorm(hidden_states)
+            # TENorm produces a "viewed" tensor. This will result in schedule.py's
+            # deallocate_output_tensor() throwing an error, so a viewless tensor is
+            # created to prevent this.
+            hidden_states = transformer_layer.make_viewless_tensor(
+                inp=hidden_states, requires_grad=True, keep_graph=True
+            )
+
         gpt_model = self.gpt_model
         runtime_gather_output = self.model_chunk_state.runtime_gather_output
         labels = self.model_chunk_state.labels
@@ -119,8 +133,8 @@ class PostProcessNode(ScheduleNode):
 
         if labels is None:
             # [s b h] => [b s h]
-            return logits.transpose(0, 1).contiguous()
-        loss = gpt_model.compute_language_model_loss(labels, logits)
+            return float16_to_fp32(logits.transpose(0, 1).contiguous())
+        loss = float16_to_fp32(gpt_model.compute_language_model_loss(labels, logits))
         return loss
 
 
@@ -202,7 +216,7 @@ class AttnNode(TransformerLayerNode):
 
         # Optional Layer norm post the cross-attention.
         pre_mlp_layernorm_output = self.layer.pre_mlp_layernorm(hidden_states)
-
+        
         # residual, pre_mlp_layernorm_output
         # MLP.
         probs, routing_map = self.layer.mlp.router(pre_mlp_layernorm_output)
@@ -240,9 +254,10 @@ class MlPNode(TransformerLayerNode):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            # inputs = dispatched_input
+            inputs = dispatched_input
             dispatched_input = token_dispatcher.dispatch_postprocess(dispatched_input)
-            # 
+            # release tensor not used by backward
+            inputs.untyped_storage().resize_(0)
             expert_output, mlp_bias = self.layer.mlp.experts(
                 dispatched_input, self.common_state.tokens_per_expert
             )
@@ -274,6 +289,7 @@ class CombinePostProcessNode(TransformerLayerNode):
             output = token_dispatcher.combine_postprocess(permutated_local_input_tokens)
         output = output.type_as(residual)
         output += shared_output
+        # release tensor not used by backward
         shared_output.untyped_storage().resize_(0)
         mlp_output_with_bias = (output, None)
         with self.layer.bias_dropout_add_exec_handler():

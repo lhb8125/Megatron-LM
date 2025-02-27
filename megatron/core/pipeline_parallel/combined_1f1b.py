@@ -164,9 +164,12 @@ class ScheduleNode:
 
     def get_grad(self):
         grad = tuple([e.grad if e is not None else None for e in self.inputs])
+        # clear state 
+        self.inputs = None
+        self.output = None
         # multiple in, multiple out
         if len(grad) == 1:
-            grad = grad[0]
+            grad = grad[0]    
         return grad
 
 
@@ -539,8 +542,9 @@ def forward_backward_step(
 
     f_schedule_plan = output_tensor if f_model else None
     grad = b_output_tensor_grad[0] if b_model else None
+    with context_manager:
     # schedule forward and backward
-    output_tensor = schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad, f_context=f_context, b_context=b_context)
+        output_tensor = schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad, f_context=f_context, b_context=b_context)
     # forward post process
     num_tokens = None
     if f_model:
