@@ -228,7 +228,10 @@ class DispatchNode(TransformerLayerNode):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
+            inputs = permutated_local_input_tokens
             dispatched_input = token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
+            # release tensor not used by backward
+            inputs.untyped_storage().resize_(0)
         return residual, pre_mlp_layernorm_output, dispatched_input, probs
 
 
@@ -237,7 +240,9 @@ class MlPNode(TransformerLayerNode):
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
+            # inputs = dispatched_input
             dispatched_input = token_dispatcher.dispatch_postprocess(dispatched_input)
+            # 
             expert_output, mlp_bias = self.layer.mlp.experts(
                 dispatched_input, self.common_state.tokens_per_expert
             )
@@ -252,9 +257,12 @@ class CombineNode(TransformerLayerNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
+            # release tensor not used by backward
+            inputs = permutated_local_input_tokens    
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 permutated_local_input_tokens
             )
+            inputs.untyped_storage().resize_(0)
         return residual, permutated_local_input_tokens, shared_output, probs
 
 
@@ -266,6 +274,7 @@ class CombinePostProcessNode(TransformerLayerNode):
             output = token_dispatcher.combine_postprocess(permutated_local_input_tokens)
         output = output.type_as(residual)
         output += shared_output
+        shared_output.untyped_storage().resize_(0)
         mlp_output_with_bias = (output, None)
         with self.layer.bias_dropout_add_exec_handler():
             hidden_states = self.layer.mlp_bda(

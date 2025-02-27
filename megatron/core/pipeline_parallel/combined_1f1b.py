@@ -10,7 +10,6 @@ from megatron.core.distributed import DistributedDataParallel
 
 import contextlib
 from torch.autograd.variable import Variable
-
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
@@ -28,11 +27,18 @@ from .schedules import (
     clear_embedding_activation_buffer,
     check_first_val_step,
     set_current_microbatch,
-    finish_embedding_wgrad_compute
+    finish_embedding_wgrad_compute,
+    deallocate_output_tensor
 )
+from megatron.core.utils import make_viewless_tensor
 
 # Types
 Shape = Union[List[int], torch.Size]
+
+
+def make_viewless(e):
+    e = make_viewless_tensor(inp=e, requires_grad=e.requires_grad, keep_graph=True)
+    return e
 
 
 class StreamRelease(torch.autograd.Function):
@@ -86,7 +92,7 @@ class ScheduleNode:
 
     def _forward(self, *inputs):
         torch.cuda.nvtx.range_push(f"{self.name} forward")
-        self.inputs = [e.detach() if e is not None else None for e in inputs]
+        self.inputs = [make_viewless(e.detach()) if e is not None else None for e in inputs]
         for i, input in enumerate(self.inputs):
             if input is not None:
                 input.requires_grad = inputs[i].requires_grad
@@ -108,6 +114,12 @@ class ScheduleNode:
             data = (data,)
 
         data = StreamRelease.apply(self.event, self.stream, *data)
+        
+        if not isinstance(data, tuple):
+            data = make_viewless(data)
+        else:    
+            data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
+        
         self.output = data
         torch.cuda.nvtx.range_pop()
         return self.output
@@ -123,11 +135,26 @@ class ScheduleNode:
     def _backward(self, *output_grad):
 
         torch.cuda.nvtx.range_push(f"{self.name} backward")
+        """
         # not multiple input
         if len(output_grad) == 1:
             output_grad = output_grad[0]
+        """
+        outputs = self.output
+        if not isinstance(outputs, tuple):
+            outputs = (outputs,)
+        assert len(outputs) == len(output_grad), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
         with torch.cuda.stream(self.stream):
-            torch.autograd.backward(self.output, grad_tensors=output_grad)
+            #torch.autograd.backward(self.output, grad_tensors=output_grad)
+            Variable._execution_engine.run_backward(
+                tensors=outputs,
+                grad_tensors=output_grad,
+                keep_graph=False,
+                create_graph=False,
+                inputs=tuple(),
+                allow_unreachable=True,
+                accumulate_grad=True,
+            )
         if not len(self.inputs):
             # empty input, alse need record stream
             self.event.record(self.stream)
@@ -136,7 +163,7 @@ class ScheduleNode:
         return self.get_grad()
 
     def get_grad(self):
-        grad = [e.grad if e is not None else None for e in self.inputs]
+        grad = tuple([e.grad if e is not None else None for e in self.inputs])
         # multiple in, multiple out
         if len(grad) == 1:
             grad = grad[0]
@@ -1165,7 +1192,7 @@ def forward_backward_pipelining_with_interleaving(
                 )
             if recv_prev:
                 input_tensors[next_forward_model_chunk_id].append(input_tensor)
-            #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+            deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
         else:
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
                 # Send only since recv prefetched.
@@ -1195,7 +1222,7 @@ def forward_backward_pipelining_with_interleaving(
                 if "recv_prev" in fwd_wait_handles:
                     recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
 
-            #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+            deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
             if recv_prev:
                 input_tensors[next_forward_model_chunk_id].append(
                     fwd_recv_buffer[k % fwd_recv_buffer_size]
@@ -1269,8 +1296,7 @@ def forward_backward_pipelining_with_interleaving(
                         recv_prev_wait_handle = recv_prev_wait_handles.pop(0)
                         recv_prev_wait_handle.wait()
 
-            #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
-
+            deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
             output_tensor, _ = forward_step_helper(
                 forward_k, microbatch_id, checkpoint_activations_microbatch
             )
@@ -1417,7 +1443,7 @@ def forward_backward_pipelining_with_interleaving(
                     config=config,
                 )
             )
-            #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+            deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
             # Put input_tensor and output_tensor_grad in data structures in the
             # right location.
@@ -1426,7 +1452,7 @@ def forward_backward_pipelining_with_interleaving(
             if recv_next:
                 output_tensor_grads[next_backward_model_chunk_id].append(output_tensor_grad)
 
-    #deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+    deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
     # Run cooldown backward passes (flush out pipeline).
     if not forward_only:
