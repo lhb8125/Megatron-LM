@@ -143,7 +143,7 @@ def test_1f1b_overlap(args):
     model2 = build_gpt_model(args)
     model2.load_state_dict(model1.state_dict())
     
-    data1 = [build_data(args) for e in range(2)]
+    data1 = [build_data(args) for e in range(8)]
     for e in data1:
         e.requires_grad = True
         
