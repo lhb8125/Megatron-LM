@@ -195,6 +195,7 @@ class SubmoduleCallables:
     for a particular submodule.
     """
     forward: Optional[Callable] = None
+    backward: Optional[Callable] = None
     dgrad: Optional[Callable] = None
     dw: Optional[Callable] = None
 

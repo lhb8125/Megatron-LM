@@ -531,6 +531,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             
         return probs, routing_map
     
+    def _submodule_attention_router_compound_backward(self):
+        pass
+
+    def _submodule_attention_router_compound_dgrad(self):
+        raise NotImplementedError("Not implemented")
+
     def _submodule_attention_router_compound_dw(self):
         """
         TODO: replace below placeholder with actual computation
@@ -551,6 +557,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             shared_expert_output = self.mlp.shared_experts(hidden_states)
         return expert_output, shared_expert_output, mlp_bias
     
+    def _submodule_mlp_backward(self):
+        pass
+
+    def _submodule_mlp_dgrad(self):
+        raise NotImplementedError("Not implemented")
+
     def _submodule_mlp_dw(self):
         """
         TODO: replace below placeholder with actual computation
@@ -567,6 +579,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
         return dispatched_input, tokens_per_expert
     
+    def _submodule_dispatch_backward(self):
+        pass
+
+    def _submodule_dispatch_dgrad(self):
+        raise NotImplementedError("Not implemented")
+
     def _submodule_combine_forward(self, expert_output, mlp_bias, shared_expert_output):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
@@ -576,6 +594,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         if shared_expert_output is not None:
             output += shared_expert_output
         return output, mlp_bias
+
+    def _submodule_combine_backward(self):
+        pass
+
+    def _submodule_combine_dgrad(self):
+        raise NotImplementedError("Not implemented")
     
     def get_submodule_callables(self):
         """
@@ -584,17 +608,25 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         callables = TransformerLayerSubmoduleCallables(
             attention=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, self._submodule_attention_router_compound_forward),
-                dw=partial(self._callable_wrapper, self._submodule_attention_router_compound_dw)
+                backward=partial(self._callable_wrapper, self._submodule_attention_router_compound_backward),
+                dgrad=partial(self._callable_wrapper, self._submodule_attention_router_compound_dgrad),
+                dw=partial(self._callable_wrapper, self._submodule_attention_router_compound_dw),
             ),
             dispatch=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, self._submodule_dispatch_forward),
+                backward=partial(self._callable_wrapper, self._submodule_dispatch_backward),
+                dgrad=partial(self._callable_wrapper, self._submodule_dispatch_dgrad),
             ),
             mlp=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, self._submodule_mlp_forward),
-                dw=partial(self._callable_wrapper, self._submodule_mlp_dw)
+                backward=partial(self._callable_wrapper, self._submodule_mlp_backward),
+                dgrad=partial(self._callable_wrapper, self._submodule_mlp_dgrad),
+                dw=partial(self._callable_wrapper, self._submodule_mlp_dw),
             ),
             combine=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, self._submodule_combine_forward),
+                backward=partial(self._callable_wrapper, self._submodule_combine_backward),
+                dgrad=partial(self._callable_wrapper, self._submodule_combine_dgrad),
             ),
         )
         return callables
