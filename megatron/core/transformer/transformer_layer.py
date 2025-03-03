@@ -596,19 +596,26 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     def _submodule_dispatch_dgrad(self):
         raise NotImplementedError("Not implemented")
 
-    def _submodule_combine_forward(self, expert_output, mlp_bias, shared_expert_output):
+    def _submodule_combine_forward(self, residual, expert_output, mlp_bias, shared_expert_output):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
         """
-        output, mlp_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        mlp_output_with_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
         if shared_expert_output is not None:
             output += shared_expert_output
-        return output, mlp_bias
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                mlp_output_with_bias, residual, self.hidden_dropout
+            )
+        output = make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
 
-    def _submodule_combine_backward(self, output, mlp_bias, output_grad, mlp_bias_grad):
+        return output
+
+    def _submodule_combine_backward(self, output, output_grad):
         output.backward(output_grad)
-        mlp_bias.backward(mlp_bias_grad)
 
     def _submodule_combine_dgrad(self):
         raise NotImplementedError("Not implemented")
