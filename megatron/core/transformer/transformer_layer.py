@@ -3,6 +3,7 @@ import warnings
 from abc import ABC
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Union
+from functools import partial
 
 import torch
 import torch.distributed
@@ -16,7 +17,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_viewless_tensor
-
+from megatron.core.transformer.utils import TransformerLayerSubmoduleCallables, SubmoduleCallables
 
 def get_transformer_layer_offset(config: TransformerConfig):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -380,31 +381,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 otherwise None.
         """
 
-        # Residual connection.
-        residual = hidden_states
-
-        # Optional Input Layer norm
-        input_layernorm_output = self.input_layernorm(hidden_states)
-
-        # Self attention.
-        attention_output_with_bias = self.self_attention(
-            input_layernorm_output,
-            attention_mask=attention_mask,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
+        hidden_states = self._self_attention_compound_forward_step(
+            hidden_states,
+            attention_mask,
+            inference_params,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            attention_bias,
+            packed_seq_params,
+            sequence_len_offset
         )
-
-        # TODO: could we move `bias_dropout_add_exec_handler` itself
-        # inside the module provided in the `bias_dropout_add_spec` module?
-        with self.bias_dropout_add_exec_handler():
-            hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
-                attention_output_with_bias, residual, self.hidden_dropout
-            )
 
         # Residual connection.
         residual = hidden_states
@@ -460,6 +447,157 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         if self.config.external_cuda_graph and self.training:
             return output
         return output, context
+
+    def _self_attention_compound_forward_step(
+            self,
+            hidden_states,
+            attention_mask,
+            inference_params,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            attention_bias,
+            packed_seq_params,
+            sequence_len_offset):
+        """
+        Performs a forward step for optional layernorm, self-attention and bias-dropout-add.
+        """
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Input Layer norm
+        input_layernorm_output = self.input_layernorm(hidden_states)
+
+        # Self attention.
+        attention_output_with_bias = self.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+        )
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                attention_output_with_bias, residual, self.hidden_dropout
+            )
+
+        return hidden_states
+
+    def _callable_wrapper(self, func, stream, event, *args, **kwargs):
+        """
+        Wraps a function call so that it waits for a given CUDA event before
+        proceeding and then runs the function on a specified CUDA stream.
+        """
+        if event is not None:
+            event.wait(stream)
+        with torch.cuda.stream(stream):
+            return func(*args, **kwargs)
+
+    def _submodule_attention_router_compound_forward(
+            self, 
+            hidden_states,
+            attention_mask,
+            inference_params,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            attention_bias,
+            packed_seq_params,
+            sequence_len_offset
+        ):
+        """
+        Performs a combined forward pass that includes self-attention and MLP routing logic.
+        """
+        hidden_states = self._self_attention_compound_forward_step(
+            hidden_states,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+        )
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
+            
+        return probs, routing_map
+    
+    def _submodule_attention_router_compound_dw(self):
+        """
+        TODO: replace below placeholder with actual computation
+        self.self_attention.linear_qkv.wgrad_comp()
+        self.self_attention.core_attention.wgrad_comp()
+        self.self_attention.linear_proj.wgrad_comp()
+        """
+        raise NotImplementedError("Not implemented")
+
+    def _submodule_mlp_forward(self, hidden_states, dispatched_input, tokens_per_expert):
+        """
+        Performs a forward pass for the MLP submodule, including both expert-based
+        and optional shared-expert computations.
+        """
+        shared_expert_output = None
+        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
+        if self.use_shared_expert and not self.shared_expert_overlap:
+            shared_expert_output = self.mlp.shared_experts(hidden_states)
+        return expert_output, shared_expert_output, mlp_bias
+    
+    def _submodule_mlp_dw(self):
+        """
+        TODO: replace below placeholder with actual computation
+        self.mlp.experts.wgrad_comp()
+        self.mlp.shared_experts.wgrad_comp()
+        """
+        raise NotImplementedError("Not implemented")
+    
+    def _submodule_dispatch_forward(self, hidden_states, probs, routing_map):
+        """
+        Dispatches tokens to the appropriate experts based on the router output.
+        """
+        #Below changes should not influence shared experts overlap
+        dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
+        return dispatched_input, tokens_per_expert
+    
+    def _submodule_combine_forward(self, expert_output, mlp_bias, shared_expert_output):
+        """
+        Re-combines the expert outputs (and optional shared_expert_output) into the same order
+        as the original input tokens, applying any required bias.
+        """
+        output, mlp_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        if shared_expert_output is not None:
+            output += shared_expert_output
+        return output, mlp_bias
+    
+    def get_submodule_callables(self):
+        """
+        Returns a dictionary of submodule callables for the transformer layer.
+        """
+        callables = TransformerLayerSubmoduleCallables(
+            attention=SubmoduleCallables(
+                forward=partial(self._callable_wrapper, self._submodule_attention_router_compound_forward),
+                dw=partial(self._callable_wrapper, self._submodule_attention_router_compound_dw)
+            ),
+            dispatch=SubmoduleCallables(
+                forward=partial(self._callable_wrapper, self._submodule_dispatch_forward),
+            ),
+            mlp=SubmoduleCallables(
+                forward=partial(self._callable_wrapper, self._submodule_mlp_forward),
+                dw=partial(self._callable_wrapper, self._submodule_mlp_dw)
+            ),
+            combine=SubmoduleCallables(
+                forward=partial(self._callable_wrapper, self._submodule_combine_forward),
+            ),
+        )
+        return callables
 
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[dict] = None

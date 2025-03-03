@@ -465,7 +465,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.to(
                     torch.device("cpu"), non_blocking=False
                 )
-
+        if self.cuda_sync_point == "before_ep_alltoall":
+            self.preprocess_event = torch.cuda.current_stream().record_event()
         return num_tokens_per_local_expert
 
     def token_permutation(
@@ -517,7 +518,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Perform expert parallel AlltoAll communication
         if self.cuda_sync_point == "before_ep_alltoall":
-            torch.cuda.current_stream().synchronize()
+            self.preprocess_event.wait()
         global_input_tokens = all_to_all(
             self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
         )

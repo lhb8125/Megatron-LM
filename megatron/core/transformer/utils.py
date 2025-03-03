@@ -3,7 +3,8 @@
 """Utilities for transformer layers."""
 from functools import lru_cache
 from operator import itemgetter
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, Iterator, Optional, Tuple, Union, Callable
+from dataclasses import dataclass
 
 import torch
 
@@ -186,3 +187,24 @@ def sharded_state_dict_default(
             module_sd, prefix, {}, sharded_offsets
         )
     return module_sharded_sd
+
+@dataclass
+class SubmoduleCallables:
+    """
+    Holds references to forward, dgrad, and dw (weight-grad) callables
+    for a particular submodule.
+    """
+    forward: Optional[Callable] = None
+    dgrad: Optional[Callable] = None
+    dw: Optional[Callable] = None
+
+@dataclass
+class TransformerLayerSubmoduleCallables:
+    """
+    Collects the SubmoduleMethods for each of the submodules:
+    'attention', 'dispatch', 'mlp', 'combine'.
+    """
+    attention: SubmoduleCallables
+    dispatch: SubmoduleCallables
+    mlp: SubmoduleCallables
+    combine: SubmoduleCallables
