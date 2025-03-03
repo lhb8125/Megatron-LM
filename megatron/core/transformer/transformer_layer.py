@@ -495,6 +495,13 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         Wraps a function call so that it waits for a given CUDA event before
         proceeding and then runs the function on a specified CUDA stream.
         """
+        input_tensors = [tensor for tensor in args if isinstance(tensor, torch.Tensor)]
+        input_tensors.extend([tensor for tensor in kwargs.values() if isinstance(tensor, torch.Tensor)])
+        for tensor in input_tensors:
+            tensor.detach_()
+            if tensor.requires_grad:
+                tensor.retain_grad()
+
         if event is not None:
             event.wait(stream)
         with torch.cuda.stream(stream):
@@ -531,8 +538,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             
         return probs, routing_map
     
-    def _submodule_attention_router_compound_backward(self):
-        pass
+    def _submodule_attention_router_compound_backward(self, probs, probs_grad):
+        probs.backward(probs_grad)
+        
 
     def _submodule_attention_router_compound_dgrad(self):
         raise NotImplementedError("Not implemented")
@@ -557,8 +565,10 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             shared_expert_output = self.mlp.shared_experts(hidden_states)
         return expert_output, shared_expert_output, mlp_bias
     
-    def _submodule_mlp_backward(self):
-        pass
+    def _submodule_mlp_backward(self, expert_output, shared_expert_output, mlp_bias, expert_output_grad, shared_expert_output_grad, mlp_bias_grad):
+        expert_output.backward(expert_output_grad)
+        shared_expert_output.backward(shared_expert_output_grad)
+        mlp_bias.backward(mlp_bias_grad)
 
     def _submodule_mlp_dgrad(self):
         raise NotImplementedError("Not implemented")
@@ -579,8 +589,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
         return dispatched_input, tokens_per_expert
     
-    def _submodule_dispatch_backward(self):
-        pass
+    def _submodule_dispatch_backward(self, dispatched_input, dispatched_input_grad, tokens_per_expert, tokens_per_expert_grad):
+        dispatched_input.backward(dispatched_input_grad)
+        tokens_per_expert.backward(tokens_per_expert_grad)
 
     def _submodule_dispatch_dgrad(self):
         raise NotImplementedError("Not implemented")
@@ -595,8 +606,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             output += shared_expert_output
         return output, mlp_bias
 
-    def _submodule_combine_backward(self):
-        pass
+    def _submodule_combine_backward(self, output, mlp_bias, output_grad, mlp_bias_grad):
+        output.backward(output_grad)
+        mlp_bias.backward(mlp_bias_grad)
 
     def _submodule_combine_dgrad(self):
         raise NotImplementedError("Not implemented")
