@@ -602,6 +602,14 @@ class TransformerBlock(MegatronModule):
 
         return hidden_states
 
+    def get_layer_callables(self, layer_number: int):
+        """
+        Get the callables for the layer at the given layer number.
+        """
+        from megatron.core.transformer.moe.moe_layer import MoELayer
+        assert isinstance(self.layers[layer_number].mlp, MoELayer), "Callables are only supported with moe submodules."
+        return self.layers[layer_number].get_submodule_callables()
+
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: dict = None
     ) -> ShardedStateDict:

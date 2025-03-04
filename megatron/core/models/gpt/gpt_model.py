@@ -304,6 +304,12 @@ class GPTModel(LanguageModule):
 
         return loss
 
+    def get_transformer_callables_by_layer(self, layer_number: int):
+        """
+        Get the callables for the layer at the given transformer layer number.
+        """
+        return self.decoder.get_layer_callables(layer_number)
+
     def sharded_state_dict(
         self, prefix: str = '', sharded_offsets: tuple = (), metadata: Optional[Dict] = None
     ) -> ShardedStateDict:
