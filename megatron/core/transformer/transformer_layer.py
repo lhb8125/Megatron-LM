@@ -498,9 +498,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         input_tensors = [tensor for tensor in args if isinstance(tensor, torch.Tensor)]
         input_tensors.extend([tensor for tensor in kwargs.values() if isinstance(tensor, torch.Tensor)])
         for tensor in input_tensors:
-            tensor.detach_()
-            if tensor.requires_grad:
-                tensor.retain_grad()
+            tensor.detach_().requires_grad_(True)
 
         if event is not None:
             event.wait(stream)
