@@ -107,52 +107,65 @@ def run_model_ref_with_capture(args, model, iterations):
 
 
 def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
+    for module in model.modules():
+        if hasattr(module, 'fuse_wgrad_accumulation'):
+            module.fuse_wgrad_accumulation = False
     events = [torch.cuda.Event() for _ in range(microbatches)]
     
     # Create streams for computation and communication
     comp_stream = torch.cuda.Stream(device="cuda")
     comm_stream = torch.cuda.Stream(device="cuda")
     
-    # Get the callables for the layer
+    # Get the callables, only 1 layer in the decoder
     callables = model.decoder.get_layer_callables(0)
     
     # Initialize tensors to store intermediate results
     attention_outputs = []
     dispatch_outputs = []
     mlp_outputs = []
-    final_outputs = []
+    combine_outputs = []
+    attention_detached_outputs = []
+    dispatch_detached_outputs = []
+    mlp_detached_outputs = []
+    
     
     # Run the first microbatch forward pass
     input_tensor = input_tensors[0]
     
-    # First microbatch forward pass (all on comp_stream)
-    # Attention + Router forward
-    probs, routing_map = callables.attention.forward(
+    # First microbatch forward pass
+    # f1.Attention + Router forward
+    attention_output, detached_outputs = callables.attention.forward(
         comp_stream, events[0],
         input_tensor, None, None, None, None, None, None, None, None
     )
-    attention_outputs.append((probs, routing_map))
+    hidden_states, pre_mlp_layernorm_output, probs, routing_map = detached_outputs
+    attention_outputs.append(attention_output)
+    attention_detached_outputs.append(detached_outputs)
     
-    # Token dispatch forward
-    dispatched_input, tokens_per_expert = callables.dispatch.forward(
+    # f2. Token dispatch forward
+    dispatch_output, detached_outputs = callables.dispatch.forward(
         comm_stream, events[0],
-        input_tensor, probs, routing_map
+        pre_mlp_layernorm_output, probs, routing_map
     )
-    dispatch_outputs.append((dispatched_input, tokens_per_expert))
+    dispatched_input, tokens_per_expert = detached_outputs
+    dispatch_outputs.append(dispatch_output)
+    dispatch_detached_outputs.append(detached_outputs)
     
-    # MLP (experts) forward
-    expert_output, shared_expert_output, mlp_bias = callables.mlp.forward(
+    # f3. MLP (experts) forward
+    mlp_output, detached_outputs = callables.mlp.forward(
         comp_stream, events[0],
-        input_tensor, dispatched_input, tokens_per_expert
+        dispatched_input, tokens_per_expert, pre_mlp_layernorm_output, 
     )
-    mlp_outputs.append((expert_output, shared_expert_output, mlp_bias))
+    expert_output, shared_expert_output, mlp_bias = detached_outputs
+    mlp_outputs.append(mlp_output)
+    mlp_detached_outputs.append(detached_outputs)
     
-    # Combine outputs forward
-    output = callables.combine.forward(
+    # f4. Combine outputs forward
+    output, detached_outputs = callables.combine.forward(
         comm_stream, events[0],
-        input_tensor, expert_output, mlp_bias, shared_expert_output
+        expert_output, shared_expert_output, mlp_bias, hidden_states
     )
-    final_outputs.append(output)
+    combine_outputs.append(output)
     
     # Run the overlapped 1F1B schedule for the remaining microbatches
     for i in range(1, microbatches):
@@ -164,102 +177,92 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         
         # 1F1B interleaved schedule (following the reference pattern)
         # f1. Attention forward for current microbatch
-        probs, routing_map = callables.attention.forward(
+        attention_output, detached_outputs = callables.attention.forward(
             comp_stream, events[i],
             input_tensor, None, None, None, None, None, None, None, None
         )
-        attention_outputs.append((probs, routing_map))
+        hidden_states, pre_mlp_layernorm_output, probs, routing_map = detached_outputs
+        attention_outputs.append(attention_output)
+        attention_detached_outputs.append(detached_outputs)
         
         # Gradient for previous microbatch output
-        prev_output_grad = torch.ones_like(final_outputs[prev_idx])
+        prev_output_grad = torch.ones_like(combine_outputs[prev_idx])
         # b1. Combine backward for previous microbatch
         callables.combine.backward(
             comm_stream, events[prev_idx],
-            final_outputs[prev_idx], prev_output_grad
+            combine_outputs[prev_idx], prev_output_grad
         )
 
         # f2. Dispatch forward for current microbatch
-        dispatched_input, tokens_per_expert = callables.dispatch.forward(
+        dispatch_output, detached_outputs = callables.dispatch.forward(
             comm_stream, events[i],
-            input_tensor, probs, routing_map
+            pre_mlp_layernorm_output, probs, routing_map
         )
-        dispatch_outputs.append((dispatched_input, tokens_per_expert))
+        dispatched_input, tokens_per_expert = detached_outputs
+        dispatch_outputs.append(dispatch_output)
+        dispatch_detached_outputs.append(detached_outputs)
+
         # b2. MLP backward for previous microbatch
-        prev_expert_output, prev_shared_expert_output, prev_mlp_bias = mlp_outputs[prev_idx]
         callables.mlp.backward(
-            comm_stream, events[prev_idx],
-            prev_expert_output, prev_shared_expert_output, prev_mlp_bias,
-            prev_expert_output.grad,
-            prev_shared_expert_output.grad if prev_shared_expert_output is not None else None,
-            prev_mlp_bias.grad
+            comp_stream, events[prev_idx],
+            *mlp_outputs[prev_idx], mlp_detached_outputs[prev_idx]
         )
 
-         # f3. MLP backward for current microbatch
-        prev_expert_output, prev_shared_expert_output, prev_mlp_bias = mlp_outputs[prev_idx]
-        callables.mlp.backward(
+         # f3. MLP forward for current microbatch
+        mlp_output, detached_outputs = callables.mlp.forward(
             comp_stream, events[i],
-            prev_expert_output, prev_shared_expert_output, prev_mlp_bias,
-            torch.ones_like(prev_expert_output),
-            torch.ones_like(prev_shared_expert_output) if prev_shared_expert_output is not None else None,
-            torch.ones_like(prev_mlp_bias)
+            dispatched_input, tokens_per_expert, pre_mlp_layernorm_output, 
         )
+        expert_output, shared_expert_output, mlp_bias = detached_outputs
+        mlp_outputs.append(mlp_output)
+        mlp_detached_outputs.append(detached_outputs)
+
         # b3. Dispatch backward for previous microbatch
-        prev_dispatched_input, prev_tokens_per_expert = dispatch_outputs[prev_idx]
         callables.dispatch.backward(
             comm_stream, events[prev_idx],
-            prev_dispatched_input, prev_tokens_per_expert,
-            prev_dispatched_input.grad
+            *dispatch_outputs[prev_idx], dispatch_detached_outputs[prev_idx]
         )
 
         # f4. Combine forward for current microbatch
-        output = callables.combine.forward(
+        output, detached_outputs = callables.combine.forward(
             comm_stream, events[i],
-            input_tensor, prev_expert_output, prev_mlp_bias, prev_shared_expert_output
+            expert_output, shared_expert_output, mlp_bias, hidden_states
         )
-        final_outputs.append(output)
+        combine_outputs.append(output)
+        
         # b4. Attention backward for previous microbatch
-        prev_probs, prev_routing_map = attention_outputs[prev_idx]
         callables.attention.backward(
-            comm_stream, events[prev_idx],
-            prev_probs, prev_routing_map,
-            prev_probs.grad
+            comp_stream, events[prev_idx],
+            *attention_outputs[prev_idx], attention_detached_outputs[prev_idx]
         )
     
     #Last microbatch backward pass
     # b1. Combine backward for last microbatch
     callables.combine.backward(
         comm_stream, events[microbatches-1],
-        final_outputs[microbatches-1], torch.ones_like(final_outputs[microbatches-1])
+        combine_outputs[microbatches-1], torch.ones_like(combine_outputs[microbatches-1])
     )   
 
     # b2. MLP backward for last microbatch
-    prev_expert_output, prev_shared_expert_output, prev_mlp_bias = mlp_outputs[microbatches-1]
     callables.mlp.backward(
         comp_stream, events[microbatches-1],
-        prev_expert_output, prev_shared_expert_output, prev_mlp_bias,
-        prev_expert_output.grad,
-        prev_shared_expert_output.grad if prev_shared_expert_output is not None else None,
-        prev_mlp_bias.grad
+        *mlp_outputs[microbatches-1], mlp_detached_outputs[microbatches-1]
     )
     
     # b3. Dispatch backward for last microbatch
-    prev_dispatched_input, prev_tokens_per_expert = dispatch_outputs[microbatches-1]
     callables.dispatch.backward(
         comm_stream, events[microbatches-1],
-        prev_dispatched_input, prev_tokens_per_expert,
-        prev_dispatched_input.grad
-    )           
+        *dispatch_outputs[microbatches-1], dispatch_detached_outputs[microbatches-1]
+    )
 
     # b4. Attention backward for last microbatch
-    prev_probs, prev_routing_map = attention_outputs[microbatches-1]
     callables.attention.backward(
         comp_stream, events[microbatches-1],
-        prev_probs, prev_routing_map,
-        prev_probs.grad
+        *attention_outputs[microbatches-1], attention_detached_outputs[microbatches-1]
     )
 
     capture = {
-        "outputs": final_outputs,
+        "outputs": combine_outputs,
     }
     for name, param in model.named_parameters():
         capture[name] = param.grad  
@@ -267,7 +270,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
     return capture
     
 def test_1f1b_overlap(args):
-    microbatches = 16
+    microbatches = 2
     model_ref = build_gpt_model(args)
     model_a2a_overlap = build_gpt_model(args)
 
@@ -278,7 +281,7 @@ def test_1f1b_overlap(args):
     input_tensors_copy = []
     for input_tensor in input_tensors:
         input_tensors_copy.append(input_tensor.clone())
-    # capture_a2a_overlap = run_model_a2a_overlap_with_capture(model_a2a_overlap, input_tensors_copy, microbatches)
+    capture_a2a_overlap = run_model_a2a_overlap_with_capture(model_a2a_overlap, input_tensors_copy, microbatches)
     
     # for name, value in capture_ref.items():
     #     if value is None:
