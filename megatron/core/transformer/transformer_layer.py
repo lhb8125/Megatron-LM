@@ -471,6 +471,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             event.wait(stream)
         with torch.cuda.stream(stream):
             outputs= func(*args, **kwargs)
+            event.record(stream)
             detached_output_tensors = []
             if not is_forward:
                 return outputs, detached_output_tensors
