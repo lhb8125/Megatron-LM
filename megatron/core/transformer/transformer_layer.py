@@ -498,6 +498,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         """
         Performs a combined forward pass that includes self-attention and MLP routing logic.
         """
+        # TODO: Find a better way to handle this
         original_hidden_states = hidden_states
         hidden_states = original_hidden_states.detach()
         # Residual connection.
@@ -570,6 +571,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return output
 
     def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs):
+        # TODO: check if this is correct
         # hidden_states.backward(detached_inputs[0].grad)
         # pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
         probs.backward(detached_inputs[2].grad)
