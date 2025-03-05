@@ -380,6 +380,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
+
         # Residual connection.
         residual = hidden_states
 
@@ -405,7 +406,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
-        
+
         # Residual connection.
         residual = hidden_states
 
@@ -536,7 +537,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        #Below changes should not influence shared experts overlap
         dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
         return dispatched_input, tokens_per_expert
 

@@ -75,10 +75,25 @@ def build_gpt_model(args):
     return model
 
 def copy_weights_distributed(model_source, model_target):
-    for name, param in model_source.named_parameters():
-        if name in dict(model_target.named_parameters()):
-            target_param = model_target.get_parameter(name)
-            target_param.data.copy_(param.data)
+    # Recursively copy weights from source to target model
+    def _copy_weights_recursive(source_module, target_module):
+        for name, child in source_module.named_children():
+            if name in dict(target_module.named_modules()):
+                target_child = target_module.get_submodule(name)
+                _copy_weights_recursive(child, target_child)
+            else:
+                print(f"[debug] child_prefix not in target_module: {name}")
+        
+        # Copy parameters at current level
+        for name, param in source_module.named_parameters(recurse=False):
+            if name in dict(target_module.named_parameters()):
+                target_param = target_module.get_parameter(name)
+                target_param.data.copy_(param.data)
+            else:
+                print(f"[debug] param_name not in target_module: {name}")
+    
+    # Start recursive copy from the root modules
+    _copy_weights_recursive(model_source, model_target)
     print("Weights have been successfully copied.")
 
 def run_model_ref_with_capture(args, model, iterations):
@@ -90,19 +105,17 @@ def run_model_ref_with_capture(args, model, iterations):
     output_tensors = []
     for _ in range(iterations):
         input_tensor = build_data(args)
-        input_tensors.append(input_tensor)
-        output = model.decoder(input_tensor, None)
+        input_tensors.append(input_tensor.clone())
+        output = model.decoder.layers[0](input_tensor)[0]
         output_tensors.append(output)
         output.backward(torch.ones_like(output))
     
     capture = {
         "outputs": output_tensors,
     }
-    for name, param in model.named_parameters():
+    for name, param in model.decoder.layers[0].named_parameters():
         capture[name] = param.grad
 
-    for i in range(len(input_tensors)):
-        input_tensors[i].grad.zero_()
     return capture, input_tensors
 
 
@@ -274,7 +287,7 @@ def test_1f1b_overlap(args):
     model_ref = build_gpt_model(args)
     model_a2a_overlap = build_gpt_model(args)
 
-    copy_weights_distributed(model_ref, model_a2a_overlap)
+    copy_weights_distributed(model_ref.decoder.layers[0], model_a2a_overlap.decoder.layers[0])
     
     capture_ref, input_tensors= run_model_ref_with_capture(args, model_ref, microbatches)
 
@@ -283,10 +296,23 @@ def test_1f1b_overlap(args):
         input_tensors_copy.append(input_tensor.clone())
     capture_a2a_overlap = run_model_a2a_overlap_with_capture(model_a2a_overlap, input_tensors_copy, microbatches)
     
-    # for name, value in capture_ref.items():
-    #     if value is None:
-    #         continue
-    #     assert torch.allclose(value, capture_a2a_overlap[name])
+    for name, value in capture_ref.items():
+        assert name in capture_a2a_overlap, f"gradient name mismatch, '{name}' not in capture_a2a_overlap.keys()"
+        if value is None:
+            assert capture_a2a_overlap[name] is None
+        if name == "outputs":
+            assert len(value) == len(capture_a2a_overlap[name]), "outputs length mismatch"
+            for i in range(len(value)):
+                assert value[i].shape == capture_a2a_overlap[name][i].shape, "outputs shape mismatch"
+                assert torch.allclose(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
+                # try:
+                # except Exception as e:
+                #     print(f"original: {value[i]}")
+                #     print(f"a2a_overlap: {capture_a2a_overlap[name][i]}")
+                #     exit(0)
+        else:
+            assert value.shape == capture_a2a_overlap[name].shape, f"gradient shape mismatch: '{name}'"
+            assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
 
 
 def main():
