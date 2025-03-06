@@ -9,7 +9,7 @@ export NVTE_FUSED_ATTN=1
 export NVTE_FWD_LAYERNORM_SM_MARGIN=16
 export NVTE_BWD_LAYERNORM_SM_MARGIN=16
 
-MLM_PATH=/lustre/fsw/coreai_devtech_all/pingtianl/a2a_olp/github
+MLM_PATH=/home/scratch.shunkangz_gpu/LLM-Training/MoE/megatron-lm-github
 # TE_PATH=/lustre/fsw/coreai_devtech_all/pingtianl/a2a_olp/TransformerEngine
 export PYTHONPATH=${MLM_PATH}:${PYTHONPATH}
 

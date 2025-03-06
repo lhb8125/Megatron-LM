@@ -11,6 +11,13 @@ from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
+torch.use_deterministic_algorithms(True)
+torch.manual_seed(0)
+
+import random
+random.seed(0)
+
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
