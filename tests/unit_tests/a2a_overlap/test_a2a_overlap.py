@@ -106,14 +106,14 @@ def run_model_ref_with_capture(args, model, iterations):
     for _ in range(iterations):
         input_tensor = build_data(args)
         input_tensors.append(input_tensor.clone())
-        output = model.decoder.layers[0](input_tensor)[0]
+        output = model(input_tensor)[0]
         output_tensors.append(output)
         output.backward(torch.ones_like(output))
     
     capture = {
         "outputs": output_tensors,
     }
-    for name, param in model.decoder.layers[0].named_parameters():
+    for name, param in model.named_parameters():
         capture[name] = param.grad
 
     return capture, input_tensors
@@ -130,7 +130,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
     comm_stream = torch.cuda.Stream(device="cuda")
     
     # Get the callables, only 1 layer in the decoder
-    callables = model.decoder.get_layer_callables(0)
+    callables = model.get_submodule_callables()
     
     # Initialize tensors to store intermediate results
     attention_outputs = []
@@ -281,20 +281,27 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         capture[name] = param.grad  
     
     return capture
-    
+
+def reset_model(model, params=None):
+    model.zero_grad()
+    if params is None:
+        params = {}
+        for name, param in model.named_parameters():
+            params[name] = param.data.clone()
+        return params
+    else:
+        for name, param in model.named_parameters():
+            param.data.copy_(params[name])
+
+
 def test_1f1b_overlap(args):
     microbatches = 2
-    model_ref = build_gpt_model(args)
-    model_a2a_overlap = build_gpt_model(args)
+    model = build_gpt_model(args).decoder.layers[0]
 
-    copy_weights_distributed(model_ref.decoder.layers[0], model_a2a_overlap.decoder.layers[0])
-    
-    capture_ref, input_tensors= run_model_ref_with_capture(args, model_ref, microbatches)
-
-    input_tensors_copy = []
-    for input_tensor in input_tensors:
-        input_tensors_copy.append(input_tensor.clone())
-    capture_a2a_overlap = run_model_a2a_overlap_with_capture(model_a2a_overlap, input_tensors_copy, microbatches)
+    params = reset_model(model)
+    capture_ref, input_tensors= run_model_ref_with_capture(args, model, microbatches)
+    reset_model(model, params)
+    capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
     
     for name, value in capture_ref.items():
         assert name in capture_a2a_overlap, f"gradient name mismatch, '{name}' not in capture_a2a_overlap.keys()"
@@ -305,11 +312,6 @@ def test_1f1b_overlap(args):
             for i in range(len(value)):
                 assert value[i].shape == capture_a2a_overlap[name][i].shape, "outputs shape mismatch"
                 assert torch.allclose(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
-                # try:
-                # except Exception as e:
-                #     print(f"original: {value[i]}")
-                #     print(f"a2a_overlap: {capture_a2a_overlap[name][i]}")
-                #     exit(0)
         else:
             assert value.shape == capture_a2a_overlap[name].shape, f"gradient shape mismatch: '{name}'"
             assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
