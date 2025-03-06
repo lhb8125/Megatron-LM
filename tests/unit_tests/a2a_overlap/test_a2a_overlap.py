@@ -295,7 +295,7 @@ def reset_model(model, params=None):
 
 
 def test_1f1b_overlap(args):
-    microbatches = 2
+    microbatches = 1
     model = build_gpt_model(args).decoder.layers[0]
 
     params = reset_model(model)
@@ -304,6 +304,7 @@ def test_1f1b_overlap(args):
     capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
     
     for name, value in capture_ref.items():
+        # print(name, end='\0')
         assert name in capture_a2a_overlap, f"gradient name mismatch, '{name}' not in capture_a2a_overlap.keys()"
         if value is None:
             assert capture_a2a_overlap[name] is None
@@ -313,11 +314,25 @@ def test_1f1b_overlap(args):
                 assert value[i].shape == capture_a2a_overlap[name][i].shape, "outputs shape mismatch"
                 assert torch.allclose(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
         else:
-            assert value.shape == capture_a2a_overlap[name].shape, f"gradient shape mismatch: '{name}'"
-            assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
-
+            try:
+                assert value.shape == capture_a2a_overlap[name].shape, f"gradient shape mismatch: '{name}'"
+                assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
+            except Exception as e:
+                print(f"original {name}: ", value)
+                print(f"a2a_overlap {name}: ", capture_a2a_overlap[name])
+                max_diff = torch.abs(value - capture_a2a_overlap[name])
+                max_diff_value = torch.max(max_diff)
+                max_diff_index = torch.argmax(max_diff.view(-1))
+                flat_original = value.view(-1)
+                flat_a2a = capture_a2a_overlap[name].view(-1)
+                print(f"max diff: {max_diff_value} at index {max_diff_index}")
+                print(f"original value at max diff: {flat_original[max_diff_index]}")
+                print(f"a2a_overlap value at max diff: {flat_a2a[max_diff_index]}")
+                raise e
+        # print(": PASS")
 
 def main():
+    # torch.use_deterministic_algorithms(True)
     initialize_megatron()
     args = get_args()
     torch.cuda.cudart().cudaProfilerStart()

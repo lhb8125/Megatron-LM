@@ -18,6 +18,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_viewless_tensor
 from megatron.core.transformer.utils import TransformerLayerSubmoduleCallables, SubmoduleCallables
+# from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState, per_batch_state_context
 
 def get_transformer_layer_offset(config: TransformerConfig):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -462,7 +463,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             return output
         return output, context
 
-    def _callable_wrapper(self, is_forward, func, stream, event, *args, **kwargs):
+    def _callable_wrapper(self, is_forward, func, stream, event, *args, skip_detach=False, **kwargs):
         """
         Wraps a function call so that it waits for a given CUDA event before
         proceeding and then runs the function on a specified CUDA stream.
@@ -472,6 +473,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         with torch.cuda.stream(stream):
             outputs= func(*args, **kwargs)
             event.record(stream)
+            if skip_detach:
+                return outputs
             detached_output_tensors = []
             if not is_forward:
                 return outputs, detached_output_tensors
@@ -528,11 +531,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
-
-        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
-        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
+        hidden_states_detached = hidden_states.detach().requires_grad_(True)
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states_detached)
+        pre_mlp_layernorm_output_detached = pre_mlp_layernorm_output.detach().requires_grad_(True)
+        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output_detached)
             
-        return hidden_states, pre_mlp_layernorm_output, probs, routing_map
+        outputs = [hidden_states, pre_mlp_layernorm_output, probs, routing_map]
+        detached_outputs = [hidden_states_detached, pre_mlp_layernorm_output_detached, probs.detach().requires_grad_(True), routing_map.detach()]
+        return outputs, detached_outputs
     
     def _submodule_dispatch_forward(self, hidden_states, probs, routing_map):
         """
@@ -573,9 +579,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
     def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs):
         # TODO: check if this is correct
-        # hidden_states.backward(detached_inputs[0].grad)
-        # pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
-        probs.backward(detached_inputs[2].grad)
+        probs.backward(detached_inputs[2].grad, retain_graph=True)
+        pre_mlp_layernorm_output.backward(detached_inputs[1].grad, retain_graph=True)
+        hidden_states.backward(detached_inputs[0].grad)
 
     def _submodule_dispatch_backward(self, dispatched_input, tokens_per_expert, detached_inputs):
         dispatched_input.backward(detached_inputs[0].grad)
@@ -613,7 +619,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         """
         callables = TransformerLayerSubmoduleCallables(
             attention=SubmoduleCallables(
-                forward=partial(self._callable_wrapper, True, self._submodule_attention_router_compound_forward),
+                forward=partial(self._callable_wrapper, True, self._submodule_attention_router_compound_forward, skip_detach=True),
                 backward=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_backward),
                 # dgrad=partial(self._callable_wrapper, False,self._submodule_attention_router_compound_dgrad),
                 # dw=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_dw),
