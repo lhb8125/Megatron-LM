@@ -114,12 +114,12 @@ class ScheduleNode:
             data = (data,)
 
         data = StreamRelease.apply(self.event, self.stream, *data)
-        
+
         if not isinstance(data, tuple):
             data = make_viewless(data)
-        else:    
+        else:
             data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
-        
+
         self.output = data
         torch.cuda.nvtx.range_pop()
         return self.output
@@ -164,12 +164,12 @@ class ScheduleNode:
 
     def get_grad(self):
         grad = tuple([e.grad if e is not None else None for e in self.inputs])
-        # clear state 
+        # clear state
         self.inputs = None
         self.output = None
         # multiple in, multiple out
         if len(grad) == 1:
-            grad = grad[0]    
+            grad = grad[0]
         return grad
 
 
@@ -203,6 +203,14 @@ class ModelChunkSchedulePlan:
     def event(self):
         return self._event
 
+    def record_current_stream(self):
+        stream = torch.cuda.current_stream()
+        self.event.record(stream)
+
+    def wait_current_stream(self):
+        stream = torch.cuda.current_stream()
+        self.event.wait(stream)
+
     @property
     def pre_process(self):
         return self._pre_process
@@ -235,7 +243,7 @@ class ModelChunkSchedulePlan:
 
 
 def schedule_layer_1f1b(
-    f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None, f_context=None, b_context=None,
+        f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None, f_context=None, b_context=None,
 ):
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
@@ -292,6 +300,11 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None, f_context=N
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
+    if f_schedule_plan:
+        f_schedule_plan.record_current_stream()
+    if b_schedule_plan:
+        b_schedule_plan.record_current_stream()
+
     f_input = None
     if f_schedule_plan is not None:
         with f_context:
@@ -343,6 +356,11 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None, f_context=N
         if b_schedule_plan is not None:
             b_schedule_plan.pre_process.backward(grad)
 
+    if f_schedule_plan:
+        f_schedule_plan.wait_current_stream()
+    if b_schedule_plan:
+        b_schedule_plan.wait_current_stream()
+
     return f_input
 
 def schedule_chunk_forward(schedule_plan):
@@ -357,13 +375,17 @@ _COMP_STREAM = None
 _COM_STREAM = None
 
 def set_streams(comp_stream=None, com_stream=None):
+    global _COMP_STREAM
+    global _COM_STREAM
+    if _COMP_STREAM is not None:
+        return
+
     if comp_stream is None:
-        comp_stream = torch.cuda.current_stream()
+        comp_stream = torch.cuda.Stream(device="cuda")
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
-    global _COMP_STREAM
-    global _COM_STREAM
+
     assert _COMP_STREAM is None
     assert _COM_STREAM is None
     _COMP_STREAM = comp_stream
@@ -380,15 +402,15 @@ def get_com_stream():
 
 
 class VppContextManager():
-    
+
     def __init__(self, vpp_rank):
         self.vpp_rank = vpp_rank
-        
+
     def __enter__(self):
         self.origin_vpp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
         parallel_state.set_virtual_pipeline_model_parallel_rank(self.vpp_rank)
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         parallel_state.set_virtual_pipeline_model_parallel_rank(self.origin_vpp_rank)
 
@@ -509,8 +531,8 @@ def forward_backward_step(
                     output_tensor, loss_func = forward_step_func(data_iterator, f_model)
                 else:
                     output_tensor, loss_func = forward_step_func(
-                    data_iterator, f_model, checkpoint_activations_microbatch
-                )
+                        data_iterator, f_model, checkpoint_activations_microbatch
+                    )
 
     # backward preprocess
     unwrap_input_tensor_grad = False
@@ -543,7 +565,7 @@ def forward_backward_step(
     f_schedule_plan = output_tensor if f_model else None
     grad = b_output_tensor_grad[0] if b_model else None
     with context_manager:
-    # schedule forward and backward
+        # schedule forward and backward
         output_tensor = schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad, f_context=f_context, b_context=b_context)
     # forward post process
     num_tokens = None
@@ -566,7 +588,7 @@ def forward_backward_step(
                         output_tensor, loss_reduced = outputs
                         output_tensor = output_tensor / num_microbatches
                     forward_data_store.append(loss_reduced)
-                    
+
                     # attach loss_func on output_tensor
                     output_tensor.loss_func = loss_node
                 else:
@@ -593,7 +615,7 @@ def forward_backward_step(
 
             if not unwrap_output_tensor:
                 output_tensor, num_tokens = [output_tensor], num_tokens
-    # backward post process            
+    # backward post process
     input_tensor_grad = None
     if b_model is not None:
         input_tensor_grad = [None]
@@ -627,7 +649,7 @@ def unwrap_model(model, module_instances=(DistributedDataParallel, Float16Module
     return unwrapped_model
 
 def wrap_forward_func(forward_step_func):
-    
+
     def wrapped_func(data_iterator, model):
         return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
 
@@ -659,7 +681,7 @@ def forward_backward_pipelining_with_interleaving(
     # microbatch_id in [0, num_microbatches)
     # model_chunk_id in [0, num_model_chunks)
     # virtual_microbatch_id in [0, total_num_microbatches)
-
+    set_streams()
     # decorate forward step
     forward_step_func = wrap_forward_func(forward_step_func)
 
@@ -1076,7 +1098,7 @@ def forward_backward_pipelining_with_interleaving(
                         enable_grad_sync()
                         config.grad_sync_func[grad_sync_chunk_id](model[grad_sync_chunk_id].parameters())
                         synchronized_model_chunks.add(grad_sync_chunk_id)
-                disable_grad_sync()     
+                disable_grad_sync()
                 if input_tensor is not None:
                     assert input_tensor_grad is not None
 
@@ -1177,7 +1199,7 @@ def forward_backward_pipelining_with_interleaving(
                 recv_next = True
                 if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                     recv_next = False
-                
+
                 (input_tensor, output_tensor_grad) = (
                     p2p_communication.send_forward_backward_recv_forward_backward(
                         output_tensor,
@@ -1188,7 +1210,7 @@ def forward_backward_pipelining_with_interleaving(
                         config=config,
                     )
                 )
-                
+
                 output_tensor_grads[num_model_chunks - 1].append(output_tensor_grad)
             else:
                 input_tensor = p2p_communication.send_forward_recv_forward(
@@ -1266,8 +1288,8 @@ def forward_backward_pipelining_with_interleaving(
 
                 if recv_next:
                     output_tensor_grads[num_model_chunks - 1].append(bwd_recv_buffer[-1])
-    
-    
+
+
     # Run 1F1B in steady state.
     for k in range(num_microbatches_remaining):
         # Forward pass.
@@ -1436,7 +1458,7 @@ def forward_backward_pipelining_with_interleaving(
                 recv_prev = False
 
             # Communicate tensors.
-                
+
             (input_tensor, output_tensor_grad) = (
                 p2p_communication.send_forward_backward_recv_forward_backward(
                     output_tensor,

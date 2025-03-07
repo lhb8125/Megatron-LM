@@ -14,7 +14,7 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
 )
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
-
+from megatron.core.transformer.moe.moe_layer import MoELayer
 
 
 def weak_method(method):
@@ -110,8 +110,8 @@ class PostProcessNode(ScheduleNode):
         self.model_chunk_state = model_chunk_state
 
     def forward_impl(self, hidden_states):
-        
-         # Final layer norm.
+
+        # Final layer norm.
         if self.gpt_model.decoder.final_layernorm is not None:
             hidden_states = self.gpt_model.decoder.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
@@ -216,10 +216,11 @@ class AttnNode(TransformerLayerNode):
 
         # Optional Layer norm post the cross-attention.
         pre_mlp_layernorm_output = self.layer.pre_mlp_layernorm(hidden_states)
-        
+
         # residual, pre_mlp_layernorm_output
         # MLP.
         probs, routing_map = self.layer.mlp.router(pre_mlp_layernorm_output)
+
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
@@ -273,7 +274,7 @@ class CombineNode(TransformerLayerNode):
         self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
             # release tensor not used by backward
-            inputs = permutated_local_input_tokens    
+            inputs = permutated_local_input_tokens
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 permutated_local_input_tokens
             )
@@ -292,6 +293,7 @@ class CombinePostProcessNode(TransformerLayerNode):
         # release tensor not used by backward
         shared_output.untyped_storage().resize_(0)
         mlp_output_with_bias = (output, None)
+
         with self.layer.bias_dropout_add_exec_handler():
             hidden_states = self.layer.mlp_bda(
                 self.layer.training, self.layer.config.bias_dropout_fusion
@@ -302,7 +304,131 @@ class CombinePostProcessNode(TransformerLayerNode):
         return output
 
 
+class AttnNodeNoMoe(TransformerLayerNode):
+
+    def forward_impl(self, hidden_states):
+        attention_mask = self.chunk_state.attention_mask
+        context = self.chunk_state.context
+        context_mask = self.chunk_state.context_mask
+        rotary_pos_emb = self.chunk_state.rotary_pos_emb
+        rotary_pos_cos = self.chunk_state.rotary_pos_cos
+        rotary_pos_sin = self.chunk_state.rotary_pos_sin
+        attention_bias = self.chunk_state.attention_bias
+        inference_params = self.chunk_state.inference_params
+        packed_seq_params = self.chunk_state.packed_seq_params
+
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Input Layer norm
+        input_layernorm_output = self.layer.input_layernorm(hidden_states)
+
+        # Self attention.
+        attention_output_with_bias = self.layer.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+        )
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.self_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
+
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Layer norm after self-attention
+        pre_cross_attn_layernorm_output = self.layer.pre_cross_attn_layernorm(hidden_states)
+
+        # Cross attention.
+        attention_output_with_bias = self.layer.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+            inference_params=inference_params,
+        )
+
+        if isinstance(attention_output_with_bias, dict) and "context" in attention_output_with_bias:
+            context = attention_output_with_bias["context"]
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.cross_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
+
+        return hidden_states
+
+        # Residual connection.
+        residual = hidden_states
+
+
+class FakeScheduleNode:
+
+    def forward(self, inputs):
+        return inputs
+
+    def backward(self, outgrads):
+        return outgrads
+
+
+class MlpNoMoe(TransformerLayerNode):
+    def forward_impl(self, hidden_states):
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Layer norm post the cross-attention.
+        pre_mlp_layernorm_output = self.layer.pre_mlp_layernorm(hidden_states)
+
+        # MLP.
+        mlp_output_with_bias = self.layer.mlp(pre_mlp_layernorm_output)
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.mlp_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(mlp_output_with_bias, residual, self.layer.hidden_dropout)
+
+        # Jit compiled function creates 'view' tensor. This tensor
+        # potentially gets saved in the MPU checkpoint function context,
+        # which rejects view tensors. While making a viewless tensor here
+        # won't result in memory savings (like the data loader, or
+        # p2p_communication), it serves to document the origin of this
+        # 'view' tensor.
+        output = transformer_layer.make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        # CUDA graph requires returned values to be Tensors
+        if self.layer.config.external_cuda_graph and self.layer.training:
+            return output
+        return output
+
+
+def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
+    common_state = TransformerLayerState()
+    attn = AttnNodeNoMoe(chunk_state, common_state, layer, comp_stream, event)
+    attn.name = "attn"
+    dispatch = FakeScheduleNode()
+    mlp = MlpNoMoe(chunk_state, common_state, layer, comp_stream, event)
+    combine = FakeScheduleNode()
+    post_combine = FakeScheduleNode()
+    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+
+
 def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
+    if not isinstance(layer.mlp, MoELayer):
+        return build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
     common_state = TransformerLayerState()
     attn = AttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
