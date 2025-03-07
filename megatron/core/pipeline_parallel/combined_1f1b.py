@@ -385,7 +385,6 @@ def set_streams(comp_stream=None, com_stream=None):
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
-
     assert _COMP_STREAM is None
     assert _COM_STREAM is None
     _COMP_STREAM = comp_stream
