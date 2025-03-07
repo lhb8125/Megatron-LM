@@ -241,31 +241,29 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
             comp_stream, events[prev_idx],
             *attention_outputs[prev_idx], attention_detached_outputs[prev_idx], states[prev_idx]
         )
-        events[prev_idx].wait(comp_stream)
-        # time.sleep(3)
 
     #Last microbatch backward pass
     # b1. Combine backward for last microbatch
     callables.combine.backward(
-        comm_stream, events[microbatches-1],
+        comm_stream, events[prev_idx],
         combine_outputs[microbatches-1], torch.ones_like(combine_outputs[microbatches-1]), states[microbatches-1]
     )   
 
     # b2. MLP backward for last microbatch
     callables.mlp.backward(
-        comp_stream, events[microbatches-1],
+        comp_stream, events[prev_idx],
         *mlp_outputs[microbatches-1], mlp_detached_outputs[microbatches-1], states[microbatches-1]
     )
     
     # b3. Dispatch backward for last microbatch
     callables.dispatch.backward(
-        comm_stream, events[microbatches-1],
+        comm_stream, events[prev_idx],
         *dispatch_outputs[microbatches-1], dispatch_detached_outputs[microbatches-1], states[microbatches-1]
     )
 
     # b4. Attention backward for last microbatch
     callables.attention.backward(
-        comp_stream, events[microbatches-1],
+        comp_stream, events[prev_idx],
         *attention_outputs[microbatches-1], attention_detached_outputs[microbatches-1], states[microbatches-1]
     )
     for event in events:
@@ -321,21 +319,21 @@ def compare_captures(capture_a2a_overlap, capture_ref):
                 # print(f"a2a_overlap {name}: ", capture_a2a_overlap[name])
 
 def test_1f1b_overlap(args):
-    microbatches = 1
+    microbatches = 3
     model = build_gpt_model(args).decoder.layers[0]
     params = reset_model(model)
     input_tensors = [build_data(args) for _ in range(microbatches)]
 
-    capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
-    # capture_ref = run_model_ref_with_capture(model, input_tensors, microbatches)
-    # reset_model(model, params)
     # capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
-    # for i in range(8):
-    #     if torch.distributed.get_rank() == i:
-    #         print(f"########## rank {i} result ##########")
-    #         compare_captures(capture_ref, capture_a2a_overlap)
-    #         break
-    #     time.sleep(3)
+    capture_ref = run_model_ref_with_capture(model, input_tensors, microbatches)
+    reset_model(model, params)
+    capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
+    for i in range(8):
+        if torch.distributed.get_rank() == i:
+            print(f"########## rank {i} result ##########")
+            compare_captures(capture_ref, capture_a2a_overlap)
+            break
+        time.sleep(3)
 
 def main():
     initialize_megatron()
