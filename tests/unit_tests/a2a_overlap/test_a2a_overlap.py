@@ -170,7 +170,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
 
     # Run the overlapped 1F1B schedule for the remaining microbatches
     for i in range(1, microbatches):
-
+        torch.cuda.synchronize(device="cuda")
         # Current microbatch input
         input_tensor = input_tensors[i].clone()
         
@@ -184,7 +184,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         
         # b1. Combine backward for previous microbatch
         callables.combine.backward(
-            comm_stream, events[i],
+            comm_stream, events[prev_idx],
             combine_outputs[prev_idx], prev_output_grad,
         )
         
@@ -198,7 +198,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
 
         # b2. MLP backward for previous microbatch
         callables.mlp.backward(
-            comp_stream, events[i],
+            comp_stream, events[prev_idx],
             *mlp_outputs[prev_idx], mlp_detached_outputs[prev_idx],
         )
 
@@ -213,7 +213,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
 
         # b3. Dispatch backward for previous microbatch
         callables.dispatch.backward(
-            comm_stream, events[i],
+            comm_stream, events[prev_idx],
             *dispatch_outputs[prev_idx], dispatch_detached_outputs[prev_idx],
         )
 
@@ -228,7 +228,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
 
         # b4. Attention backward for previous microbatch
         callables.attention.backward(
-            comp_stream, events[i],
+            comp_stream, events[prev_idx],
             *attention_outputs[prev_idx], attention_detached_outputs[prev_idx],
         )
         
@@ -238,6 +238,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
             expert_output, shared_expert_output, mlp_bias, hidden_states,
         )
         combine_outputs.append(output)
+        torch.cuda.synchronize(device="cuda")
 
     #Last microbatch backward pass
     # b1. Combine backward for last microbatch
@@ -334,7 +335,9 @@ def test_1f1b_overlap(args):
     # capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
     capture_ref = run_model_ref_with_capture(model, input_tensors, microbatches)
     reset_model(model, params)
+    torch.cuda.cudart().cudaProfilerStart()
     capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
+    torch.cuda.cudart().cudaProfilerStop()
     for i in range(8):
         if torch.distributed.get_rank() == i:
             print(f"########## rank {i} result ##########")
@@ -345,9 +348,8 @@ def test_1f1b_overlap(args):
 def main():
     initialize_megatron()
     args = get_args()
-    torch.cuda.cudart().cudaProfilerStart()
     test_1f1b_overlap(args)
-    torch.cuda.cudart().cudaProfilerStop()
+    
 
 torch.use_deterministic_algorithms(True)
 torch.manual_seed(0)
