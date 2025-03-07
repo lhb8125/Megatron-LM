@@ -2,6 +2,7 @@
 
 from abc import abstractmethod
 from typing import List, Optional, Tuple
+from contextlib import contextmanager
 
 import torch
 
@@ -262,6 +263,22 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         return output_total, output_bias_total
 
 
+class MoEAlltoAllPerBatchState:
+    def __init__(self, build_event=False):
+        self.num_global_tokens_per_local_expert = None
+        self.output_splits_tp = None
+        self.output_splits = None
+        self.input_splits = None
+        self.num_out_tokens = None
+        self.capacity = None
+        self.preprocess_event = None
+        self.hidden_shape = None
+        self.probs = None
+        self.routing_map = None
+        self.reversed_local_input_permutation_mapping = None
+        self.cuda_sync_point = None
+        self.hidden_shape_before_permute = None
+
 class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     """
     AlltoAll-based token dispatcher.
@@ -335,6 +352,49 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.cuda_sync_point = "no_sync"
 
         self.shared_experts = None
+
+    def collect_per_batch_state(self, state: MoEAlltoAllPerBatchState):
+        state.num_global_tokens_per_local_expert = getattr(
+            self, "num_global_tokens_per_local_expert", None
+        )
+        state.output_splits_tp = getattr(self, "output_splits_tp", None)
+        state.output_splits = getattr(self, "output_splits", None)
+        state.input_splits = getattr(self, "input_splits", None)
+        state.num_out_tokens = getattr(self, "num_out_tokens", None)
+        state.capacity = getattr(self, "capacity", None)
+        state.preprocess_event = getattr(self, "preprocess_event", None)
+        state.hidden_shape = getattr(self, "hidden_shape", None)
+        state.probs = getattr(self, "probs", None)
+        state.routing_map = getattr(self, "routing_map", None)
+        state.reversed_local_input_permutation_mapping = getattr(self, "reversed_local_input_permutation_mapping", None)
+        state.hidden_shape_before_permute = getattr(self, "hidden_shape_before_permute", None)
+        state.cuda_sync_point = getattr(self, "cuda_sync_point", None)
+
+    def apply_per_batch_state(self, state: MoEAlltoAllPerBatchState):
+        self.num_global_tokens_per_local_expert = state.num_global_tokens_per_local_expert
+        self.output_splits_tp = state.output_splits_tp
+        self.output_splits = state.output_splits
+        self.input_splits = state.input_splits
+        self.num_out_tokens = state.num_out_tokens
+        self.capacity = state.capacity
+        self.preprocess_event = state.preprocess_event
+        self.hidden_shape = state.hidden_shape
+        self.probs = state.probs
+        self.routing_map = state.routing_map
+        self.reversed_local_input_permutation_mapping = state.reversed_local_input_permutation_mapping
+        self.hidden_shape_before_permute = state.hidden_shape_before_permute
+        self.cuda_sync_point = state.cuda_sync_point
+
+    @contextmanager
+    def per_batch_state_context(self, state: MoEAlltoAllPerBatchState):
+        origin_state = MoEAlltoAllPerBatchState()
+        self.collect_per_batch_state(origin_state)
+        try:
+            self.apply_per_batch_state(state)
+            yield
+        finally:
+            self.collect_per_batch_state(state)
+            self.apply_per_batch_state(origin_state)
 
     def preprocess(self, routing_map: torch.Tensor) -> torch.Tensor:
         """
