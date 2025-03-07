@@ -343,7 +343,7 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None, f_context=N
 
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
             f_input = f_schedule_plan.post_process.forward(f_input)
-
+    # TODO(lizhenhai93): may be insert pp output send/receive here, overlap with tail backward
     # tail backward
     grad = pre_backward()
     with b_context:
@@ -355,7 +355,8 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None, f_context=N
 
         if b_schedule_plan is not None:
             b_schedule_plan.pre_process.backward(grad)
-
+    # TODO(lizhenhai93): may be insert pp grad send/receive here, overlap with dw flush
+    # TODO(lizhenhai93): may be insert dw flush here
     if f_schedule_plan:
         f_schedule_plan.wait_current_stream()
     if b_schedule_plan:
