@@ -262,23 +262,6 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
 
         return output_total, output_bias_total
 
-
-class MoEAlltoAllPerBatchState:
-    def __init__(self, build_event=False):
-        self.num_global_tokens_per_local_expert = None
-        self.output_splits_tp = None
-        self.output_splits = None
-        self.input_splits = None
-        self.num_out_tokens = None
-        self.capacity = None
-        self.preprocess_event = None
-        self.hidden_shape = None
-        self.probs = None
-        self.routing_map = None
-        self.reversed_local_input_permutation_mapping = None
-        self.cuda_sync_point = None
-        self.hidden_shape_before_permute = None
-
 class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     """
     AlltoAll-based token dispatcher.
@@ -352,49 +335,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.cuda_sync_point = "no_sync"
 
         self.shared_experts = None
-
-    def collect_per_batch_state(self, state: MoEAlltoAllPerBatchState):
-        state.num_global_tokens_per_local_expert = getattr(
-            self, "num_global_tokens_per_local_expert", None
-        )
-        state.output_splits_tp = getattr(self, "output_splits_tp", None)
-        state.output_splits = getattr(self, "output_splits", None)
-        state.input_splits = getattr(self, "input_splits", None)
-        state.num_out_tokens = getattr(self, "num_out_tokens", None)
-        state.capacity = getattr(self, "capacity", None)
-        state.preprocess_event = getattr(self, "preprocess_event", None)
-        state.hidden_shape = getattr(self, "hidden_shape", None)
-        state.probs = getattr(self, "probs", None)
-        state.routing_map = getattr(self, "routing_map", None)
-        state.reversed_local_input_permutation_mapping = getattr(self, "reversed_local_input_permutation_mapping", None)
-        state.hidden_shape_before_permute = getattr(self, "hidden_shape_before_permute", None)
-        state.cuda_sync_point = getattr(self, "cuda_sync_point", None)
-
-    def apply_per_batch_state(self, state: MoEAlltoAllPerBatchState):
-        self.num_global_tokens_per_local_expert = state.num_global_tokens_per_local_expert
-        self.output_splits_tp = state.output_splits_tp
-        self.output_splits = state.output_splits
-        self.input_splits = state.input_splits
-        self.num_out_tokens = state.num_out_tokens
-        self.capacity = state.capacity
-        self.preprocess_event = state.preprocess_event
-        self.hidden_shape = state.hidden_shape
-        self.probs = state.probs
-        self.routing_map = state.routing_map
-        self.reversed_local_input_permutation_mapping = state.reversed_local_input_permutation_mapping
-        self.hidden_shape_before_permute = state.hidden_shape_before_permute
-        self.cuda_sync_point = state.cuda_sync_point
-
-    @contextmanager
-    def per_batch_state_context(self, state: MoEAlltoAllPerBatchState):
-        origin_state = MoEAlltoAllPerBatchState()
-        self.collect_per_batch_state(origin_state)
-        try:
-            self.apply_per_batch_state(state)
-            yield
-        finally:
-            self.collect_per_batch_state(state)
-            self.apply_per_batch_state(origin_state)
 
     def preprocess(self, routing_map: torch.Tensor) -> torch.Tensor:
         """
@@ -559,11 +499,14 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         assert routing_map.dim() == 2, "Expected 2D tensor for token2expert mask"
         assert routing_map.dtype == torch.bool, "Expected bool tensor for mask"
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
+        torch.cuda.nvtx.range_push("token_permutation preprocess")
         tokens_per_expert = self.preprocess(self.routing_map)
 
         if self.shared_experts is not None:
             self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
+        torch.cuda.nvtx.range_pop()
 
+        torch.cuda.nvtx.range_push("permute")
         # Permutation 1: input to AlltoAll input
         self.hidden_shape_before_permute = hidden_states.shape
         if self.cuda_sync_point == "before_permutation_1":
@@ -575,13 +518,17 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
+        torch.cuda.nvtx.range_pop()
 
+        torch.cuda.nvtx.range_push("all_to_all")
         # Perform expert parallel AlltoAll communication
         if self.cuda_sync_point == "before_ep_alltoall":
             self.preprocess_event.wait()
         global_input_tokens = all_to_all(
             self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
         )
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("a2a post process")
         if self.shared_experts is not None:
             self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
 
@@ -618,7 +565,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         if self.cuda_sync_point == "before_finish":
             torch.cuda.current_stream().synchronize()
-
+        
+        torch.cuda.nvtx.range_pop()
         return global_input_tokens, tokens_per_expert
 
     def token_unpermutation(

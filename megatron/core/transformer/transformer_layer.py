@@ -494,15 +494,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     def _submodule_attention_router_compound_forward(
             self, 
             hidden_states,
-            attention_mask,
-            inference_params,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            attention_bias,
-            packed_seq_params,
-            sequence_len_offset,
-            state
+            attention_mask=None,
+            inference_params=None,
+            rotary_pos_emb=None,
+            rotary_pos_cos=None,
+            rotary_pos_sin=None,
+            attention_bias=None,
+            packed_seq_params=None,
+            sequence_len_offset=None,
         ):
         """
         Performs a combined forward pass that includes self-attention and MLP routing logic.
@@ -544,18 +543,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         detached_outputs = [hidden_states_detached, pre_mlp_layernorm_output_detached, probs.detach().requires_grad_(True), routing_map.detach()]
         return outputs, detached_outputs
     
-    def _submodule_dispatch_forward(self, hidden_states, probs, routing_map, state):
+    def _submodule_dispatch_forward(self, hidden_states, probs, routing_map):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        state.probs = probs
-        state.routing_map = routing_map
-        with self.mlp.token_dispatcher.per_batch_state_context(state):
-            dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
-        state.tokens_per_expert = tokens_per_expert
+        dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
         return dispatched_input, tokens_per_expert
 
-    def _submodule_mlp_forward(self, dispatched_input, tokens_per_expert, hidden_states, state):
+    def _submodule_mlp_forward(self, dispatched_input, tokens_per_expert, hidden_states):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
@@ -566,13 +561,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             shared_expert_output = self.mlp.shared_experts(hidden_states)
         return expert_output, shared_expert_output, mlp_bias
 
-    def _submodule_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual, state):
+    def _submodule_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
         """
-        with self.mlp.token_dispatcher.per_batch_state_context(state):
-            output, mlp_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        output, mlp_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
         if shared_expert_output is not None:
             output += shared_expert_output
         mlp_output_with_bias = (output, mlp_bias)
@@ -586,25 +580,22 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output
 
-    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs, state):
-        # TODO: check if this is correct
+    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs):
         probs.backward(detached_inputs[2].grad, retain_graph=True)
         pre_mlp_layernorm_output.backward(detached_inputs[1].grad, retain_graph=True)
         hidden_states.backward(detached_inputs[0].grad)
 
-    def _submodule_dispatch_backward(self, dispatched_input, tokens_per_expert, detached_inputs, state):
-        with self.mlp.token_dispatcher.per_batch_state_context(state):
-            dispatched_input.backward(detached_inputs[0].grad)
+    def _submodule_dispatch_backward(self, dispatched_input, tokens_per_expert, detached_inputs):
+        dispatched_input.backward(detached_inputs[0].grad)
 
-    def _submodule_mlp_backward(self, expert_output, shared_expert_output, mlp_bias, detached_inputs, state):
+    def _submodule_mlp_backward(self, expert_output, shared_expert_output, mlp_bias, detached_inputs):
         expert_output.backward(detached_inputs[0].grad)
         shared_expert_output.backward(detached_inputs[1].grad)
         if mlp_bias is not None:
             mlp_bias.backward(detached_inputs[2].grad)
 
-    def _submodule_combine_backward(self, output, output_grad, state):
-        with self.mlp.token_dispatcher.per_batch_state_context(state):
-            output.backward(output_grad)
+    def _submodule_combine_backward(self, output, output_grad):
+        output.backward(output_grad)
     
     def _submodule_attention_router_compound_dgrad(self):
         raise NotImplementedError("Not implemented")
