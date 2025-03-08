@@ -230,7 +230,6 @@ def schedule_chunk_1f1b(
         post_backward=post_backward,
     )
 
-
 def schedule_chunk_forward(schedule_plan):
     f_input = schedule_chunk_1f1b(schedule_plan, None, None)
     return f_input
@@ -272,7 +271,6 @@ def get_com_stream():
 
 
 class VppContextManager:
-
     def __init__(self, vpp_rank):
         self.vpp_rank = vpp_rank
 
@@ -453,6 +451,7 @@ def forward_backward_step(
             post_forward=post_forward,
             post_backward=post_backward,
         )
+
     # forward post process
     num_tokens = None
     if f_model:

@@ -17,6 +17,7 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
 
 
+
 def weak_method(method):
     method_ref = weakref.WeakMethod(method)
     del method
