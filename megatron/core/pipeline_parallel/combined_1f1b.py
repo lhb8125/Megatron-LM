@@ -1,18 +1,17 @@
-from typing import Callable, Union, Any, Tuple, Iterator, List
+import contextlib
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Iterator, List, Tuple, Union
+
 import torch
 from torch import Tensor
-from abc import ABC, abstractmethod
-from megatron.core.transformer.module import Float16Module
-from megatron.core.distributed import DistributedDataParallel
-
-
-import contextlib
 from torch.autograd.variable import Variable
+
 from megatron.core import parallel_state
+from megatron.core.distributed import DistributedDataParallel
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
-
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
+from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import (
     drain_embedding_wgrad_compute,
@@ -20,16 +19,16 @@ from megatron.core.utils import (
     get_model_config,
     get_model_type,
     get_model_xattn,
+    make_viewless_tensor,
 )
 
 from .schedules import (
-    clear_embedding_activation_buffer,
     check_first_val_step,
-    set_current_microbatch,
-    finish_embedding_wgrad_compute,
+    clear_embedding_activation_buffer,
     deallocate_output_tensor,
+    finish_embedding_wgrad_compute,
+    set_current_microbatch,
 )
-from megatron.core.utils import make_viewless_tensor
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -229,6 +228,7 @@ def schedule_chunk_1f1b(
         post_forward=post_forward,
         post_backward=post_backward,
     )
+
 
 def schedule_chunk_forward(schedule_plan):
     f_input = schedule_chunk_1f1b(schedule_plan, None, None)

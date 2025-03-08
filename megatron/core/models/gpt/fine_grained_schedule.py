@@ -1,6 +1,6 @@
+import contextlib
 import weakref
 from typing import Any, Callable, Optional, Tuple, Union
-import contextlib
 
 import torch
 from torch import Tensor
@@ -15,7 +15,6 @@ from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
-
 
 
 def weak_method(method):
