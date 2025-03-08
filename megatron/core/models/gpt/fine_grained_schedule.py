@@ -5,16 +5,15 @@ import torch
 from torch import Tensor
 
 from megatron.core.pipeline_parallel.combined_1f1b import (
-    ModelChunkSchedulePlan,
+    AbstractSchedulePlan,
     ScheduleNode,
-    TransformerLayerSchedulePlan,
-    TransformerLayerState,
     get_com_stream,
     get_comp_stream,
 )
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
-
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
 
 
 def weak_method(method):
@@ -110,8 +109,8 @@ class PostProcessNode(ScheduleNode):
         self.model_chunk_state = model_chunk_state
 
     def forward_impl(self, hidden_states):
-        
-         # Final layer norm.
+
+        # Final layer norm.
         if self.gpt_model.decoder.final_layernorm is not None:
             hidden_states = self.gpt_model.decoder.final_layernorm(hidden_states)
             # TENorm produces a "viewed" tensor. This will result in schedule.py's
@@ -216,10 +215,11 @@ class AttnNode(TransformerLayerNode):
 
         # Optional Layer norm post the cross-attention.
         pre_mlp_layernorm_output = self.layer.pre_mlp_layernorm(hidden_states)
-        
+
         # residual, pre_mlp_layernorm_output
         # MLP.
         probs, routing_map = self.layer.mlp.router(pre_mlp_layernorm_output)
+
         self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
@@ -273,7 +273,7 @@ class CombineNode(TransformerLayerNode):
         self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
             # release tensor not used by backward
-            inputs = permutated_local_input_tokens    
+            inputs = permutated_local_input_tokens
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 permutated_local_input_tokens
             )
@@ -292,6 +292,7 @@ class CombinePostProcessNode(TransformerLayerNode):
         # release tensor not used by backward
         shared_output.untyped_storage().resize_(0)
         mlp_output_with_bias = (output, None)
+
         with self.layer.bias_dropout_add_exec_handler():
             hidden_states = self.layer.mlp_bda(
                 self.layer.training, self.layer.config.bias_dropout_fusion
@@ -302,7 +303,131 @@ class CombinePostProcessNode(TransformerLayerNode):
         return output
 
 
+class AttnNodeNoMoe(TransformerLayerNode):
+
+    def forward_impl(self, hidden_states):
+        attention_mask = self.chunk_state.attention_mask
+        context = self.chunk_state.context
+        context_mask = self.chunk_state.context_mask
+        rotary_pos_emb = self.chunk_state.rotary_pos_emb
+        rotary_pos_cos = self.chunk_state.rotary_pos_cos
+        rotary_pos_sin = self.chunk_state.rotary_pos_sin
+        attention_bias = self.chunk_state.attention_bias
+        inference_params = self.chunk_state.inference_params
+        packed_seq_params = self.chunk_state.packed_seq_params
+
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Input Layer norm
+        input_layernorm_output = self.layer.input_layernorm(hidden_states)
+
+        # Self attention.
+        attention_output_with_bias = self.layer.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+        )
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.self_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
+
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Layer norm after self-attention
+        pre_cross_attn_layernorm_output = self.layer.pre_cross_attn_layernorm(hidden_states)
+
+        # Cross attention.
+        attention_output_with_bias = self.layer.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+            inference_params=inference_params,
+        )
+
+        if isinstance(attention_output_with_bias, dict) and "context" in attention_output_with_bias:
+            context = attention_output_with_bias["context"]
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.cross_attn_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.layer.hidden_dropout)
+
+        return hidden_states
+
+        # Residual connection.
+        residual = hidden_states
+
+
+class FakeScheduleNode:
+
+    def forward(self, inputs):
+        return inputs
+
+    def backward(self, outgrads):
+        return outgrads
+
+
+class MlpNoMoe(TransformerLayerNode):
+    def forward_impl(self, hidden_states):
+        # Residual connection.
+        residual = hidden_states
+
+        # Optional Layer norm post the cross-attention.
+        pre_mlp_layernorm_output = self.layer.pre_mlp_layernorm(hidden_states)
+
+        # MLP.
+        mlp_output_with_bias = self.layer.mlp(pre_mlp_layernorm_output)
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        with self.layer.bias_dropout_add_exec_handler():
+            hidden_states = self.layer.mlp_bda(
+                self.layer.training, self.layer.config.bias_dropout_fusion
+            )(mlp_output_with_bias, residual, self.layer.hidden_dropout)
+
+        # Jit compiled function creates 'view' tensor. This tensor
+        # potentially gets saved in the MPU checkpoint function context,
+        # which rejects view tensors. While making a viewless tensor here
+        # won't result in memory savings (like the data loader, or
+        # p2p_communication), it serves to document the origin of this
+        # 'view' tensor.
+        output = transformer_layer.make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        # CUDA graph requires returned values to be Tensors
+        if self.layer.config.external_cuda_graph and self.layer.training:
+            return output
+        return output
+
+
+def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
+    common_state = TransformerLayerState()
+    attn = AttnNodeNoMoe(chunk_state, common_state, layer, comp_stream, event)
+    attn.name = "attn"
+    dispatch = FakeScheduleNode()
+    mlp = MlpNoMoe(chunk_state, common_state, layer, comp_stream, event)
+    combine = FakeScheduleNode()
+    post_combine = FakeScheduleNode()
+    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+
+
 def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
+    if not isinstance(layer.mlp, MoELayer):
+        return build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
     common_state = TransformerLayerState()
     attn = AttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
@@ -315,6 +440,309 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     post_combine = CombinePostProcessNode(chunk_state, common_state, layer, comp_stream, event)
     post_combine.name = "post_combine"
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+
+
+def build_model_chunk_schedule_plan(
+    model,
+    input_ids: Tensor,
+    position_ids: Tensor,
+    attention_mask: Tensor,
+    decoder_input: Tensor = None,
+    labels: Tensor = None,
+    inference_params=None,
+    packed_seq_params=None,
+    extra_block_kwargs=None,
+    runtime_gather_output: Optional[bool] = None,
+):
+
+    comp_stream = get_comp_stream()
+    com_stream = get_com_stream()
+    model_chunk_schedule_plan = ModelChunkSchedulePlan()
+    event = model_chunk_schedule_plan.event
+    state = model_chunk_schedule_plan.state
+    # save for later use
+    state.input_ids = input_ids
+    state.position_ids = position_ids
+    state.attention_mask = attention_mask
+    state.decoder_input = decoder_input
+    state.labels = labels
+    state.inference_params = inference_params
+    state.packed_seq_params = packed_seq_params
+    state.extra_block_kwargs = extra_block_kwargs
+    state.runtime_gather_output = runtime_gather_output
+    state.context = None
+    state.context_mask = None
+    state.attention_bias = None
+
+    # build preprocess
+    model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
+    model_chunk_schedule_plan.pre_process.name = "pre_process"
+    # build for layers
+    for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
+        layer = model.decoder._get_layer(layer_idx)
+        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
+        model_chunk_schedule_plan.add_layer(layer_plan)
+    # build post process
+    if model.post_process:
+
+        model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
+        model_chunk_schedule_plan.post_process.name = "post_process"
+
+    return model_chunk_schedule_plan
+
+
+class TransformerLayerState(MoEAlltoAllPerBatchState):
+    pass
+
+
+class ModelChunkSate:
+    pass
+
+
+class TransformerLayerSchedulePlan:
+
+    def __init__(self, attn, dispatch, mlp, combine, post_combine):
+        self.attn = attn
+        self.dispatch = dispatch
+        self.mlp = mlp
+        self.combine = combine
+        self.post_combine = post_combine
+
+
+class ModelChunkSchedulePlan(AbstractSchedulePlan):
+    def __init__(self):
+        super().__init__()
+        self._pre_process = None
+        self._post_process = None
+        self._model_chunk_state = ModelChunkSate()
+        self._transformer_layers = []
+
+    @classmethod
+    def forward_backward(
+        cls,
+        f_schedule_plan,
+        b_schedule_plan,
+        grad=None,
+        f_context=None,
+        b_context=None,
+        pre_forward=None,
+        pre_backward=None,
+        post_forward=None,
+        post_backward=None,
+    ):
+
+        return schedule_chunk_1f1b(
+            f_schedule_plan,
+            b_schedule_plan,
+            grad=grad,
+            f_context=f_context,
+            b_context=b_context,
+            pre_forward=pre_forward,
+            pre_backward=pre_backward,
+            post_forward=post_forward,
+            post_backward=post_backward,
+        )
+
+    @property
+    def pre_process(self):
+        return self._pre_process
+
+    @pre_process.setter
+    def pre_process(self, value):
+        self._pre_process = value
+
+    @property
+    def post_process(self):
+        return self._post_process
+
+    @post_process.setter
+    def post_process(self, value):
+        self._post_process = value
+
+    def get_layer(self, i):
+        assert i < self.num_layers()
+        return self._transformer_layers[i]
+
+    def num_layers(self):
+        return len(self._transformer_layers)
+
+    def add_layer(self, layer):
+        self._transformer_layers.append(layer)
+
+    @property
+    def state(self):
+        return self._model_chunk_state
+
+
+def schedule_layer_1f1b(
+    f_layer,
+    b_layer,
+    f_input=None,
+    b_grad=None,
+    pre_forward=None,
+    pre_backward=None,
+    f_context=None,
+    b_context=None,
+):
+    f_context = f_context if f_context is not None else contextlib.nullcontext()
+    b_context = b_context if b_context is not None else contextlib.nullcontext()
+
+    if pre_backward is not None:
+        # attn backward from last iter
+        assert b_grad is None
+        b_grad = pre_backward()
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.post_combine.backward(b_grad)
+            b_grad = b_layer.combine.backward(b_grad)
+
+    if pre_forward is not None:
+        assert f_input is None
+        # post combine from last iter
+        f_input = pre_forward()
+        del pre_forward
+
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.attn.forward(f_input)
+            f_input = f_layer.dispatch.forward(f_input)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.mlp.backward(b_grad)
+            b_grad = b_layer.dispatch.backward(b_grad)
+
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.mlp.forward(f_input)
+            f_input = f_layer.combine.forward(f_input)
+
+    def next_iter_pre_forward():
+        if f_layer is not None:
+            with f_context:
+                output = f_layer.post_combine.forward(f_input)
+                return output
+
+    def next_iter_pre_backward():
+        if b_layer is not None:
+            with b_context:
+                grad = b_layer.attn.backward(b_grad)
+                return grad
+
+    if f_layer and b_layer:
+        return next_iter_pre_forward, next_iter_pre_backward
+    else:
+        return next_iter_pre_forward(), next_iter_pre_backward()
+
+
+def schedule_chunk_1f1b(
+    f_schedule_plan,
+    b_schedule_plan,
+    grad=None,
+    f_context=None,
+    b_context=None,
+    pre_forward=None,
+    pre_backward=None,
+    post_forward=None,
+    post_backward=None,
+):
+    f_context = f_context if f_context is not None else contextlib.nullcontext()
+    b_context = b_context if b_context is not None else contextlib.nullcontext()
+
+    if f_schedule_plan:
+        # TODO(liuzhenhai93): defered until first layer_pre_forward when integrated with deepep
+        # output send/receive sync
+        if pre_forward is not None:
+            with f_context:
+                pre_forward()
+        f_schedule_plan.record_current_stream()
+
+    if b_schedule_plan:
+        # TODO(liuzhenhai93): defered until first layer_pre_backward  when integrated with deepep
+        # grad send/receive sync
+        if pre_backward is not None:
+            with b_context:
+                pre_backward()
+        b_schedule_plan.record_current_stream()
+
+    f_input = None
+
+    def layer_pre_forward():
+        tmp = f_input
+        if f_schedule_plan is not None:
+            tmp = f_schedule_plan.pre_process.forward()
+        return tmp
+
+    def layer_pre_backward():
+        tmp = grad
+        if b_schedule_plan is not None:
+            assert grad is not None
+            if b_schedule_plan.post_process is not None:
+                with b_context:
+                    tmp = b_schedule_plan.post_process.backward(grad)
+        return tmp
+
+    f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
+    b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
+    overlaped_layers = min(f_num_layers, b_num_layers)
+
+    for i in range(overlaped_layers):
+        f_layer = f_schedule_plan.get_layer(i)
+        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+        torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
+        layer_pre_forward, layer_pre_backward = schedule_layer_1f1b(
+            f_layer,
+            b_layer,
+            pre_forward=layer_pre_forward,
+            pre_backward=layer_pre_backward,
+            f_context=f_context,
+            b_context=b_context,
+        )
+        torch.cuda.nvtx.range_pop()
+
+    # tail forward
+    f_input = layer_pre_forward()
+    with f_context:
+        for i in range(overlaped_layers, f_num_layers):
+            f_layer = f_schedule_plan.get_layer(i)
+            torch.cuda.nvtx.range_push(f"layer_{i}f")
+            f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input=f_input)
+            torch.cuda.nvtx.range_pop()
+
+        if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
+            f_input = f_schedule_plan.post_process.forward(f_input)
+
+    # output pp send receive
+    if f_schedule_plan is not None and post_forward is not None:
+        with f_context:
+            f_schedule_plan.wait_current_stream()
+            post_forward(f_input)
+
+    # tail backward
+    grad = layer_pre_backward()
+    with b_context:
+        for i in range(overlaped_layers, b_num_layers):
+            b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+            torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
+            tmp, grad = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+            torch.cuda.nvtx.range_pop()
+
+        if b_schedule_plan is not None:
+            b_schedule_plan.pre_process.backward(grad)
+
+    # grad send receive
+    if b_schedule_plan is not None and post_backward is not None:
+        with b_context:
+            b_schedule_plan.wait_current_stream()
+            post_backward(grad)
+
+    if f_schedule_plan:
+        f_schedule_plan.wait_current_stream()
+    if b_schedule_plan:
+        b_schedule_plan.wait_current_stream()
+
+    return f_input
 
 
 def build_model_chunk_schedule_plan(
