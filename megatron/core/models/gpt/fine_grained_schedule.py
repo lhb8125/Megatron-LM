@@ -1,5 +1,6 @@
 import weakref
 from typing import Any, Callable, Optional, Tuple, Union
+import contextlib
 
 import torch
 from torch import Tensor
