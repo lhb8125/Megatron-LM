@@ -581,8 +581,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return output
 
     def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs):
-        probs.backward(detached_inputs[2].grad, retain_graph=True)
-        pre_mlp_layernorm_output.backward(detached_inputs[1].grad, retain_graph=True)
+        probs.backward(detached_inputs[2].grad)
+        pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
         hidden_states.backward(detached_inputs[0].grad)
 
     def _submodule_dispatch_backward(self, dispatched_input, tokens_per_expert, detached_inputs):
