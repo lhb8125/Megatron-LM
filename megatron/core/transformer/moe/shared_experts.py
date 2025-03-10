@@ -225,6 +225,12 @@ class SharedExpertMLP(MLP):
             self.cached_output = None
         torch.cuda.current_stream().wait_stream(self.stream)
         return output
+    
+    def wgrad_comp(self):
+        torch.cuda.nvtx.range_push(f"Shared experts backward_w")
+        self.linear_fc1.wgrad_comp()
+        self.linear_fc2.wgrad_comp()
+        torch.cuda.nvtx.range_pop()
 
 
 def set_tensor_grad_fn_sequence_sr(tensor, value):

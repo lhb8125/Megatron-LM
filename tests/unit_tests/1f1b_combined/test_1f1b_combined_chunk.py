@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
+import gc
 from torch import Tensor
 
 from megatron.core.models.gpt import GPTModel
@@ -287,8 +288,16 @@ class AttnNode(TransformerNode):
             )
         self.common_state.tokens_per_expert = tokens_per_expert
         return residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
-    def backward_w(self):
-        pass
+    def backward_w(self, grad_output):
+        torch.cuda.nvtx.range_push(f"attention wgrad")
+        # print(self.layer.self_attention.__dict__)
+        with torch.cuda.stream(self.stream):
+            self.layer.self_attention.linear_q_up_proj.wgrad_comp()
+            self.layer.self_attention.linear_kv_up_proj.wgrad_comp()
+            self.layer.self_attention.linear_q_down_proj.wgrad_comp()
+            self.layer.self_attention.linear_kv_down_proj.wgrad_comp()
+            self.layer.self_attention.linear_proj.wgrad_comp()
+        torch.cuda.nvtx.range_pop()
 
 class DispatchNode(TransformerNode):
 
@@ -319,7 +328,11 @@ class MlPNode(TransformerNode):
         return residual, permutated_local_input_tokens, shared_output, probs
     def backward_w(self, grad_output):
         torch.cuda.nvtx.range_push(f"mlp wgrad")
-        self.layer.mlp.experts.wgrad_comp()
+        with torch.cuda.stream(self.stream):
+            # if torch.distributed.get_rank()==0:
+            #     breakpoint()
+            self.layer.mlp.experts.wgrad_comp()
+            self.layer.mlp.shared_experts.wgrad_comp()
         torch.cuda.nvtx.range_pop()
 
 
@@ -417,7 +430,7 @@ def build_model_chunk_schedule_plan(
 
 
 def schedule_layer_1f1b(
-    f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None
+    f_layer, b_layer, f_input=None, b_grad=None, pre_forward=None, pre_backward=None, pre_backward_attn_w=None,
 ):
 
     if pre_backward is not None:
@@ -430,6 +443,9 @@ def schedule_layer_1f1b(
 
     if b_layer is not None:
         b_grad = b_layer.combine.backward(b_grad)
+
+    if pre_backward_attn_w is not None:
+        pre_backward_attn_w()
 
     if pre_forward is not None:
         assert f_input is None
@@ -463,11 +479,15 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             grad = b_layer.attn.backward(b_grad_o)
             return grad
+    
+    def next_iter_pre_backward_attn_w():
+        if b_layer is not None:
+            b_layer.attn.backward_w(b_grad_o)
 
     if f_layer and b_layer:
-        return next_iter_pre_forward, next_iter_pre_backward
+        return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_attn_w
     else:
-        return next_iter_pre_forward(), next_iter_pre_backward()
+        return next_iter_pre_forward(), next_iter_pre_backward(), next_iter_pre_backward_attn_w()
 
 
 def schedule_chunk_forward(schedule_plan):
@@ -496,13 +516,14 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None):
 
     pre_forward = lambda: f_input
     pre_backward = lambda: grad
+    pre_backward_attn_w = None
 
     for i in range(overlaped_layers):
         f_layer = f_schedule_plan.get_layer(i)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
         torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
-        pre_forward, pre_backward = schedule_layer_1f1b(
-            f_layer, b_layer, pre_forward=pre_forward, pre_backward=pre_backward
+        pre_forward, pre_backward, pre_backward_attn_w = schedule_layer_1f1b(
+            f_layer, b_layer, pre_forward=pre_forward, pre_backward=pre_backward, pre_backward_attn_w=pre_backward_attn_w
         )
         torch.cuda.nvtx.range_pop()
 
@@ -511,7 +532,7 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None):
     for i in range(overlaped_layers, f_num_layers):
         f_layer = f_schedule_plan.get_layer(i)
         torch.cuda.nvtx.range_push(f"layer_{i}f")
-        f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input=f_input)
+        f_input, tmp, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
         torch.cuda.nvtx.range_pop()
 
     if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
@@ -522,7 +543,7 @@ def schedule_chunk_1f1b(f_schedule_plan, b_schedule_plan, grad=None):
     for i in range(overlaped_layers, b_num_layers):
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
         torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-        tmp, grad = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+        tmp, grad, pre_backward_attn_w = schedule_layer_1f1b(None, b_layer, b_grad=grad, pre_backward_attn_w=pre_backward_attn_w)
         torch.cuda.nvtx.range_pop()
 
     if b_schedule_plan is not None:
@@ -636,13 +657,45 @@ def test_1f1b_overlap(args):
 
 
 def main():
+    gc.disable()
     initialize_megatron()
     args = get_args()
+    from contextlib import nullcontext
+    prof_context = nullcontext()
     if torch.distributed.get_rank()==0:
-        torch.cuda.cudart().cudaProfilerStart()
-    test_1f1b_overlap(args)
+        if args.profile:
+            if args.use_pytorch_profiler:
+                # prof_context = torch.profiler.profile(
+                #     activities=[
+                #         torch.profiler.ProfilerActivity.CPU,
+                #         torch.profiler.ProfilerActivity.CUDA,
+                #     ],
+                #     profile_memory=True,  # 开启显存占用记录
+                #     record_shapes=True,
+                #     on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./log")  # 将跟踪结果保存到指定目录
+                # )
+                torch.cuda.memory._record_memory_history(max_entries=200000)
+            else:
+                torch.cuda.cudart().cudaProfilerStart()
+                torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+    gc.disable()
+    with prof_context:
+        test_1f1b_overlap(args)
+    # torch.cuda.memory._record_memory_history(enabled=None)
+    max_reserved_memory = torch.cuda.max_memory_reserved()
+    max_allocated_memory = torch.cuda.max_memory_allocated()
+    max_reserved_memory_mb = max_reserved_memory / (1024 ** 2)
+    max_allocated_memory_mb = max_allocated_memory / (1024 ** 2)
+    print(f"当前设备预留的最大显存: reserved {max_reserved_memory_mb:.2f} MB, allocated {max_allocated_memory_mb:.2f} MB")
     if torch.distributed.get_rank()==0:
-        torch.cuda.cudart().cudaProfilerStop()
+        if args.use_pytorch_profiler:
+            torch.cuda.memory._dump_snapshot("./pyt_profile/memory_usage_dw_1.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
+        if args.profile and not args.use_pytorch_profiler:
+            torch.cuda.cudart().cudaProfilerStop()
+
+    gc.collect()
+    gc.enable()
 
 
 if __name__ == "__main__":

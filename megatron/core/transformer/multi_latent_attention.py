@@ -106,6 +106,7 @@ class MultiLatentAttention(Attention):
             skip_bias_add=True,
             is_expert=False,
             tp_comm_buffer_name='proj',
+            split_bw=False,
         )
 
     def forward(
@@ -235,6 +236,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 skip_weight_param_allocation=False,
+                split_bw=False,
             )
 
             self.linear_q_up_proj = build_module(
@@ -247,6 +249,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                split_bw=False,
             )
 
         self.linear_kv_down_proj = build_module(
@@ -259,6 +262,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             skip_weight_param_allocation=False,
+            split_bw=False,
         )
 
         self.linear_kv_up_proj = build_module(
@@ -271,6 +275,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
+            split_bw=False,
         )
 
         if self.config.q_lora_rank is not None:

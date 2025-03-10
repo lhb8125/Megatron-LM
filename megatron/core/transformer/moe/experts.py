@@ -617,6 +617,7 @@ class TEGroupedMLP(MegatronModule):
             skip_bias_add=True,
             is_expert=True,
             tp_comm_buffer_name='fc1',
+            split_bw=False,
         )
 
         self.activation_func = self.config.activation_func
@@ -632,6 +633,7 @@ class TEGroupedMLP(MegatronModule):
             skip_bias_add=True,
             is_expert=True,
             tp_comm_buffer_name='fc2',
+            split_bw=False,
         )
 
         if self.config.fp8:
@@ -742,9 +744,10 @@ class TEGroupedMLP(MegatronModule):
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
     def wgrad_comp(self):
+        torch.cuda.nvtx.range_push(f"Experts backward_w")
         self.linear_fc1.wgrad_comp()
         self.linear_fc2.wgrad_comp()
-        # pass
+        torch.cuda.nvtx.range_pop()
 
 class SequentialMLP(MegatronModule):
     """An implementation of the Experts layer using a sequence of MLP layers.

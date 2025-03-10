@@ -74,6 +74,7 @@ class MLP(MegatronModule):
             skip_bias_add=True,
             is_expert=is_expert,
             tp_comm_buffer_name='fc1',
+            split_bw=False,
         )
 
         self.activation_func = self.config.activation_func
@@ -89,6 +90,7 @@ class MLP(MegatronModule):
             skip_bias_add=True,
             is_expert=is_expert,
             tp_comm_buffer_name='fc2',
+            split_bw=False,
         )
 
     def forward(self, hidden_states):
