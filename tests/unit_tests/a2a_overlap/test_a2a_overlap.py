@@ -293,6 +293,12 @@ def reset_model(model, params=None):
             param.data.copy_(params[name])
 
 def compare_captures(capture_a2a_overlap, capture_ref):
+    def bit_same(a, b):
+        assert a.dtype == b.dtype, "dtype mismatch"
+        if a.dtype in [torch.bfloat16, torch.half]:
+            return torch.all(a.view(torch.int16)==b.view(torch.int16))
+        else:
+            return torch.all(a.view(torch.int32)==b.view(torch.int32))
     for name, value in capture_ref.items():
         print(name, end='\0')
         assert name in capture_a2a_overlap, f"gradient name mismatch, '{name}' not in capture_a2a_overlap.keys()"
@@ -303,12 +309,14 @@ def compare_captures(capture_a2a_overlap, capture_ref):
             assert len(value) == len(capture_a2a_overlap[name]), "outputs length mismatch"
             for i in range(len(value)):
                 assert value[i].shape == capture_a2a_overlap[name][i].shape, "outputs shape mismatch"
-                assert torch.allclose(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
+                # assert torch.allclose(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
+                assert bit_same(value[i], capture_a2a_overlap[name][i]), f"outputs value mismatch at index {i}."
             print(": PASS")
         else:
             try:
                 assert value.shape == capture_a2a_overlap[name].shape, f"gradient shape mismatch: '{name}'"
-                assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
+                assert bit_same(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
+                # assert torch.allclose(value, capture_a2a_overlap[name]), f"gradient mismatch: '{name}'"
                 print(": PASS")
             except Exception as e:
                 max_diff = torch.abs(value - capture_a2a_overlap[name])
