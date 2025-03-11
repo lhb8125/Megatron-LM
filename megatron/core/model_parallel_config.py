@@ -305,6 +305,12 @@ class ModelParallelConfig:
        rank 1 |   0 1 2 0 1 2 3 4 3 4
     """
 
+    combined_1f1b: bool = False
+    """If true, use combined 1F1B for communication hiding."""
+
+    combined_1f1b_recipe: str = 'ep_a2a'
+    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
+
     ###################
     # CPU Offloading
     ###################
@@ -387,4 +393,11 @@ class ModelParallelConfig:
                 raise ValueError(
                     "Pipeline parallel communication overlapping in warmup and flush is only "
                     "compatible with overlap_p2p_comm but not batch_p2p_comm."
+                )
+
+        if self.combined_1f1b:
+            if self.combined_1f1b_recipe not in ["ep_a2a", "golden"]:
+                raise ValueError(
+                    f"combined_1f1b_recipe {self.combined_1f1b_recipe} not supported, "
+                    f"supported recipes are 'ep_a2a' and 'golden' "
                 )
