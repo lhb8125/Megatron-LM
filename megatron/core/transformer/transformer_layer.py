@@ -538,17 +538,21 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states_detached)
         pre_mlp_layernorm_output_detached = pre_mlp_layernorm_output.detach().requires_grad_(True)
         probs, routing_map = self.mlp.router(pre_mlp_layernorm_output_detached)
-            
-        outputs = [hidden_states, pre_mlp_layernorm_output, probs, routing_map]
-        detached_outputs = [hidden_states_detached, pre_mlp_layernorm_output_detached, probs.detach().requires_grad_(True), routing_map.detach()]
+        probs_detached = probs.detach().requires_grad_(True)
+
+        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output_detached, probs_detached, routing_map)
+        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output_detached, routing_map)
+
+        outputs = [hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs]
+        detached_outputs = [hidden_states_detached, pre_mlp_layernorm_output_detached, tokens_per_expert.detach(), permutated_local_input_tokens.detach().requires_grad_(True), probs_detached]
         return outputs, detached_outputs
     
-    def _submodule_dispatch_forward(self, hidden_states, probs, routing_map):
+    def _submodule_dispatch_forward(self, permutated_local_input_tokens):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.token_permutation(hidden_states, probs, routing_map)
-        return dispatched_input, tokens_per_expert
+        global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
+        return [global_input_tokens]
 
     def _submodule_mlp_forward(self, dispatched_input, tokens_per_expert, hidden_states):
         """
@@ -556,6 +560,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         and optional shared-expert computations.
         """
         shared_expert_output = None
+        dispatched_input = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
         if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
             shared_expert_output = self.mlp.shared_experts(hidden_states)
@@ -580,13 +585,15 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output
 
-    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, probs, routing_map, detached_inputs):
-        probs.backward(detached_inputs[2].grad)
+    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs, detached_inputs):
+        permutated_local_input_tokens.backward(detached_inputs[3].grad)
+        probs.backward(detached_inputs[4].grad)
+        # tokens_per_expert.backward(detached_inputs[2].grad)
         pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
         hidden_states.backward(detached_inputs[0].grad)
 
-    def _submodule_dispatch_backward(self, dispatched_input, tokens_per_expert, detached_inputs):
-        dispatched_input.backward(detached_inputs[0].grad)
+    def _submodule_dispatch_backward(self, global_input_tokens, detached_inputs):
+        global_input_tokens.backward(detached_inputs[0].grad)
 
     def _submodule_mlp_backward(self, expert_output, shared_expert_output, mlp_bias, detached_inputs):
         expert_output.backward(detached_inputs[0].grad)

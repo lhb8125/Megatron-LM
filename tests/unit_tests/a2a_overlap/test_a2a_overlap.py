@@ -144,23 +144,23 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
     attention_output, detached_outputs = callables.attention.forward(
         comp_stream, events[0], input_tensor
     )
-    hidden_states, pre_mlp_layernorm_output, probs, routing_map = detached_outputs
+    hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs = detached_outputs
     attention_outputs.append(attention_output)
     attention_detached_outputs.append(detached_outputs)
     
     # f2. Token dispatch forward
     dispatch_output, detached_outputs = callables.dispatch.forward(
         comm_stream, events[0],
-        pre_mlp_layernorm_output, probs, routing_map
+        permutated_local_input_tokens
     )
-    dispatched_input, tokens_per_expert = detached_outputs
+    global_input_tokens = detached_outputs[0]
     dispatch_outputs.append(dispatch_output)
     dispatch_detached_outputs.append(detached_outputs)
     
     # f3. MLP (experts) forward
     mlp_output, detached_outputs = callables.mlp.forward(
         comp_stream, events[0],
-        dispatched_input, tokens_per_expert, pre_mlp_layernorm_output
+        global_input_tokens, tokens_per_expert, pre_mlp_layernorm_output
     )
     expert_output, shared_expert_output, mlp_bias = detached_outputs
     mlp_outputs.append(mlp_output)
@@ -175,6 +175,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
 
     # Run the overlapped 1F1B schedule for the remaining microbatches
     for i in range(1, microbatches):
+        torch.cuda.nvtx.range_push(f"1f1b loop {i}")
         # Current microbatch input
         input_tensor = input_tensors[i].clone()
         
@@ -196,16 +197,16 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         attention_output, detached_outputs = callables.attention.forward(
             comp_stream, events[i], input_tensor
         )
-        hidden_states, pre_mlp_layernorm_output, probs, routing_map = detached_outputs
+        hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs = detached_outputs
         attention_outputs.append(attention_output)
         attention_detached_outputs.append(detached_outputs)
 
         # f2. Dispatch forward for current microbatch
         dispatch_output, detached_outputs = callables.dispatch.forward(
             comm_stream, events[i],
-            pre_mlp_layernorm_output, probs, routing_map,
+            permutated_local_input_tokens
         )
-        dispatched_input, tokens_per_expert = detached_outputs
+        global_input_tokens = detached_outputs[0]
         dispatch_outputs.append(dispatch_output)
         dispatch_detached_outputs.append(detached_outputs)
 
@@ -224,7 +225,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
          # f3. MLP forward for current microbatch
         mlp_output, detached_outputs = callables.mlp.forward(
             comp_stream, events[i],
-            dispatched_input, tokens_per_expert, pre_mlp_layernorm_output,
+            global_input_tokens, tokens_per_expert, pre_mlp_layernorm_output
         )
         expert_output, shared_expert_output, mlp_bias = detached_outputs
         mlp_outputs.append(mlp_output)
@@ -242,6 +243,7 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
             comp_stream, events[prev_idx],
             *attention_outputs[prev_idx], attention_detached_outputs[prev_idx],
         )
+        torch.cuda.nvtx.range_pop()
 
     #Last microbatch backward pass
     # b1. Combine backward for last microbatch
@@ -339,7 +341,7 @@ def test_1f1b_overlap(args):
     reset_model(model, params)
     if torch.distributed.get_rank() == 0:
         torch.cuda.cudart().cudaProfilerStart()
-        torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+        # torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
     capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
     if torch.distributed.get_rank() == 0:
         torch.cuda.cudart().cudaProfilerStop()
