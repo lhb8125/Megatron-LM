@@ -1163,7 +1163,7 @@ def forward_backward_pipelining_with_interleaving(
             input_tensor_grad = None
             if f_virtual_microbatch_id is not None:
                 # forward pass
-                forward_model_chunk_id = get_model_chunk_id(b_virtual_microbatch_id, forward=True)
+                forward_model_chunk_id = get_model_chunk_id(f_virtual_microbatch_id, forward=True)
                 parallel_state.set_virtual_pipeline_model_parallel_rank(forward_model_chunk_id)
                 if pre_forward is not None:
                     pre_forward()
