@@ -209,3 +209,4 @@ class TransformerLayerSubmoduleCallables:
     dispatch: SubmoduleCallables
     mlp: SubmoduleCallables
     combine: SubmoduleCallables
+    post_combine: SubmoduleCallables

@@ -94,6 +94,11 @@ def copy_weights_distributed(model_source, model_target):
     _copy_weights_recursive(model_source, model_target)
     print("Weights have been successfully copied.")
 
+def print_grad(model, str):
+    if torch.distributed.get_rank() == 6:
+        for name, param in model.named_parameters():
+            print(f"[debug] {str} {name} grad: {param.grad}")
+
 def run_model_ref_with_capture(model, input_tensors, iterations):
     for module in model.modules():
         if hasattr(module, 'fuse_wgrad_accumulation'):
@@ -115,6 +120,8 @@ def run_model_ref_with_capture(model, input_tensors, iterations):
 
 
 def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
+    for i in range(len(input_tensors)):
+        input_tensors[i] = input_tensors[i].clone()
     for module in model.modules():
         if hasattr(module, 'fuse_wgrad_accumulation'):
             module.fuse_wgrad_accumulation = False
@@ -131,13 +138,15 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
     dispatch_outputs = []
     mlp_outputs = []
     combine_outputs = []
+    post_combine_outputs = []
     attention_detached_outputs = []
     dispatch_detached_outputs = []
     mlp_detached_outputs = []
+    combine_detached_outputs = []
     
     
     # Run the first microbatch forward pass
-    input_tensor = input_tensors[0].clone()
+    input_tensor = input_tensors[0]
     events[0].record(comp_stream)
     # First microbatch forward pass
     # f1.Attention + Router forward
@@ -166,31 +175,45 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
     mlp_outputs.append(mlp_output)
     mlp_detached_outputs.append(detached_outputs)
     
-    # f4. Combine outputs forward
-    output, detached_outputs = callables.combine.forward(
+    # f4. Combine forward
+    combine_output, detached_outputs = callables.combine.forward(
         comm_stream, events[0],
+        expert_output
+    )
+    expert_output = detached_outputs[0]
+    combine_outputs.append(combine_output)
+    combine_detached_outputs.append(detached_outputs)
+
+    # f5. Post combine forward
+    post_combine_output, detached_outputs = callables.post_combine.forward(
+        comp_stream, events[0],
         expert_output, shared_expert_output, mlp_bias, hidden_states
     )
-    combine_outputs.append(output)
+    post_combine_outputs.append(post_combine_output)
+
 
     # Run the overlapped 1F1B schedule for the remaining microbatches
     for i in range(1, microbatches):
+        # print_grad(model, f"before {i}th backward")
         torch.cuda.nvtx.range_push(f"1f1b loop {i}")
         # Current microbatch input
-        input_tensor = input_tensors[i].clone()
+        input_tensor = input_tensors[i]
         
         # Previous microbatch index
         prev_idx = i-1
         
         # 1F1B interleaved schedule (following the reference pattern)
         # Gradient for previous microbatch output
-        events[prev_idx].record(comp_stream)
-        prev_output_grad = torch.ones_like(combine_outputs[prev_idx])
-        
+        # b0. Post combine backward for previous microbatch
+        callables.post_combine.backward(
+            comp_stream, events[prev_idx],
+            post_combine_outputs[prev_idx], torch.ones_like(post_combine_outputs[prev_idx]),
+        )
+
         # b1. Combine backward for previous microbatch
         callables.combine.backward(
             comm_stream, events[prev_idx],
-            combine_outputs[prev_idx], prev_output_grad,
+            *combine_outputs[prev_idx], combine_detached_outputs[prev_idx],
         )
         
         # f1. Attention forward for current microbatch
@@ -232,24 +255,38 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         mlp_detached_outputs.append(detached_outputs)
         
         # f4. Combine forward for current microbatch
-        output, detached_outputs = callables.combine.forward(
+        combine_output, detached_outputs = callables.combine.forward(
             comm_stream, events[i],
-            expert_output, shared_expert_output, mlp_bias, hidden_states,
+            expert_output
         )
-        combine_outputs.append(output)
+        expert_output = detached_outputs[0]
+        combine_outputs.append(combine_output)
+        combine_detached_outputs.append(detached_outputs)
 
         # b4. Attention backward for previous microbatch
         callables.attention.backward(
             comp_stream, events[prev_idx],
             *attention_outputs[prev_idx], attention_detached_outputs[prev_idx],
         )
+        # f5. Post combine forward for current microbatch
+        post_combine_output, detached_outputs = callables.post_combine.forward(
+            comp_stream, events[i],
+            expert_output, shared_expert_output, mlp_bias, hidden_states
+        )
+        post_combine_outputs.append(post_combine_output)
         torch.cuda.nvtx.range_pop()
 
     #Last microbatch backward pass
+    # b0. Post combine backward for previous microbatch
+    callables.post_combine.backward(
+        comp_stream, events[prev_idx],
+        post_combine_outputs[microbatches-1], torch.ones_like(post_combine_outputs[microbatches-1]),
+    )
+
     # b1. Combine backward for last microbatch
     callables.combine.backward(
         comm_stream, events[prev_idx],
-        combine_outputs[microbatches-1], torch.ones_like(combine_outputs[microbatches-1]),
+        *combine_outputs[microbatches-1], combine_detached_outputs[microbatches-1],
     )   
 
     # b2. MLP backward for last microbatch
@@ -269,12 +306,9 @@ def run_model_a2a_overlap_with_capture(model, input_tensors, microbatches):
         comp_stream, events[prev_idx],
         *attention_outputs[microbatches-1], attention_detached_outputs[microbatches-1],
     )
-    for event in events:
-        event.wait(comp_stream)
-        event.wait(comm_stream)
-
+    torch.cuda.synchronize()
     capture = {
-        "outputs": combine_outputs,
+        "outputs": post_combine_outputs,
     }
     for name, param in model.named_parameters():
         capture[name] = param.grad  

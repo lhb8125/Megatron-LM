@@ -562,16 +562,20 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         shared_expert_output = None
         dispatched_input = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
+        expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
             shared_expert_output = self.mlp.shared_experts(hidden_states)
         return expert_output, shared_expert_output, mlp_bias
 
-    def _submodule_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual):
+    def _submodule_combine_forward(self, hidden_states):
+        return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
+    
+    def _submodule_post_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
         """
-        output, mlp_bias = self.mlp.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        output = self.mlp.token_dispatcher.combine_postprocess(expert_output)
         if shared_expert_output is not None:
             output += shared_expert_output
         mlp_output_with_bias = (output, mlp_bias)
@@ -601,9 +605,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         if mlp_bias is not None:
             mlp_bias.backward(detached_inputs[2].grad)
 
-    def _submodule_combine_backward(self, output, output_grad):
-        output.backward(output_grad)
+    def _submodule_combine_backward(self,hidden_states, detached_inputs):
+        hidden_states.backward(detached_inputs[0].grad)
     
+    def _submodule_post_combine_backward(self, output, output_grad):
+        output.backward(output_grad)
+
     def _submodule_attention_router_compound_dgrad(self):
         raise NotImplementedError("Not implemented")
 
@@ -648,6 +655,10 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 forward=partial(self._callable_wrapper, True, self._submodule_combine_forward),
                 backward=partial(self._callable_wrapper, False, self._submodule_combine_backward),
                 # dgrad=partial(self._callable_wrapper, False, self._submodule_combine_dgrad),
+            ),
+            post_combine=SubmoduleCallables(
+                forward=partial(self._callable_wrapper, True, self._submodule_post_combine_forward),
+                backward=partial(self._callable_wrapper, False, self._submodule_post_combine_backward),
             ),
         )
         return callables
