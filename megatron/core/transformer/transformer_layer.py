@@ -527,9 +527,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
-        hidden_states_detached = hidden_states.detach().requires_grad_(True)
-        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states_detached)
-        return [hidden_states, pre_mlp_layernorm_output], [hidden_states_detached, pre_mlp_layernorm_output.detach().requires_grad_(True)]
+        return hidden_states
 
     def _submodule_attention_router_compound_forward(
             self, 
@@ -546,7 +544,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         """
         Performs a combined forward pass that includes self-attention and MLP routing logic.
         """
-        outputs, detached_outputs = self._submodule_attention_forward(
+        hidden_states = self._submodule_attention_forward(
             hidden_states,
             attention_mask,
             inference_params,
@@ -556,17 +554,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             attention_bias,
             packed_seq_params,
             sequence_len_offset)
-        hidden_states, pre_mlp_layernorm_output = outputs
-        hidden_states_detached, pre_mlp_layernorm_output_detached = detached_outputs
-        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output_detached)
-        probs_detached = probs.detach().requires_grad_(True)
 
-        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output_detached, probs_detached, routing_map)
-        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output_detached, routing_map)
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
+        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
+        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
 
         outputs = [hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs]
-        detached_outputs = [hidden_states_detached, pre_mlp_layernorm_output_detached, tokens_per_expert.detach(), permutated_local_input_tokens.detach().requires_grad_(True), probs_detached]
-        return outputs, detached_outputs
+        return tuple(outputs)
     
     def _submodule_dispatch_forward(self, permutated_local_input_tokens):
         """
@@ -575,7 +570,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
         return [global_input_tokens]
 
-    def _submodule_dense_forward(self, pre_mlp_layernorm_output, residual):
+    def _submodule_dense_forward(self, hidden_states):
+        residual = hidden_states
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
         mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
