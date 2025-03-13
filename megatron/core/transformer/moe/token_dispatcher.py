@@ -533,8 +533,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 -1, self.num_local_experts
             )
             if not self.config.moe_permute_fusion:
-                self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.to(
-                    torch.device("cpu"), non_blocking=False
+                self.num_global_tokens_per_local_expert = (
+                    self.num_global_tokens_per_local_expert.to(
+                        torch.device("cpu"), non_blocking=True
+                    )
                 )
         self.preprocess_event = torch.cuda.current_stream().record_event()
         return num_tokens_per_local_expert
