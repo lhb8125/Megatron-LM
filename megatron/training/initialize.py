@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 """Megatron initialization."""
 import logging
@@ -115,7 +115,13 @@ def initialize_megatron(
         # Random seeds for reproducibility.
         if args.rank == 0:
             print("> setting random seeds to {} ...".format(args.seed))
-        _set_random_seed(args.seed, args.data_parallel_random_init, args.te_rng_tracker, args.inference_rng_tracker)
+        _set_random_seed(
+            args.seed,
+            args.data_parallel_random_init,
+            args.te_rng_tracker,
+            args.inference_rng_tracker,
+            use_cudagraphable_rng=args.enable_cuda_graph,
+        )
 
     if skip_mpu_initialization:
         return None
@@ -347,7 +353,13 @@ def _init_autoresume():
         torch.distributed.barrier()
 
 
-def _set_random_seed(seed_, data_parallel_random_init=False, te_rng_tracker=False, inference_rng_tracker=False):
+def _set_random_seed(
+    seed_: int,
+    data_parallel_random_init: bool = False,
+    te_rng_tracker: bool = False,
+    inference_rng_tracker: bool = False,
+    use_cudagraphable_rng: bool = False,
+):
     """Set random seed for reproducability."""
     if seed_ is not None and seed_ > 0:
         # Ensure that different pipeline MP stages get different seeds.
@@ -359,7 +371,9 @@ def _set_random_seed(seed_, data_parallel_random_init=False, te_rng_tracker=Fals
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.device_count() > 0:
-            tensor_parallel.model_parallel_cuda_manual_seed(seed, te_rng_tracker, inference_rng_tracker)
+            tensor_parallel.model_parallel_cuda_manual_seed(
+                seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
+            )
     else:
         raise ValueError("Seed ({}) should be a positive integer.".format(seed_))
 
