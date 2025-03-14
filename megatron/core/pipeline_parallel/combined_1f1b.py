@@ -1,5 +1,6 @@
 import contextlib
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, List, Tuple, Union
 
 import torch
@@ -11,7 +12,6 @@ from megatron.core.distributed import DistributedDataParallel
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-from contextlib import contextmanager
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -21,6 +21,7 @@ def make_viewless(e):
     """make_viewless util func"""
     e = make_viewless_tensor(inp=e, requires_grad=e.requires_grad, keep_graph=True)
     return e
+
 
 @contextmanager
 def stream_acquire_context(stream, event):
@@ -42,17 +43,17 @@ class ScheduleNode:
         self.event = event
         self.inputs = None
         self.outputs = None
-        
+
     def default_backward_func(self, outputs, output_grad):
         Variable._execution_engine.run_backward(
-                    tensors=outputs,
-                    grad_tensors=output_grad,
-                    keep_graph=False,
-                    create_graph=False,
-                    inputs=tuple(),
-                    allow_unreachable=True,
-                    accumulate_grad=True,
-                )
+            tensors=outputs,
+            grad_tensors=output_grad,
+            keep_graph=False,
+            create_graph=False,
+            inputs=tuple(),
+            allow_unreachable=True,
+            accumulate_grad=True,
+        )
 
     def forward(self, inputs=()):
         """schedule node forward"""
@@ -69,8 +70,8 @@ class ScheduleNode:
                 for i, input in enumerate(self.inputs):
                     if input is not None:
                         input.requires_grad = inputs[i].requires_grad
-                        
-                data = tuple(self.inputs)   
+
+                data = tuple(self.inputs)
                 data = self.forward_func(*data)
 
                 if not isinstance(data, tuple):
@@ -109,14 +110,14 @@ class ScheduleNode:
                 ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
                 if self.backward_func is not None:
                     self.backward_func(outputs, output_grad)
-                else:    
+                else:
                     self.default_backward_func(outputs, output_grad)
             torch.cuda.nvtx.range_pop()
-        
-        # output_grad maybe from another stream 
+
+        # output_grad maybe from another stream
         for g in output_grad:
-            g.record_stream(self.stream)      
-           
+            g.record_stream(self.stream)
+
         return self.get_grad()
 
     def get_grad(self):
