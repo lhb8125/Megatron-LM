@@ -831,6 +831,7 @@ class _DeepepManager(_DispatchManager):
         capacity_factor: float = None,
         num_experts: int = None,
         num_local_experts: int = None,
+        router_dtype:str = None
     ):
         self.group = group
         self.router_topk = router_topk
@@ -1017,21 +1018,29 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         ).contiguous()
         return routing_map, probs
 
-    def token_permutation(
-        self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def dispatch_preprocess(self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor):
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
 
         # Initialize metadata
         routing_map, probs = self._initialize_metadata(routing_map, probs)
-
         self._comm_manager.setup_metadata(routing_map, probs)
-        hidden_states = self._comm_manager.dispatch(hidden_states)
+        return hidden_states
+    
+    def dispatch_postprocess(self, hidden_states: torch.Tensor):
         global_input_tokens = self._comm_manager.get_permuted_hidden_states_by_experts(
             hidden_states
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
+        return global_input_tokens, tokens_per_expert
+
+    def token_permutation(
+        self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        hidden_states = self.dispatch_preprocess(hidden_states, routing_map, probs)
+        
+        hidden_states = self._comm_manager.dispatch(hidden_states)
+        global_input_tokens, tokens_per_expert = self.dispatch_postprocess(hidden_states)
 
         return global_input_tokens, tokens_per_expert
 
