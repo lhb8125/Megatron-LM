@@ -10,6 +10,7 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
     ScheduleNode,
     get_com_stream,
     get_comp_stream,
+    make_viewless,
 )
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
@@ -141,13 +142,29 @@ class PostProcessNode(ScheduleNode):
 class TransformerLayerNode(ScheduleNode):
 
     def __init__(self, chunk_state, common_state, layer, stream, event):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl))
         # layer state
         self.common_state = common_state
         # model chunk state
         self.chunk_state = chunk_state
         self.layer = layer
-
+        self.detached = tuple()
+        self.before_detached = tuple()
+        
+     
+    def detach(self, t):
+        detached = make_viewless(t).detach()
+        detached.requires_grad = t.requires_grad
+        self.before_detached  = self.before_detached  + (t,)
+        self.detached = self.detached + (detached,)
+        return detached 
+        
+    def backward_impl(self, outputs, output_grad):
+        detached_grad = tuple([e.grad for e in  self.detached])
+        self.default_backward_func(outputs + self.before_detached, output_grad + detached_grad)
+        self.before_detached = None
+        self.detached = None
+    
 
 class MoeAttnNode(TransformerLayerNode):
 
@@ -176,62 +193,76 @@ class MoeAttnNode(TransformerLayerNode):
                 packed_seq_params=packed_seq_params,
                 sequence_len_offset=sequence_len_offset,
             )
-        self.common_state.probs = probs
         self.common_state.tokens_per_expert = tokens_per_expert
-        return hidden_states, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
+        
+        # detached here
+        self.common_state.probs = self.detach(probs)
+        self.common_state.residual = self.detach(hidden_states)
+        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
+        
+        return permutated_local_input_tokens
 
 
 class MoeDispatchNode(TransformerLayerNode):
 
     def forward_impl(
-        self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
+        self, permutated_local_input_tokens
     ):
-
-        self.common_state.probs = probs
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             inputs = permutated_local_input_tokens
             dispatched_input = token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
             # release tensor not used by backward
-            inputs.untyped_storage().resize_(0)
-        return residual, pre_mlp_layernorm_output, dispatched_input, probs
+            # inputs.untyped_storage().resize_(0)
+        return dispatched_input
 
 
 class MoeMlPNode(TransformerLayerNode):
-    def forward_impl(self, residual, pre_mlp_layernorm_output, dispatched_input, probs):
-        self.common_state.probs = probs
+    def forward_impl(self, dispatched_input):
+        pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             inputs = dispatched_input
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output)
             assert mlp_bias is None
-            inputs.untyped_storage().resize_(0)
+            #inputs.untyped_storage().resize_(0)
             assert mlp_bias is None
-        return residual, expert_output, shared_expert_output, probs
+            
+        # pre_mlp_layernorm_output  used     
+        self.common_state.pre_mlp_layernorm_output = None
+        # detach shared_expert_output
+        self.common_state.shared_output = self.detach(shared_expert_output)
+        return expert_output
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
+    def forward_impl(self, permutated_local_input_tokens):
         token_dispatcher = self.layer.mlp.token_dispatcher
-        self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
             # release tensor not used by backward
             inputs = permutated_local_input_tokens
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 permutated_local_input_tokens
             )
-            inputs.untyped_storage().resize_(0)
-        return residual, permutated_local_input_tokens, shared_output, probs
+            #inputs.untyped_storage().resize_(0)
+            
+        # probs used    
+        return permutated_local_input_tokens
 
 
 class MoeCombinePostProcessNode(TransformerLayerNode):
-    def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
+    def forward_impl(self, permutated_local_input_tokens):
+        
         token_dispatcher = self.layer.mlp.token_dispatcher
-        self.common_state.probs = probs
+        residual = self.common_state.residual
+        shared_output = self.common_state.shared_output
         with token_dispatcher.per_batch_state_context(self.common_state):
             output = self.layer._submodule_post_combine_forward(permutated_local_input_tokens, shared_output, None, residual)
         # release tensor not used by backward
         shared_output.untyped_storage().resize_(0)
+        # shared_output used
+        self.common_state.shared_output = None
+        self.common_state.residual = None
         return output
 
 
