@@ -217,7 +217,6 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
             comp_stream, events[prev_idx],
             post_combine_outputs[prev_idx], torch.ones_like(post_combine_outputs[prev_idx]),
         )
-
         # b1. Combine backward for previous microbatch
         callables.combine.backward(
             comm_stream, events[prev_idx],
@@ -240,13 +239,11 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
         deepep_hidden_states = detached_outputs[0]
         dispatch_outputs.append(dispatch_output)
         dispatch_detached_outputs.append(detached_outputs)
-
         # b2. MLP backward for previous microbatch
         callables.mlp.backward(
             comp_stream, events[prev_idx],
             *mlp_outputs[prev_idx], mlp_detached_outputs[prev_idx],
         )
-
         # b3. Dispatch backward for previous microbatch
         callables.dispatch.backward(
             comm_stream, events[prev_idx],
