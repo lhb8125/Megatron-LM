@@ -141,7 +141,7 @@ class PostProcessNode(ScheduleNode):
 
 class TransformerLayerNode(ScheduleNode):
 
-    def __init__(self, chunk_state, common_state, layer, stream, event):
+    def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
         super().__init__(
             weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl)
         )
@@ -334,11 +334,11 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     common_state = TransformerLayerState()
     attn = MoeAttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
-    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event)
+    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event, True)
     dispatch.name = "dispatch"
     mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event)
     mlp.name = "mlp"
-    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event)
+    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
     combine.name = "combine"
     post_combine = MoeCombinePostProcessNode(chunk_state, common_state, layer, comp_stream, event)
     post_combine.name = "post_combine"
