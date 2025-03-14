@@ -97,11 +97,6 @@ class ScheduleNode:
         with stream_acquire_context(self.stream, self.event):
             torch.cuda.nvtx.range_push(f"{self.name} backward")
             with torch.cuda.stream(self.stream):
-                """
-                # not multiple input
-                if len(output_grad) == 1:
-                    output_grad = output_grad[0]
-                """
                 outputs = self.output
                 if not isinstance(outputs, tuple):
                     outputs = (outputs,)
