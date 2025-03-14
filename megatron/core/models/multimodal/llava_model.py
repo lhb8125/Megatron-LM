@@ -6,8 +6,9 @@ from typing import List, Optional
 
 import torch
 
-from megatron.core import InferenceParams, tensor_parallel
+from megatron.core import tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
+from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.vision.clip_vit_model import CLIPViTModel, get_num_image_embeddings
 from megatron.core.models.vision.multimodal_projector import MultimodalProjector
@@ -17,7 +18,7 @@ from megatron.core.parallel_state import get_context_parallel_rank, get_context_
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.utils import log_single_rank
+from megatron.core.utils import deprecate_inference_params, log_single_rank
 
 try:
     import transformer_engine  # pylint: disable=unused-import
@@ -201,25 +202,33 @@ class LLaVAModel(MegatronModule):
         # on the word embeddings inside `finalize_model_grads._allreduce_word_embedding_grads`.
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         if self.add_decoder:
-            self.language_model = GPTModel(
-                config=language_transformer_config,
-                transformer_layer_spec=language_transformer_layer_spec,
-                vocab_size=language_vocab_size,
-                max_sequence_length=language_max_sequence_length,
-                parallel_output=parallel_output,
-                share_embeddings_and_output_weights=share_embeddings_and_output_weights,
-                position_embedding_type=language_position_embedding_type,
-                rotary_percent=language_rotary_percent,
-                pre_process=self.pre_process,
-                post_process=self.post_process,
-                rotary_base=language_rotary_base,
-                rope_scaling=language_rope_scaling,
-                rope_scaling_factor=language_rope_scaling_factor,
-                scatter_embedding_sequence_parallel=False,
-            )
-            self.share_embeddings_and_output_weights = (
-                self.language_model.share_embeddings_and_output_weights
-            )
+            if getattr(language_transformer_config, "language_model_type", "").startswith("hf://"):
+                from megatron.core.models.huggingface.module import build_hf_model
+
+                self.language_model = build_hf_model(
+                    language_transformer_config, language_transformer_config.language_model_type
+                )
+            else:
+                self.language_model = GPTModel(
+                    config=language_transformer_config,
+                    transformer_layer_spec=language_transformer_layer_spec,
+                    vocab_size=language_vocab_size,
+                    max_sequence_length=language_max_sequence_length,
+                    parallel_output=parallel_output,
+                    position_embedding_type=language_position_embedding_type,
+                    rotary_percent=language_rotary_percent,
+                    pre_process=self.pre_process,
+                    post_process=self.post_process,
+                    rotary_base=language_rotary_base,
+                    rope_scaling=language_rope_scaling,
+                    rope_scaling_factor=language_rope_scaling_factor,
+                    scatter_embedding_sequence_parallel=False,
+                )
+
+                self.share_embeddings_and_output_weights = (
+                    self.language_model.share_embeddings_and_output_weights
+                )
+
             self._language_max_sequence_length = language_max_sequence_length
             self._language_is_pipeline_parallel = (
                 language_transformer_config.pipeline_model_parallel_size > 1
@@ -256,16 +265,35 @@ class LLaVAModel(MegatronModule):
                     model_subtype=vision_transformer_config.vision_model_type,
                     add_class_token=add_class_token,
                 )
-            elif vision_transformer_config.vision_model_type in ("radio"):
+            elif vision_transformer_config.vision_model_type in ("radio", "radio-g"):
                 # TODO: should refactor into model code itself?
-                class_token_len = 8
-                max_img_h = 2048
-                max_img_w = 2048
+                class_token_len = 0
+                max_img_h = 0
+                max_img_w = 0
                 embedder_bias = False
+                ln_post_impl = None
                 use_mask_token = False
+
+                if vision_transformer_config.vision_model_type == "radio":
+                    class_token_len = 8
+                    max_img_h = 2048
+                    max_img_w = 2048
+                    embedder_bias = False
+                    ln_post_impl = None
+                    use_mask_token = False
+                elif vision_transformer_config.vision_model_type == "radio-g":
+                    class_token_len = 5
+                    max_img_h = 1792
+                    max_img_w = 1792
+                    embedder_bias = True
+                    from megatron.core.extensions.transformer_engine import TENorm
+
+                    ln_post_impl = TENorm
+                    use_mask_token = True
                 self.vision_model = RADIOViTModel(
                     vision_transformer_config,
                     vision_transformer_layer_spec,
+                    ln_post_impl=ln_post_impl,
                     img_h=img_h,
                     img_w=img_w,
                     max_img_h=max_img_h,
@@ -275,6 +303,12 @@ class LLaVAModel(MegatronModule):
                     add_class_token=add_class_token,
                     embedder_bias=embedder_bias,
                     use_mask_token=use_mask_token,
+                )
+            elif vision_transformer_config.vision_model_type.startswith("hf://"):
+                from megatron.core.models.huggingface.module import build_hf_model
+
+                self.vision_model = build_hf_model(
+                    vision_transformer_config, vision_transformer_config.vision_model_type
                 )
             else:
                 raise ValueError(
@@ -381,9 +415,11 @@ class LLaVAModel(MegatronModule):
         loss_mask,
         labels,
         use_inference_kv_cache,
-        inference_params,
+        inference_context,
         image_token_index,
         num_image_tiles,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
     ):
         """Preprocess input data before input to language model.
 
@@ -420,6 +456,9 @@ class LLaVAModel(MegatronModule):
             final_labels (torch.Tensor): labels for image and text positions [b, combined_seq_len].
             final_loss_mask (torch.Tensor): loss mask [b, combined_seq_len].
         """
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
         assert self.add_decoder, "input text preprocessing is only needed for the language model"
 
         # No pre- or postprocessing needed.
@@ -460,7 +499,7 @@ class LLaVAModel(MegatronModule):
             if (
                 self._language_is_pipeline_parallel
                 and max_seq_len < self._language_max_sequence_length
-                and inference_params is None
+                and inference_context is None
             ):
                 max_seq_len = self._language_max_sequence_length
 
@@ -730,11 +769,13 @@ class LLaVAModel(MegatronModule):
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
         loss_mask: Optional[torch.Tensor] = None,
-        inference_params: Optional[InferenceParams] = None,
+        inference_context: Optional[BaseInferenceContext] = None,
         num_image_tiles: Optional[List[int]] = None,
         image_token_index: Optional[int] = None,
         runtime_gather_output: Optional[bool] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
     ) -> torch.Tensor:
         """Forward function of the LLaVA model.
 
@@ -749,7 +790,7 @@ class LLaVAModel(MegatronModule):
                 attn_mask_type in layer specs determines the attention mask used.
             labels (torch.Tensor): Optional target text labels [batch, combined_seq_len].
             loss_mask (torch.Tensor): Text loss mask [batch, text_seq_len].
-            inference_params (InferenceParams): Inference-time parameters including KV cache.
+            inference_context (BaseInferenceContext): Inference-time parameters including KV cache.
             num_image_tiles (list of int): Number of tiles per image. Default 1 tile per image.
             image_token_index (int): ID for input images. Default None means `image_token_index`
                 arg in the constructor will be used.
@@ -764,9 +805,12 @@ class LLaVAModel(MegatronModule):
                 otherwise logits of shape [b, s, vocab_size].
             loss_mask (torch.Tensor): Loss mask expanded to combined sequence length. Shape [b, s].
         """
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
         use_inference_kv_cache = (
-            inference_params is not None
-            and "image_tokens_count" in inference_params.key_value_memory_dict
+            inference_context is not None
+            and "image_tokens_count" in inference_context.key_value_memory_dict
         )
         has_images = images is not None and images.shape[0] > 0
 
@@ -806,8 +850,8 @@ class LLaVAModel(MegatronModule):
             # TODO: Support batched inference.
             # In inference, the language model KV cache will be updated for image token positions.
             # Store the image tokens sequence length to be used as an offset to the KV cache later.
-            if inference_params is not None:
-                inference_params.key_value_memory_dict["image_tokens_count"] = (
+            if inference_context is not None:
+                inference_context.key_value_memory_dict["image_tokens_count"] = (
                     image_embeddings.shape[0] * image_embeddings.shape[1]
                 )
         else:
@@ -842,7 +886,7 @@ class LLaVAModel(MegatronModule):
             loss_mask,
             labels,
             use_inference_kv_cache,
-            inference_params,
+            inference_context,
             image_token_index if image_token_index is not None else self.image_token_index,
             num_image_tiles,
         )  # [combined_seq_len, b, h_language], [b, combined_seq_len], [b, combined_seq_len]
@@ -860,7 +904,7 @@ class LLaVAModel(MegatronModule):
             attention_mask=attention_mask,
             decoder_input=combined_embeddings,
             labels=new_labels,
-            inference_params=inference_params,
+            inference_context=inference_context,
             runtime_gather_output=runtime_gather_output,
             packed_seq_params=packed_seq_params,
         )

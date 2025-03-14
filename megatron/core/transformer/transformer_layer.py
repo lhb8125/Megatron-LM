@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+
 import warnings
 from abc import ABC
 from dataclasses import dataclass, field
@@ -7,18 +8,20 @@ from functools import partial
 
 import torch
 import torch.distributed
+from torch import Tensor
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import apply_prefix_mapping
+from megatron.core.inference.contexts import BaseInferenceContext
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.cuda_graphs import CudaGraphManager
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.utils import make_viewless_tensor
+from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
 from megatron.core.transformer.utils import TransformerLayerSubmoduleCallables, SubmoduleCallables
-# from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState, per_batch_state_context
 
 def get_transformer_layer_offset(config: TransformerConfig):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -249,12 +252,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     ):
         super().__init__(config=config)
 
+        # Enable cuda graphs.
         if config.enable_cuda_graph:
-            if not self.training:
-                # Cudagraphs for inference are only enabled with the flash decoding kernel
-                assert (
-                    self.config.flash_decode
-                ), "--flash-decode is required to use CUDA graphs during inference"
             self.cudagraph_manager = CudaGraphManager(config)
 
         self.submodules_config = submodules
@@ -346,17 +345,19 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
     def forward(
         self,
-        hidden_states,
-        attention_mask=None,
-        context=None,
-        context_mask=None,
-        rotary_pos_emb=None,
-        rotary_pos_cos=None,
-        rotary_pos_sin=None,
-        attention_bias=None,
-        inference_params=None,
-        packed_seq_params=None,
-        sequence_len_offset=None,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        inference_context: Optional[BaseInferenceContext] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
     ):
         """
         Perform a forward pass through the transformer layer.
@@ -372,8 +373,10 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             context_mask (Tensor, optional): Mask tensor for cross-attention.
             rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
             attention_bias (Tensor, optional): Bias tensor for Q * K.T.
-            inference_params (object, optional): Parameters for inference-time optimizations.
+            inference_context (object, optional): Parameters for inference-time optimizations.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
+            sequence_len_offset (Tensor, optional): Offset along sequence dimension
+                during inference.
 
         Returns:
             Tuple[Tensor, Tensor]: A tuple containing:
@@ -381,6 +384,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # Residual connection.
         residual = hidden_states
@@ -392,7 +397,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
-            inference_params=inference_params,
+            inference_context=inference_context,
             rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
@@ -419,7 +424,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             pre_cross_attn_layernorm_output,
             attention_mask=context_mask,
             key_value_states=context,
-            inference_params=inference_params,
+            inference_context=inference_context,
         )
 
         if isinstance(attention_output_with_bias, dict) and "context" in attention_output_with_bias:
@@ -461,7 +466,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # CUDA graph requires returned values to be Tensors
         if self.config.external_cuda_graph and self.training:
             return output
+
         return output, context
+
+    def is_deepep_dispatcher(self):
+        from megatron.core.transformer.moe.moe_layer import MoEFlexTokenDispatcher
+        return isinstance(self.mlp.token_dispatcher, MoEFlexTokenDispatcher)
 
     def _callable_wrapper(self, is_forward, func, stream, event, *args, skip_detach=False, **kwargs):
         """
@@ -557,18 +567,26 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
         probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
-        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
-        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
 
-        outputs = [hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs]
+        if self.is_deepep_dispatcher():
+            deepep_hidden_states = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map, probs)
+            outputs = [hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs]
+        else:
+            tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
+            permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
+
+            outputs = [hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs]
         return tuple(outputs)
     
-    def _submodule_dispatch_forward(self, permutated_local_input_tokens):
+    def _submodule_dispatch_forward(self, tokens):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
-        return [global_input_tokens]
+        if self.is_deepep_dispatcher():
+            output_tokens = self.mlp.token_dispatcher._comm_manager.dispatch(tokens)
+        else:
+            output_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(tokens)
+        return [output_tokens]
 
     def _submodule_dense_forward(self, hidden_states):
         residual = hidden_states
@@ -584,28 +602,41 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output
     
-    def _submodule_moe_forward(self, dispatched_input, tokens_per_expert, hidden_states):
+    def _submodule_moe_forward(self, dispatched_input, hidden_states, tokens_per_expert=None):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
         """
         shared_expert_output = None
-        dispatched_input = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
+        if self.is_deepep_dispatcher():
+            assert tokens_per_expert is None, "For DeepEP dispatcher, tokens_per_expert should be None."
+            dispatched_input, tokens_per_expert = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
+        else:
+            dispatched_input = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
-        expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
+        if self.is_deepep_dispatcher():
+            expert_output = self.mlp.token_dispatcher._comm_manager.get_restored_hidden_states_by_experts(expert_output)
+        else:
+            expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
             shared_expert_output = self.mlp.shared_experts(hidden_states)
         return expert_output, shared_expert_output, mlp_bias
 
     def _submodule_combine_forward(self, hidden_states):
-        return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
+        if self.is_deepep_dispatcher():
+            return [self.mlp.token_dispatcher._comm_manager.combine(hidden_states)]
+        else:
+            return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
     
     def _submodule_post_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
         """
-        output = self.mlp.token_dispatcher.combine_postprocess(expert_output)
+        if self.is_deepep_dispatcher():
+            output = expert_output
+        else:
+            output = self.mlp.token_dispatcher.combine_postprocess(expert_output)
         if shared_expert_output is not None:
             output += shared_expert_output
         mlp_output_with_bias = (output, mlp_bias)
@@ -623,12 +654,23 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
         hidden_states.backward(detached_inputs[0].grad)
 
-    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs, detached_inputs):
-        permutated_local_input_tokens.backward(detached_inputs[3].grad)
-        probs.backward(detached_inputs[4].grad)
-        # tokens_per_expert.backward(detached_inputs[2].grad)
-        pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
-        hidden_states.backward(detached_inputs[0].grad)
+    def _submodule_attention_router_compound_backward(self, *args):
+        def _submodule_attention_router_compound_backward_all2all(hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs, detached_inputs):
+            permutated_local_input_tokens.backward(detached_inputs[3].grad)
+            probs.backward(detached_inputs[4].grad)
+            pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
+            hidden_states.backward(detached_inputs[0].grad)
+        def _submodule_attention_router_compound_backward_deepep(hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs, detached_inputs):
+            deepep_hidden_states.backward(detached_inputs[2].grad)
+            probs.backward(detached_inputs[3].grad)
+            pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
+            hidden_states.backward(detached_inputs[0].grad)
+        
+        if self.is_deepep_dispatcher():
+            return _submodule_attention_router_compound_backward_deepep(*args)
+        else:
+            return _submodule_attention_router_compound_backward_all2all(*args)
+
 
     def _submodule_dispatch_backward(self, global_input_tokens, detached_inputs):
         global_input_tokens.backward(detached_inputs[0].grad)
@@ -748,14 +790,18 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
     def __call__(self, *args, **kwargs):
         # Training and validation mode CUDA graphs
-        if hasattr(self, 'cudagraph_manager') and kwargs.get('inference_params') is None:
+        if hasattr(self, 'cudagraph_manager') and kwargs.get('inference_context') is None:
             return self.cudagraph_manager(self, args, kwargs)
         # Inference mode. CUDA graphs are used in the decode phase only, when attn mask is None
-        elif (
-            not self.training
-            and hasattr(self, 'cudagraph_manager')
-            and kwargs.get('inference_params') is not None
-            and kwargs['inference_params'].decode_mode
+        elif not self.training and (
+            hasattr(self, 'cudagraph_manager')
+            and kwargs['attention_mask'] is None
+            and (
+                kwargs.get('inference_context') is not None
+                and kwargs['inference_context'].is_decode_only()
+                or kwargs.get('inference_params') is not None
+                and kwargs['inference_params'].is_decode_only()
+            )
         ):
             assert (
                 kwargs.get('attention_mask') is None
