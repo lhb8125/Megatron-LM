@@ -2285,6 +2285,12 @@ def _add_moe_args(parser):
                        'Upcycling is implemented on the top of distributed checkpointing, so it supports parallel modes different from the dense model.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
+    group.add_argument('--combined-1f1b', action='store_true',
+                       help='Batch-level overlapping in 1f1b stage.')
+    group.add_argument('--combined-1f1b-recipe', type=str,
+                       choices=['ep_a2a', 'golden'],
+                       default='golden',
+                       help='Options are "ep_a2a" and "golden".')
 
     return parser
 
