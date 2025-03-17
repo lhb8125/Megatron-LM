@@ -707,25 +707,25 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         callables = TransformerLayerSubmoduleCallables(
             attention=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, attention_func),
-                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward),
+                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward, nvtx_name="attention_backward"),
                 # dw=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_dw),
             ),
             dispatch=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, dispatch_func),
-                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward),
+                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward, nvtx_name="dispatch_backward"),
             ),
             mlp=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, mlp_func),
-                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward),
+                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward, nvtx_name="mlp_backward"),
                 # dw=partial(self._callable_wrapper, False, self._submodule_mlp_dw),
             ),
             combine=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, combine_func),
-                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward),
+                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward, nvtx_name="combine_backward"),
             ),
             post_combine=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, post_combine_func),
-                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward),
+                backward=partial(self._callable_wrapper, False, self._submodule_custom_backward, nvtx_name="post_combine_backward"),
             ),
         )
         return callables
