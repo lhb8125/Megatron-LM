@@ -143,7 +143,7 @@ class TransformerLayerNode(ScheduleNode):
 
     def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
         super().__init__(
-            weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl)
+            weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl), free_inputs = free_inputs,
         )
         # layer state
         self.common_state = common_state
@@ -507,6 +507,7 @@ def schedule_layer_1f1b(
         # attn backward from last iter
         assert b_grad is None
         b_grad = pre_backward()
+        del pre_backward
 
     if b_layer is not None:
         with b_context:
@@ -620,6 +621,7 @@ def schedule_chunk_1f1b(
 
     # tail backward
     grad = layer_pre_backward()
+    del layer_pre_backward
     with b_context:
         for i in range(overlaped_layers, b_num_layers):
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
@@ -633,6 +635,7 @@ def schedule_chunk_1f1b(
 
     # tail forward
     f_input = layer_pre_forward()
+    del layer_pre_forward
     with f_context:
         for i in range(overlaped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)

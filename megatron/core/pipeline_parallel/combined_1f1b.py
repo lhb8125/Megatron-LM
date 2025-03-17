@@ -9,7 +9,8 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-from megatron.legacy.model import Float16Module
+#from megatron.legacy.model import Float16Module
+from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
 
@@ -82,11 +83,11 @@ class ScheduleNode:
 
                 self.output = data
             torch.cuda.nvtx.range_pop()
-
+        
         if self.free_inputs:
             for input in inputs:
                 input.record_stream(self.stream)
-                inputs.untyped_storage().resize_(0)
+                input.untyped_storage().resize_(0)        
 
 
         return self.output
