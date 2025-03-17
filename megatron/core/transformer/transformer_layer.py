@@ -652,7 +652,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         raise NotImplementedError("Not implemented")
 
     def _submodule_attention_router_compound_dw(self):
-        raise NotImplementedError("Not implemented")
+        # self.self_attention.wgrad_comp()
+        pass
+        # raise NotImplementedError("Not implemented")
     
     def _submodule_dispatch_dgrad(self):
         raise NotImplementedError("Not implemented")
@@ -661,7 +663,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         raise NotImplementedError("Not implemented")
 
     def _submodule_mlp_dw(self):
-        raise NotImplementedError("Not implemented")
+        self.mlp.wgrad_comp()
+        # raise NotImplementedError("Not implemented")
 
     def _submodule_combine_dgrad(self):
         raise NotImplementedError("Not implemented")
@@ -698,7 +701,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 forward=partial(self._callable_wrapper, True, attention_func, skip_detach=True),
                 backward=partial(self._callable_wrapper, False, attention_backward_func),
                 # dgrad=partial(self._callable_wrapper, False,self._submodule_attention_router_compound_dgrad),
-                # dw=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_dw),
+                dw=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_dw),
             ),
             dispatch=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, dispatch_func),
@@ -709,7 +712,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 forward=partial(self._callable_wrapper, True, mlp_func),
                 backward=partial(self._callable_wrapper, False, mlp_backward_func),
                 # dgrad=partial(self._callable_wrapper, False, self._submodule_mlp_dgrad),
-                # dw=partial(self._callable_wrapper, False, self._submodule_mlp_dw),
+                dw=partial(self._callable_wrapper, False, self._submodule_mlp_dw),
             ),
             combine=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, combine_func),

@@ -143,6 +143,9 @@ class MLP(MegatronModule):
             sharded_state_dict.update(sub_sd)
         return sharded_state_dict
 
+    def wgrad_comp(self):
+        pass
+
 
 def apply_swiglu_sharded_factory(original_sh_ten, sharded_offsets):
     # We must split the tensor into 2 parts, each sharded separately.

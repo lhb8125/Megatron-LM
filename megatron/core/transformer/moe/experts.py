@@ -742,6 +742,9 @@ class TEGroupedMLP(MegatronModule):
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
 
+    def wgrad_comp(self):
+        pass
+
 
 class SequentialMLP(MegatronModule):
     """An implementation of the Experts layer using a sequence of MLP layers.

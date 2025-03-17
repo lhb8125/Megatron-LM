@@ -486,8 +486,9 @@ def schedule_layer_1f1b(
 
     if b_layer is not None:
         with b_context:
-            b_grad = b_layer.mlp.backward(b_grad)
-            b_grad = b_layer.dispatch.backward(b_grad)
+            grad = b_layer.mlp.backward(b_grad)
+            # b_layer.mlp.dw(b_grad)
+            b_grad = b_layer.dispatch.backward(grad)
 
     if f_layer is not None:
         with f_context:
@@ -504,6 +505,7 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             with b_context:
                 grad = b_layer.attn.backward(b_grad)
+                # b_layer.attn.dw(b_grad)
                 return grad
 
     if f_layer and b_layer:
