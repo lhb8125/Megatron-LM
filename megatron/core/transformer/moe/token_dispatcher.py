@@ -1018,6 +1018,18 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         ).contiguous()
         return routing_map, probs
 
+    def get_token_probs(self):
+        return self._comm_manager.token_probs
+
+    def set_token_probs(self, token_probs: torch.Tensor):
+        self._comm_manager.token_probs = token_probs
+    
+    def get_dispatched_probs(self):
+        return self._comm_manager.dispatched_probs
+
+    def set_dispatched_probs(self, dispatched_probs: torch.Tensor):
+        self._comm_manager.dispatched_probs = dispatched_probs
+
     def dispatch_preprocess(self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor):
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])

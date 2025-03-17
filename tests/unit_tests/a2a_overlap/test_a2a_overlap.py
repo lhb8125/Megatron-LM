@@ -152,6 +152,8 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
     dispatch_detached_inputs = []
     mlp_detached_inputs = []
     combine_detached_inputs = []
+    post_combine_detached_inputs = []
+    
     
     # Run the first microbatch forward pass
     input_tensor = input_tensors[0]
@@ -161,25 +163,25 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
     attention_output, detached_inputs = callables.attention.forward(
         comp_stream, events[0], input_tensor
     )
-    hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs = detached_inputs
+    hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs = attention_output
     attention_outputs.append(attention_output)
     attention_detached_inputs.append(detached_inputs)
     
     # f2. Token dispatch forward
     dispatch_output, detached_inputs = callables.dispatch.forward(
         comm_stream, events[0],
-        deepep_hidden_states
+        deepep_hidden_states, probs
     )
-    deepep_hidden_states = detached_inputs[0]
+    deepep_hidden_states, probs = dispatch_output
     dispatch_outputs.append(dispatch_output)
     dispatch_detached_inputs.append(detached_inputs)
     
     # f3. MLP (experts) forward
     mlp_output, detached_inputs = callables.mlp.forward(
         comp_stream, events[0],
-        deepep_hidden_states, pre_mlp_layernorm_output
+        deepep_hidden_states, pre_mlp_layernorm_output, probs,
     )
-    expert_output, shared_expert_output, mlp_bias = detached_inputs
+    expert_output, shared_expert_output, _, mlp_bias = mlp_output
     mlp_outputs.append(mlp_output)
     mlp_detached_inputs.append(detached_inputs)
     
@@ -188,16 +190,17 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
         comm_stream, events[0],
         expert_output
     )
-    expert_output = detached_inputs[0]
+    expert_output = combine_output[0]
     combine_outputs.append(combine_output)
     combine_detached_inputs.append(detached_inputs)
 
     # f5. Post combine forward
     post_combine_output, detached_inputs = callables.post_combine.forward(
         comp_stream, events[0],
-        expert_output, shared_expert_output, mlp_bias, hidden_states
+        expert_output, shared_expert_output, mlp_bias, None, hidden_states
     )
     post_combine_outputs.append(post_combine_output)
+    post_combine_detached_inputs.append(detached_inputs)
 
 
     # Run the overlapped 1F1B schedule for the remaining microbatches
@@ -213,49 +216,64 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
         # 1F1B interleaved schedule (following the reference pattern)
         # Gradient for previous microbatch output
         # b0. Post combine backward for previous microbatch
-        callables.post_combine.backward(
+        grads = callables.post_combine.backward(
             comp_stream, events[prev_idx],
-            post_combine_outputs[prev_idx], torch.ones_like(post_combine_outputs[prev_idx]),
+            post_combine_outputs[prev_idx],
+            tuple([torch.ones_like(post_combine_outputs[prev_idx][0])]),
+            post_combine_detached_inputs[prev_idx],
         )
+        output_grad, shared_expert_output_grad, mlp_bias_grad, _, residual_grad = grads
+
         # b1. Combine backward for previous microbatch
-        callables.combine.backward(
+        grads = callables.combine.backward(
             comm_stream, events[prev_idx],
-            *combine_outputs[prev_idx], combine_detached_inputs[prev_idx],
-        )
+            combine_outputs[prev_idx], 
+            tuple([output_grad]),
+            combine_detached_inputs[prev_idx],
+        )   
+        output_grad = grads[0]
         
         # f1. Attention forward for current microbatch
         attention_output, detached_inputs = callables.attention.forward(
             comp_stream, events[i], input_tensor
         )
-        hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs = detached_inputs
+        hidden_states, pre_mlp_layernorm_output, deepep_hidden_states, probs = attention_output
         attention_outputs.append(attention_output)
         attention_detached_inputs.append(detached_inputs)
 
         # f2. Dispatch forward for current microbatch
         dispatch_output, detached_inputs = callables.dispatch.forward(
             comm_stream, events[i],
-            deepep_hidden_states
+            deepep_hidden_states, probs
         )
-        deepep_hidden_states = detached_inputs[0]
+        deepep_hidden_states, probs = dispatch_output
         dispatch_outputs.append(dispatch_output)
         dispatch_detached_inputs.append(detached_inputs)
+
         # b2. MLP backward for previous microbatch
-        callables.mlp.backward(
+        grads = callables.mlp.backward(
             comp_stream, events[prev_idx],
-            *mlp_outputs[prev_idx], mlp_detached_inputs[prev_idx],
+            mlp_outputs[prev_idx], 
+            tuple([output_grad, shared_expert_output_grad, None, mlp_bias_grad]),
+            mlp_detached_inputs[prev_idx],
         )
+        dispatched_input_grad, hidden_states_grad, probs_grad = grads
+
         # b3. Dispatch backward for previous microbatch
-        callables.dispatch.backward(
+        grads = callables.dispatch.backward(
             comm_stream, events[prev_idx],
-            *dispatch_outputs[prev_idx], dispatch_detached_inputs[prev_idx],
+            dispatch_outputs[prev_idx], 
+            tuple([dispatched_input_grad, probs_grad]),
+            dispatch_detached_inputs[prev_idx],
         )
+        dispatched_input_grad, probs_grad = grads
 
          # f3. MLP forward for current microbatch
         mlp_output, detached_inputs = callables.mlp.forward(
             comp_stream, events[i],
-            deepep_hidden_states, pre_mlp_layernorm_output
+            deepep_hidden_states, pre_mlp_layernorm_output, probs,
         )
-        expert_output, shared_expert_output, mlp_bias = detached_inputs
+        expert_output, shared_expert_output, _, mlp_bias = mlp_output
         mlp_outputs.append(mlp_output)
         mlp_detached_inputs.append(detached_inputs)
         
@@ -264,54 +282,72 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
             comm_stream, events[i],
             expert_output
         )
-        expert_output = detached_inputs[0]
+        expert_output = combine_output[0]
         combine_outputs.append(combine_output)
         combine_detached_inputs.append(detached_inputs)
 
         # b4. Attention backward for previous microbatch
-        callables.attention.backward(
+        grads = callables.attention.backward(
             comp_stream, events[prev_idx],
-            *attention_outputs[prev_idx], attention_detached_inputs[prev_idx],
+            attention_outputs[prev_idx], 
+            tuple([residual_grad, hidden_states_grad, dispatched_input_grad, probs_grad]), 
+            attention_detached_inputs[prev_idx],
         )
         # f5. Post combine forward for current microbatch
         post_combine_output, detached_inputs = callables.post_combine.forward(
             comp_stream, events[i],
-            expert_output, shared_expert_output, mlp_bias, hidden_states
+            expert_output, shared_expert_output, mlp_bias, None, hidden_states
         )
         post_combine_outputs.append(post_combine_output)
+        post_combine_detached_inputs.append(detached_inputs)
         torch.cuda.nvtx.range_pop()
 
     #Last microbatch backward pass
     # b0. Post combine backward for previous microbatch
-    callables.post_combine.backward(
+    grads = callables.post_combine.backward(
         comp_stream, events[prev_idx],
-        post_combine_outputs[microbatches-1], torch.ones_like(post_combine_outputs[microbatches-1]),
+        post_combine_outputs[microbatches-1],
+        tuple([torch.ones_like(post_combine_outputs[microbatches-1][0])]),
+        post_combine_detached_inputs[microbatches-1],
     )
+    output_grad, shared_expert_output_grad, mlp_bias_grad, _, residual_grad = grads
 
     # b1. Combine backward for last microbatch
-    callables.combine.backward(
+    grads = callables.combine.backward(
         comm_stream, events[prev_idx],
-        *combine_outputs[microbatches-1], combine_detached_inputs[microbatches-1],
+        combine_outputs[microbatches-1], 
+        tuple([output_grad]),
+        combine_detached_inputs[microbatches-1],
     )   
+    output_grad = grads[0]
 
     # b2. MLP backward for last microbatch
-    callables.mlp.backward(
+    grads = callables.mlp.backward(
         comp_stream, events[prev_idx],
-        *mlp_outputs[microbatches-1], mlp_detached_inputs[microbatches-1],
+        mlp_outputs[microbatches-1], 
+        tuple([output_grad, shared_expert_output_grad, None, mlp_bias_grad]),
+        mlp_detached_inputs[microbatches-1],
     )
+    dispatched_input_grad, hidden_states_grad, probs_grad = grads
     
     # b3. Dispatch backward for last microbatch
-    callables.dispatch.backward(
+    grads = callables.dispatch.backward(
         comm_stream, events[prev_idx],
-        *dispatch_outputs[microbatches-1], dispatch_detached_inputs[microbatches-1],
+        dispatch_outputs[microbatches-1], 
+        tuple([dispatched_input_grad, probs_grad]),
+        dispatch_detached_inputs[microbatches-1],
     )
+    dispatched_input_grad, probs_grad = grads
 
     # b4. Attention backward for last microbatch
-    callables.attention.backward(
+    grads = callables.attention.backward(
         comp_stream, events[prev_idx],
-        *attention_outputs[microbatches-1], attention_detached_inputs[microbatches-1],
+        attention_outputs[microbatches-1], 
+        tuple([residual_grad, hidden_states_grad, dispatched_input_grad, probs_grad]), 
+        attention_detached_inputs[microbatches-1],
     )
     torch.cuda.synchronize()
+    post_combine_outputs = list(map(lambda x: x[0], post_combine_outputs))
     capture = {
         "outputs": post_combine_outputs,
     }
