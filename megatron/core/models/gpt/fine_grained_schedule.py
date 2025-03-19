@@ -229,7 +229,7 @@ class MoeMlPNode(TransformerLayerNode):
         with token_dispatcher.per_batch_state_context(self.common_state):
             inputs = dispatched_input
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
-                dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output
+                dispatched_input, pre_mlp_layernorm_output, self.common_state.tokens_per_expert,
             )
             assert mlp_bias is None
             # inputs.untyped_storage().resize_(0)
