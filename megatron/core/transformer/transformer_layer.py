@@ -499,7 +499,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             event.wait(stream)
             with torch.cuda.stream(stream):
                 torch.cuda.nvtx.range_push(nvtx_name)
-                grads = func(*inputs)
+                grads = func(stream, *inputs)
             torch.cuda.nvtx.range_pop()
             event.record(stream)
             return grads
@@ -673,7 +673,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output
 
-    def _submodule_custom_backward(self, outputs, grads, inputs):
+    def _submodule_custom_backward(self, stream, outputs, grads, inputs):
         outputs_new = []
         grads_new = []
         for output, grad in zip(outputs, grads):
@@ -690,7 +690,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             allow_unreachable=True,
             accumulate_grad=True,
         )
-
+        for g in inputs:
+            if isinstance(g, Tensor) and g.requires_grad:
+                g.record_stream(stream)
         return tuple([t.grad if t is not None else None for t in inputs])
 
     def _submodule_attention_router_compound_dw(self):
