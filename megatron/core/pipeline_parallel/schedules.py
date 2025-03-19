@@ -586,10 +586,10 @@ def forward_backward_pipelining_with_interleaving(
     assert isinstance(
         data_iterator, list
     ), "interleaved pipeline parallelism expected each model chunk to have a data iterator"
-
     config = get_model_config(model[0])
     set_streams()
-    forward_step_func = wrap_forward_func(config, forward_step_func)
+    if not forward_only:
+        forward_step_func = wrap_forward_func(config, forward_step_func)
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
 
@@ -1157,7 +1157,7 @@ def forward_backward_pipelining_with_interleaving(
         wrap forward_helper、backward_helper、combined_forward_backward_helper in a unified way
         """
 
-        if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a":
+        if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a" and not forward_only:
             assert (
                 checkpoint_activations_microbatch is None
             ), "checkpoint_activations_microbatch not supported when combined_1f1b is true"
