@@ -6,25 +6,29 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial
-from typing import Union
+from typing import Optional, Union
 
+import torch
 from torch import Tensor, nn
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.extensions.transformer_engine import TENorm
+from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols as LayerSymbols
 from megatron.core.ssm.mamba_hybrid_layer_allocation import allocate_layers
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
+from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
-from megatron.core.utils import make_viewless_tensor
+from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
 
 
 # https://github.com/huggingface/transformers/blob/c28d04e9e252a1a099944e325685f14d242ecdcd/src/transformers/models/gpt2/modeling_gpt2.py#L454
@@ -46,8 +50,10 @@ def _init_weights(
             nn.init.normal_(module.weight, std=initializer_range)
 
         for name, p in module.named_parameters():
-            if name in ["in_proj.weight", "x_proj.weight", "conv1d.weight", "out_proj.weight"]:
+            if name in ["conv1d.weight", "out_proj.weight"]:
                 nn.init.kaiming_uniform_(p, a=math.sqrt(5))
+            if name in ["in_proj.weight"]:
+                nn.init.normal_(p, mean=0.0, std=initializer_range)
 
         if rescale_prenorm_residual:
             # Reinitialize selected weights subject to the OpenAI GPT-2 Paper Scheme:
@@ -85,10 +91,8 @@ class MambaStack(MegatronModule):
     Constructor for the MambaStack class.
 
     Args:
-        config (TransformerConfig): the transformer configuration
+        config (TransformerConfig): the model configuration
         submodules (MambaStackSubmodules): the submodules for the stack
-        mamba_ssm_ngroups (int, optional): the number of groups for the
-            MAMBA SSM. Defaults to 8.
         residual_in_fp32 (bool, optional): whether to do residual connections
             in fp32. Defaults to False.
         pre_process (bool, optional): whether to include an embedding layer.
@@ -111,7 +115,6 @@ class MambaStack(MegatronModule):
         self,
         config: TransformerConfig,
         submodules: MambaStackSubmodules,
-        mamba_ssm_ngroups: int = 8,
         residual_in_fp32=False,
         pre_process: bool = True,
         hybrid_attention_ratio: float = 0.0,
@@ -154,7 +157,6 @@ class MambaStack(MegatronModule):
                 layer = build_module(
                     submodules.mamba_layer,
                     config=self.config,
-                    mamba_ssm_ngroups=mamba_ssm_ngroups,
                     residual_in_fp32=residual_in_fp32,
                     layer_number=i + 1 + pp_layer_offset,
                 )
@@ -181,7 +183,13 @@ class MambaStack(MegatronModule):
                 eps=self.config.layernorm_epsilon,
             )
 
-        self.apply(partial(_init_weights, n_layer=self.config.num_layers))
+        self.apply(
+            partial(
+                _init_weights,
+                n_layer=self.config.num_layers,
+                initializer_range=self.config.init_method_std,
+            )
+        )
 
     def _select_layers_for_pipeline_parallel(self, layer_type_list):
         pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
@@ -225,12 +233,49 @@ class MambaStack(MegatronModule):
         forward_step_func"""
         self.input_tensor = input_tensor
 
+    def get_fp8_context(self, layer_no=-1):
+        """Instantiate FP8 context manager."""
+
+        # First and last 2 Mamba layers are retained in BF16
+        if not self.config.fp8 or (
+            self.config.first_last_layers_bf16
+            and layer_no in (0, 1, self.config.num_layers - 2, self.config.num_layers - 1)
+        ):
+            fp8_context = nullcontext()
+        else:
+            import transformer_engine  # To keep out TE dependency when not training in fp8
+
+            if self.config.fp8 == "e4m3":
+                fp8_format = transformer_engine.common.recipe.Format.E4M3
+            elif self.config.fp8 == "hybrid":
+                fp8_format = transformer_engine.common.recipe.Format.HYBRID
+            else:
+                raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
+
+            fp8_recipe = transformer_engine.common.recipe.DelayedScaling(
+                margin=self.config.fp8_margin,
+                interval=self.config.fp8_interval,
+                fp8_format=fp8_format,
+                amax_compute_algo=self.config.fp8_amax_compute_algo,
+                amax_history_len=self.config.fp8_amax_history_len,
+                override_linear_precision=(False, False, not self.config.fp8_wgrad),
+            )
+            fp8_group = None
+            if parallel_state.model_parallel_is_initialized():
+                fp8_group = parallel_state.get_amax_reduction_group(with_context_parallel=True)
+            fp8_context = transformer_engine.pytorch.fp8_autocast(
+                enabled=True, fp8_recipe=fp8_recipe, fp8_group=fp8_group
+            )
+        return fp8_context
+
     def forward(
         self,
         hidden_states: Tensor,
         attention_mask: Tensor,
-        inference_params=None,
-        rotary_pos_emb: Tensor = None,
+        inference_context: Optional[BaseInferenceContext] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
     ):
         """
         Forward function of the MambaStack class.
@@ -241,30 +286,59 @@ class MambaStack(MegatronModule):
         Args:
             hidden_states (Tensor): the input tensor.
             attention_mask (Tensor): the attention mask.
-            inference_params (InferenceParams): the inference parameters.
+            inference_context (BaseInferenceContext): the inference parameters.
             rotary_pos_emb (Tensor, optional): the rotary positional embeddings.
                 Defaults to None.
         Returns:
             Tensor: the output tensor.
         """
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
         if not self.pre_process:
             # See set_input_tensor()
             hidden_states = self.input_tensor
 
-        if inference_params:
-            # NOTE(bnorick): match InferenceParams attributes for
-            # mamba_ssm.utils.generation.InferenceParams,
+        if inference_context:
+            assert (
+                inference_context.is_static_batching()
+            ), "Mamba currently does not support dynamic inference batching."
+            # NOTE(bnorick): match BaseInferenceContext attributes for
+            # mamba_ssm.utils.generation.BaseInferenceContext,
             # this hack supports eval
-            inference_params.max_seqlen = inference_params.max_sequence_length
-            inference_params.seqlen_offset = inference_params.sequence_len_offset
+            inference_context.max_seqlen = inference_context.max_sequence_length
+            inference_context.seqlen_offset = inference_context.sequence_len_offset
+
+        if (
+            (self.config.enable_cuda_graph or self.config.flash_decode)
+            and inference_context
+            and inference_context.is_static_batching()
+            and not self.training
+        ):
+            sequence_len_offset = torch.tensor(
+                [inference_context.sequence_len_offset] * inference_context.current_batch_size,
+                dtype=torch.int32,
+                device='cuda',
+            )
+        else:
+            sequence_len_offset = None
 
         for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                attention_mask,
-                inference_params=inference_params,
-                rotary_pos_emb=rotary_pos_emb,
-            )
+            with self.get_fp8_context(layer.layer_number - 1):
+                if isinstance(layer, TransformerLayer):
+                    hidden_states, _ = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        inference_context=inference_context,
+                        rotary_pos_emb=rotary_pos_emb,
+                        sequence_len_offset=sequence_len_offset,
+                    )
+                else:  # MambaLayer
+                    hidden_states = layer(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        inference_context=inference_context,
+                    )
 
             # The attention layer (currently a simplified transformer layer)
             # outputs a tuple of (hidden_states, context). Context is intended
