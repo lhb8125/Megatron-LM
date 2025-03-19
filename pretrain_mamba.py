@@ -19,6 +19,7 @@ from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.models.mamba import MambaModel
 from megatron.training import pretrain
 from megatron.core.utils import StragglerDetector
+from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.spec_utils import import_module
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
@@ -54,7 +55,7 @@ def model_provider(pre_process=True, post_process=True) -> MambaModel:
     args = get_args()
 
     print_rank_0('building Mamba model ...')
-    config = core_transformer_config_from_args(get_args())
+    config = core_transformer_config_from_args(args, TransformerConfig)
 
     assert args.use_legacy_models == False, "Mamba only supported in Mcore!"
 
@@ -166,9 +167,12 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     reporting_loss = loss.clone().detach()
     torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
 
+    # loss[0] is a view of loss, so it has ._base not None, which triggers assert error
+    # in core/pipeline_parallel/schedule.py::deallocate_output_tensor, calling .clone()
+    # on loss[0] fixes this
     local_num_tokens = loss[1].clone().detach().to(torch.int)
     return (
-        loss[0] * args.context_parallel_size,
+        loss[0].clone(),
         local_num_tokens,
         {'lm loss': (reporting_loss[0], reporting_loss[1])},
     )
