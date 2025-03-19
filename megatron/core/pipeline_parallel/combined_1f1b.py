@@ -9,7 +9,8 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-from megatron.legacy.model import Float16Module
+#from megatron.legacy.model import Float16Module
+from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
 
@@ -35,12 +36,13 @@ def stream_acquire_context(stream, event):
 class ScheduleNode:
     """base node for fine-grained schedule"""
 
-    def __init__(self, forward_func, stream, event, backward_func=None, name="schedule_node"):
+    def __init__(self, forward_func, stream, event, backward_func=None, free_inputs=False, name="schedule_node"):
         self.name = name
         self.forward_func = forward_func
         self.backward_func = backward_func
         self.stream = stream
         self.event = event
+        self.free_inputs = free_inputs
         self.inputs = None
         self.outputs = None
 
@@ -81,7 +83,14 @@ class ScheduleNode:
 
                 self.output = data
             torch.cuda.nvtx.range_pop()
-            return self.output
+        
+        if self.free_inputs:
+            for input in inputs:
+                input.record_stream(self.stream)
+                input.untyped_storage().resize_(0)        
+
+
+        return self.output
 
     def get_output(self):
         """get the forward output"""
