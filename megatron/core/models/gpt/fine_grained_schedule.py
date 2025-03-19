@@ -345,55 +345,6 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
 
 
-def build_model_chunk_schedule_plan(
-    model,
-    input_ids: Tensor,
-    position_ids: Tensor,
-    attention_mask: Tensor,
-    decoder_input: Tensor = None,
-    labels: Tensor = None,
-    inference_params=None,
-    packed_seq_params=None,
-    extra_block_kwargs=None,
-    runtime_gather_output: Optional[bool] = None,
-):
-
-    comp_stream = get_comp_stream()
-    com_stream = get_com_stream()
-    model_chunk_schedule_plan = ModelChunkSchedulePlan()
-    event = model_chunk_schedule_plan.event
-    state = model_chunk_schedule_plan.state
-    # save for later use
-    state.input_ids = input_ids
-    state.position_ids = position_ids
-    state.attention_mask = attention_mask
-    state.decoder_input = decoder_input
-    state.labels = labels
-    state.inference_params = inference_params
-    state.packed_seq_params = packed_seq_params
-    state.extra_block_kwargs = extra_block_kwargs
-    state.runtime_gather_output = runtime_gather_output
-    state.context = None
-    state.context_mask = None
-    state.attention_bias = None
-
-    # build preprocess
-    model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
-    model_chunk_schedule_plan.pre_process.name = "pre_process"
-    # build for layers
-    for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
-        layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
-        model_chunk_schedule_plan.add_layer(layer_plan)
-    # build post process
-    if model.post_process:
-
-        model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
-        model_chunk_schedule_plan.post_process.name = "post_process"
-
-    return model_chunk_schedule_plan
-
-
 class TransformerLayerState(MoEAlltoAllPerBatchState):
     pass
 
@@ -680,7 +631,7 @@ def build_model_chunk_schedule_plan(
     runtime_gather_output: Optional[bool] = None,
 ):
 
-    comp_stream = get_comp_stream()
+    comp_stream = torch.cuda.current_stream()
     com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     event = model_chunk_schedule_plan.event
