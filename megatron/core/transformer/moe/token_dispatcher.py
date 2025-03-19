@@ -671,7 +671,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                         self.num_local_experts,
                         self.tp_size * self.ep_size,
                         self.capacity,
-                        *hidden_states.size()[1:],
+                        #*hidden_states.size()[1:],
+                        *global_input_tokens.size()[1:],
                     )
                     .transpose(0, 1)
                     .contiguous()
@@ -755,6 +756,268 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         hidden_states = self.combine_preprocess(hidden_states)
         permutated_local_input_tokens = self.combine_all_to_all(hidden_states)
         output = self.combine_postprocess(permutated_local_input_tokens)
+        return output, None
+#=======
+#        # Unpermutation 2: Unsort tokens by local expert.
+#        if self.num_local_experts > 1:
+#            if self.drop_and_pad:
+#                hidden_states = (
+#                    hidden_states.view(
+#                        self.num_local_experts,
+#                        self.tp_size * self.ep_size,
+#                        self.capacity,
+#                        *hidden_states.size()[1:],
+#                    )
+#                    .transpose(0, 1)
+#                    .contiguous()
+#                    .flatten(start_dim=0, end_dim=2)
+#                )
+#            else:
+#                hidden_states = sort_chunks_by_idxs(
+#                    hidden_states,
+#                    self.num_global_tokens_per_local_expert.T.ravel(),
+#                    self.restore_output_by_local_experts,
+#                    fused=self.config.moe_permute_fusion,
+#                )
+#>>>>>>> main
+
+
+class _DispatchManager(ABC):
+    """
+    A manager class to handle dispatch and combine processes for MoE models.
+
+    DispatcherManager handles token dispatching according to the routing_map of format
+    [num_local_tokens, world_size, num_instances]. The routing_map is a 3D tensor where each
+    element indicates whether a token should be sent to a specific rank.
+
+    num_instances is the maximum number of tokens instances dispatched into a target rank, it
+    can be the number of local experts, or the size of sub_group.
+    """
+
+    @abstractmethod
+    def setup_metadata(self, routing_map: torch.Tensor, probs: torch.Tensor):
+        """Set up metadata of routing_map and probs."""
+        pass
+
+    @abstractmethod
+    def dispatch(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Dispatch the hidden_states according to the routing_map."""
+        pass
+
+    @abstractmethod
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Combine the hidden_states after expert processing."""
+        pass
+
+    @abstractmethod
+    def get_dispached_metadata(self) -> torch.Tensor:
+        """Get the metadata of the dispatched hidden_states."""
+        pass
+
+    @abstractmethod
+    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Get the permuted hidden states by instances."""
+        pass
+
+    @abstractmethod
+    def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Get the restored hidden states by instances."""
+        pass
+
+
+class _DeepepManager(_DispatchManager):
+    """
+    A manager class to handle fused all-to-all communication processes for MoE models using
+    DeepEP backend. See https://github.com/deepseek-ai/deepep for more details.
+
+    The workflow of the DeepEP dispatcher is:
+    (1) setup_metadata(): Process routing map and probabilities to prepare dispatch metadata
+    (2) dispatch():
+        - Use fused kernel to permute tokens and perform all-to-all communication in single step
+    (3) get_permuted_hidden_states_by_instances():
+        - Convert routing map and probabilities to multihot format
+        - Permute tokens using fused kernel
+    (4) get_restored_hidden_states_by_instances():
+        - Reverse permutation using fused kernel
+    (5) combine():
+        - Reverse process using fused kernel to unpermute and perform all-to-all in single step
+
+    This implementation uses fused communication kernels (fused_dispatch/fused_combine) that
+    combine permutation and communication operations for improved efficiency compared to
+    separate permute+alltoall steps.
+    """
+
+    def __init__(
+        self,
+        group: torch.distributed.ProcessGroup,
+        router_topk: int,
+        permute_fusion: bool = False,
+        capacity_factor: float = None,
+        num_experts: int = None,
+        num_local_experts: int = None,
+    ):
+        self.group = group
+        self.router_topk = router_topk
+        self.capacity_factor = capacity_factor
+        self.permute_fusion = permute_fusion
+        self.num_experts = num_experts
+        self.num_local_experts = num_local_experts
+        self.router_dtype = router_dtype
+
+        # Metadata
+        self.token_indices = None
+        self.token_probs = None
+        # Handle used for combine operation
+        self.handle = None
+
+        if fused_dispatch is None:
+            raise ImportError(
+                "DeepEP is not installed. Please install DeepEP package from "
+                "https://github.com/deepseek-ai/deepep."
+            )
+
+    def setup_metadata(self, routing_map: torch.Tensor, probs: torch.Tensor):
+        num_tokens = routing_map.shape[0]
+
+        routing_map = routing_map.reshape(num_tokens, self.num_experts)
+        probs = probs.reshape(num_tokens, self.num_experts)
+        # Convert the format of routing map from multihot to indices.
+        self.token_probs, self.token_indices = torch.topk(probs, self.router_topk, dim=-1)
+        # Mask the indices of dropped tokens with -1
+        if self.capacity_factor is not None:
+            mask = self.token_probs == 0
+            self.token_indices = self.token_indices.masked_fill(mask, -1)
+
+    def dispatch(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # DeepEP only supports float32 probs
+        if self.token_probs.dtype != torch.float32:
+            if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
+                print("DeepEP only supports float32 probs, please set --moe-router-dtype=fp32")
+            self.token_probs = self.token_probs.float()  # downcast or upcast
+        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = (
+            fused_dispatch(
+                hidden_states, self.token_indices, self.token_probs, self.num_experts, self.group
+            )
+        )
+        self.handle = handle
+        self.tokens_per_expert = num_tokens_per_expert
+        self.dispatched_indices = dispatched_indices
+        self.dispatched_probs = dispatched_probs
+
+        return hidden_states
+
+    def _indices_to_multihot(self, indices, probs):
+        """
+        Converts a tensor of indices to a multihot vector.
+
+        Args:
+            indices (torch.Tensor): [num_tokens, topk] token indices, where -1 means masked out.
+            probs (torch.Tensor): [num_tokens, topk] token probabilities.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]:
+                - routing_map: Multihot vector.
+                - probs: Multihot probabilities.
+        """
+        batch_size = indices.shape[0]
+        multihot_routing_map = torch.zeros(
+            (batch_size, self.num_local_experts), dtype=torch.long, device=indices.device
+        )
+
+        multihot_probs = torch.zeros(
+            (batch_size, self.num_local_experts), dtype=torch.float, device=indices.device
+        )
+
+        mask = indices != -1
+        valid_indices = indices[mask]
+        row_indices = torch.arange(batch_size, device=indices.device).repeat_interleave(
+            mask.sum(dim=1)
+        )
+        multihot_routing_map[row_indices, valid_indices] = 1
+        multihot_probs[row_indices, valid_indices] = probs[mask]
+        return multihot_routing_map.bool(), multihot_probs
+
+    def get_dispached_metadata(self) -> torch.Tensor:
+        return self.dispatched_indices, self.dispatched_probs
+
+    def get_number_of_tokens_per_expert(self) -> torch.Tensor:
+        """
+        Get the number of tokens per expert.
+        """
+        return self.tokens_per_expert
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states, event = fused_combine(hidden_states, self.group, self.handle)
+        # Release the handle after combine operation
+        self.handle = None
+        return hidden_states
+
+    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
+            self.dispatched_indices, self.dispatched_probs
+        )
+        self.hidden_shape_before_permute = hidden_states.shape
+        hidden_states, self.reversed_mapping_for_combine = permute(
+            hidden_states,
+            self.dispatched_routing_map,
+            num_out_tokens=sum(self.tokens_per_expert),
+            fused=self.permute_fusion,
+        )
+        return hidden_states
+
+    def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.dispatched_probs.dtype == torch.float32, "DeepEP only supports float32 probs"
+        if self.router_dtype == "fp64":
+            self.dispatched_probs = self.dispatched_probs.to(torch.float64)
+        hidden_states = unpermute(
+            hidden_states,
+            self.reversed_mapping_for_combine,
+            restore_shape=self.hidden_shape_before_permute,
+            routing_map=self.dispatched_routing_map,
+            probs=self.dispatched_probs,
+            fused=self.permute_fusion,
+        )
+        return hidden_states
+
+
+class MoEFlexTokenDispatcher(MoETokenDispatcher):
+    """
+    Flexible token dispatcher for MoE models with Efficient-A2A communication kernels.
+    """
+
+    def __init__(
+        self, num_local_experts: int, local_expert_indices: List[int], config: TransformerConfig
+    ):
+        super().__init__(config)
+
+        self.num_local_experts = num_local_experts
+        self.local_expert_indices = local_expert_indices
+        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        assert (
+            self.config.moe_enable_deepep
+        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert (
+            self.config.moe_pad_expert_input_to_capacity is False
+        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+        self._comm_manager = _DeepepManager(
+            group=self.tp_ep_group,
+            router_topk=self.tp_size * self.config.moe_router_topk,
+            permute_fusion=self.config.moe_permute_fusion,
+            capacity_factor=self.config.moe_expert_capacity_factor,
+            num_experts=self.tp_size * self.config.num_moe_experts,
+            num_local_experts=self.num_local_experts,
+            router_dtype=self.config.moe_router_dtype,
+        )
+
+    def set_shared_experts(self, shared_experts):
+        raise NotImplementedError(
+            "Shared expert overlap is not supported in Flex Token Dispatcher."
+        )
+
+        # Add shared experts output
+        if self.shared_experts is not None:
+            shared_expert_output = self.shared_experts.get_output()
+            output += shared_expert_output
         return output, None
 
 
