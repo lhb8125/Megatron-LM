@@ -511,10 +511,6 @@ def run_model_a2a_overlap_with_capture_all2all(model, input_tensors, microbatche
     dgrads.append(grads)
     torch.cuda.synchronize()
 
-    # record wgrad
-    for name, param in model.named_parameters():
-        capture[name] = param.grad  
-    
     # record activation grad
     if torch.distributed.get_rank() == 0:
         print("debug:", len(dgrads[0]))
@@ -527,6 +523,10 @@ def run_model_a2a_overlap_with_capture_all2all(model, input_tensors, microbatche
         "@outputs": combine_outputs,
         "@dgrads": dgrads
     }
+    
+    # record wgrad
+    for name, param in model.named_parameters():
+        capture[name] = param.grad  
 
     return capture
 
