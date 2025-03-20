@@ -946,6 +946,8 @@ class _DeepepManager(_DispatchManager):
         )
         return hidden_states
 
+class MoEFlexPerBatchState:
+    pass
 
 class MoEFlexTokenDispatcher(MoETokenDispatcher):
     """
@@ -975,6 +977,16 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             num_local_experts=self.num_local_experts,
             router_dtype=self.config.moe_router_dtype,
         )
+
+    def collect_per_batch_state(self, state: MoEFlexPerBatchState):
+        pass
+
+    def apply_per_batch_state(self, state: MoEFlexPerBatchState):
+        pass
+
+    @contextmanager
+    def per_batch_state_context(self, state: MoEFlexPerBatchState):
+        yield
 
     def set_shared_experts(self, shared_experts):
         raise NotImplementedError(
