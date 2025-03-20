@@ -10,6 +10,7 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
     ScheduleNode,
     get_com_stream,
     get_comp_stream,
+    make_viewless,
 )
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
@@ -140,13 +141,30 @@ class PostProcessNode(ScheduleNode):
 
 class TransformerLayerNode(ScheduleNode):
 
-    def __init__(self, chunk_state, common_state, layer, stream, event):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+    def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
+        super().__init__(
+            weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl), free_inputs = free_inputs,
+        )
         # layer state
         self.common_state = common_state
         # model chunk state
         self.chunk_state = chunk_state
         self.layer = layer
+        self.detached = tuple()
+        self.before_detached = tuple()
+
+    def detach(self, t):
+        detached = make_viewless(t).detach()
+        detached.requires_grad = t.requires_grad
+        self.before_detached = self.before_detached + (t,)
+        self.detached = self.detached + (detached,)
+        return detached
+
+    def backward_impl(self, outputs, output_grad):
+        detached_grad = tuple([e.grad for e in self.detached])
+        self.default_backward_func(outputs + self.before_detached, output_grad + detached_grad)
+        self.before_detached = None
+        self.detached = None
 
 
 class MoeAttnNode(TransformerLayerNode):
@@ -165,7 +183,13 @@ class MoeAttnNode(TransformerLayerNode):
 
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs = self.layer._submodule_attention_router_compound_forward(
+            (
+                hidden_states,
+                pre_mlp_layernorm_output,
+                tokens_per_expert,
+                permutated_local_input_tokens,
+                probs,
+            ) = self.layer._submodule_attention_router_compound_forward(
                 hidden_states,
                 attention_mask=attention_mask,
                 inference_params=inference_params,
@@ -176,62 +200,78 @@ class MoeAttnNode(TransformerLayerNode):
                 packed_seq_params=packed_seq_params,
                 sequence_len_offset=sequence_len_offset,
             )
-        self.common_state.probs = probs
         self.common_state.tokens_per_expert = tokens_per_expert
-        return hidden_states, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
+
+        # detached here
+        self.common_state.probs = self.detach(probs)
+        self.common_state.residual = self.detach(hidden_states)
+        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
+
+        return permutated_local_input_tokens
 
 
 class MoeDispatchNode(TransformerLayerNode):
 
-    def forward_impl(
-        self, residual, pre_mlp_layernorm_output, permutated_local_input_tokens, probs
-    ):
-
-        self.common_state.probs = probs
+    def forward_impl(self, permutated_local_input_tokens):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             inputs = permutated_local_input_tokens
             dispatched_input = token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
             # release tensor not used by backward
-            inputs.untyped_storage().resize_(0)
-        return residual, pre_mlp_layernorm_output, dispatched_input, probs
+            # inputs.untyped_storage().resize_(0)
+        return dispatched_input
 
 
 class MoeMlPNode(TransformerLayerNode):
-    def forward_impl(self, residual, pre_mlp_layernorm_output, dispatched_input, probs):
-        self.common_state.probs = probs
+    def forward_impl(self, dispatched_input):
+        pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             inputs = dispatched_input
-            expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output)
+            expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
+                dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output
+            )
             assert mlp_bias is None
-            inputs.untyped_storage().resize_(0)
+            # inputs.untyped_storage().resize_(0)
             assert mlp_bias is None
-        return residual, expert_output, shared_expert_output, probs
+
+        # pre_mlp_layernorm_output  used
+        self.common_state.pre_mlp_layernorm_output = None
+        # detach shared_expert_output
+        self.common_state.shared_output = self.detach(shared_expert_output)
+        return expert_output
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
+    def forward_impl(self, permutated_local_input_tokens):
         token_dispatcher = self.layer.mlp.token_dispatcher
-        self.common_state.probs = probs
         with token_dispatcher.per_batch_state_context(self.common_state):
             # release tensor not used by backward
             inputs = permutated_local_input_tokens
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 permutated_local_input_tokens
             )
-            inputs.untyped_storage().resize_(0)
-        return residual, permutated_local_input_tokens, shared_output, probs
+            # inputs.untyped_storage().resize_(0)
+
+        return permutated_local_input_tokens
 
 
 class MoeCombinePostProcessNode(TransformerLayerNode):
-    def forward_impl(self, residual, permutated_local_input_tokens, shared_output, probs):
+    def forward_impl(self, permutated_local_input_tokens):
+
         token_dispatcher = self.layer.mlp.token_dispatcher
-        self.common_state.probs = probs
+        residual = self.common_state.residual
+        shared_output = self.common_state.shared_output
         with token_dispatcher.per_batch_state_context(self.common_state):
-            output = self.layer._submodule_post_combine_forward(permutated_local_input_tokens, shared_output, None, residual)
+            output = self.layer._submodule_post_combine_forward(
+                permutated_local_input_tokens, shared_output, None, residual
+            )
         # release tensor not used by backward
         shared_output.untyped_storage().resize_(0)
+        # shared_output\residual\prob used
+        self.common_state.shared_output = None
+        self.common_state.residual = None
+        self.common_state.probs = None
         return output
 
 
@@ -294,64 +334,15 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     common_state = TransformerLayerState()
     attn = MoeAttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
-    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event)
+    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event, True)
     dispatch.name = "dispatch"
-    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event)
+    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event, True)
     mlp.name = "mlp"
-    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event)
+    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
     combine.name = "combine"
     post_combine = MoeCombinePostProcessNode(chunk_state, common_state, layer, comp_stream, event)
     post_combine.name = "post_combine"
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
-
-
-def build_model_chunk_schedule_plan(
-    model,
-    input_ids: Tensor,
-    position_ids: Tensor,
-    attention_mask: Tensor,
-    decoder_input: Tensor = None,
-    labels: Tensor = None,
-    inference_params=None,
-    packed_seq_params=None,
-    extra_block_kwargs=None,
-    runtime_gather_output: Optional[bool] = None,
-):
-
-    comp_stream = get_comp_stream()
-    com_stream = get_com_stream()
-    model_chunk_schedule_plan = ModelChunkSchedulePlan()
-    event = model_chunk_schedule_plan.event
-    state = model_chunk_schedule_plan.state
-    # save for later use
-    state.input_ids = input_ids
-    state.position_ids = position_ids
-    state.attention_mask = attention_mask
-    state.decoder_input = decoder_input
-    state.labels = labels
-    state.inference_params = inference_params
-    state.packed_seq_params = packed_seq_params
-    state.extra_block_kwargs = extra_block_kwargs
-    state.runtime_gather_output = runtime_gather_output
-    state.context = None
-    state.context_mask = None
-    state.attention_bias = None
-
-    # build preprocess
-    model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
-    model_chunk_schedule_plan.pre_process.name = "pre_process"
-    # build for layers
-    for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
-        layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
-        model_chunk_schedule_plan.add_layer(layer_plan)
-    # build post process
-    if model.post_process:
-
-        model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
-        model_chunk_schedule_plan.post_process.name = "post_process"
-
-    return model_chunk_schedule_plan
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -467,6 +458,7 @@ def schedule_layer_1f1b(
         # attn backward from last iter
         assert b_grad is None
         b_grad = pre_backward()
+        del pre_backward
 
     if b_layer is not None:
         with b_context:
@@ -582,6 +574,7 @@ def schedule_chunk_1f1b(
 
     # tail backward
     grad = layer_pre_backward()
+    del layer_pre_backward
     with b_context:
         for i in range(overlaped_layers, b_num_layers):
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
@@ -595,6 +588,7 @@ def schedule_chunk_1f1b(
 
     # tail forward
     f_input = layer_pre_forward()
+    del layer_pre_forward
     with f_context:
         for i in range(overlaped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
@@ -639,7 +633,7 @@ def build_model_chunk_schedule_plan(
     runtime_gather_output: Optional[bool] = None,
 ):
 
-    comp_stream = get_comp_stream()
+    comp_stream = torch.cuda.current_stream()
     com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     event = model_chunk_schedule_plan.event

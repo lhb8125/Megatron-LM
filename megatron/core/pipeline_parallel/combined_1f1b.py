@@ -1,5 +1,6 @@
 import contextlib
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import Any, List, Tuple, Union
 
 import torch
@@ -9,6 +10,7 @@ from torch.autograd.variable import Variable
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
 from megatron.legacy.model import Float16Module
+# from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
 
@@ -22,57 +24,38 @@ def make_viewless(e):
     return e
 
 
-class StreamRelease(torch.autograd.Function):
-    """event forward capture and backward sync"""
-
-    @staticmethod
-    def forward(ctx: Any, event, stream, *inputs) -> Union[Tensor, Tuple[Tensor]]:
-        """event forward capture stream"""
-        ctx.event = event
-        ctx.stream = stream
-        ctx.event.record(stream)
-        return inputs if len(inputs) > 1 else inputs[0]
-
-    @staticmethod
-    def backward(ctx: Any, *grad_outputs) -> Union[Tensor, Tuple[Tensor]]:
-        """event backward sync stream"""
-        event = ctx.event
-        stream = ctx.stream
-        event.wait(stream)
-        return (None, None) + grad_outputs
-
-
-class StreamAcquire(torch.autograd.Function):
-    """event forward sync and backward capture"""
-
-    @staticmethod
-    def forward(ctx: Any, event, stream, *inputs: Tensor) -> Union[Tensor, Tuple[Tensor]]:
-        """event forward sync stream"""
-        ctx.event = event
-        ctx.stream = stream
-        ctx.event.wait(stream)
-        # multiple in, multiple out
-        return inputs if len(inputs) > 1 else inputs[0]
-
-    @staticmethod
-    def backward(ctx: Any, *grad_outputs) -> Union[Tensor, Tuple[Tensor]]:
-        """event backward capture stream"""
-        event = ctx.event
-        stream = ctx.stream
+@contextmanager
+def stream_acquire_context(stream, event):
+    event.wait(stream)
+    try:
+        yield
+    finally:
         event.record(stream)
-        return (None, None) + grad_outputs
 
 
 class ScheduleNode:
     """base node for fine-grained schedule"""
 
-    def __init__(self, forward_func, stream, event, name="schedule_node"):
+    def __init__(self, forward_func, stream, event, backward_func=None, free_inputs=False, name="schedule_node"):
         self.name = name
         self.forward_func = forward_func
+        self.backward_func = backward_func
         self.stream = stream
         self.event = event
+        self.free_inputs = free_inputs
         self.inputs = None
         self.outputs = None
+
+    def default_backward_func(self, outputs, output_grad):
+        Variable._execution_engine.run_backward(
+            tensors=outputs,
+            grad_tensors=output_grad,
+            keep_graph=False,
+            create_graph=False,
+            inputs=tuple(),
+            allow_unreachable=True,
+            accumulate_grad=True,
+        )
 
     def forward(self, inputs=()):
         """schedule node forward"""
@@ -82,37 +65,31 @@ class ScheduleNode:
         return self._forward(*inputs)
 
     def _forward(self, *inputs):
-        torch.cuda.nvtx.range_push(f"{self.name} forward")
-        self.inputs = [make_viewless(e.detach()) if e is not None else None for e in inputs]
-        for i, input in enumerate(self.inputs):
-            if input is not None:
-                input.requires_grad = inputs[i].requires_grad
-        if len(inputs):
-            data = StreamAcquire.apply(self.event, self.stream, *self.inputs)
-        else:
-            # empty input, alse need wait stream
-            data = inputs
-            self.event.wait(self.stream)
-        # pack args to tuple
-        if not isinstance(data, tuple):
-            data = (data,)
+        with stream_acquire_context(self.stream, self.event):
+            torch.cuda.nvtx.range_push(f"{self.name} forward")
+            with torch.cuda.stream(self.stream):
+                self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
+                for i, input in enumerate(self.inputs):
+                    if input is not None:
+                        input.requires_grad = inputs[i].requires_grad
 
-        with torch.cuda.stream(self.stream):
-            data = self.forward_func(*data)
+                data = tuple(self.inputs)
+                data = self.forward_func(*data)
 
-        # pack args to tuple
-        if not isinstance(data, tuple):
-            data = (data,)
+                if not isinstance(data, tuple):
+                    data = make_viewless(data)
+                else:
+                    data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
 
-        data = StreamRelease.apply(self.event, self.stream, *data)
+                self.output = data
+            torch.cuda.nvtx.range_pop()
+        
+        if self.free_inputs:
+            for input in inputs:
+                input.record_stream(self.stream)
+                input.untyped_storage().resize_(0)        
 
-        if not isinstance(data, tuple):
-            data = make_viewless(data)
-        else:
-            data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
 
-        self.output = data
-        torch.cuda.nvtx.range_pop()
         return self.output
 
     def get_output(self):
@@ -126,35 +103,25 @@ class ScheduleNode:
         return self._backward(*output_grad)
 
     def _backward(self, *output_grad):
+        with stream_acquire_context(self.stream, self.event):
+            torch.cuda.nvtx.range_push(f"{self.name} backward")
+            with torch.cuda.stream(self.stream):
+                outputs = self.output
+                if not isinstance(outputs, tuple):
+                    outputs = (outputs,)
+                assert len(outputs) == len(
+                    output_grad
+                ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
+                if self.backward_func is not None:
+                    self.backward_func(outputs, output_grad)
+                else:
+                    self.default_backward_func(outputs, output_grad)
+            torch.cuda.nvtx.range_pop()
 
-        torch.cuda.nvtx.range_push(f"{self.name} backward")
-        """
-        # not multiple input
-        if len(output_grad) == 1:
-            output_grad = output_grad[0]
-        """
-        outputs = self.output
-        if not isinstance(outputs, tuple):
-            outputs = (outputs,)
-        assert len(outputs) == len(
-            output_grad
-        ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
-        with torch.cuda.stream(self.stream):
-            # torch.autograd.backward(self.output, grad_tensors=output_grad)
-            Variable._execution_engine.run_backward(
-                tensors=outputs,
-                grad_tensors=output_grad,
-                keep_graph=False,
-                create_graph=False,
-                inputs=tuple(),
-                allow_unreachable=True,
-                accumulate_grad=True,
-            )
-        if not len(self.inputs):
-            # empty input, alse need record stream
-            self.event.record(self.stream)
+        # output_grad maybe from another stream
+        for g in output_grad:
+            g.record_stream(self.stream)
 
-        torch.cuda.nvtx.range_pop()
         return self.get_grad()
 
     def get_grad(self):

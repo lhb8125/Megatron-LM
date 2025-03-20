@@ -288,11 +288,13 @@ def forward_step(
                 output_tensor, num_tokens, loss_reduced = outputs
                 if not config.calculate_per_token_loss:
                     output_tensor /= num_tokens
+                    output_tensor *= parallel_state.get_context_parallel_world_size()
                     output_tensor /= num_microbatches
             else:
                 # preserve legacy loss averaging behavior (ie, over the number of microbatches)
                 assert len(outputs) == 2
                 output_tensor, loss_reduced = outputs
+                output_tensor *= parallel_state.get_context_parallel_world_size()
                 output_tensor /= num_microbatches
             forward_data_store.append(loss_reduced)
         else:
@@ -364,10 +366,16 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, c
     if output_tensor_grad[0] is None and config.grad_scale_func is not None:
         output_tensor[0] = config.grad_scale_func(output_tensor[0])
 
-    if config.deallocate_pipeline_outputs:
-        custom_backward(output_tensor[0], output_tensor_grad[0])
-    else:
-        torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
+    # In multi-modal models like VLM, some batches may not have images.
+    # When no image is present, the vision encoder (as a separate pipeline stage)
+    # will not participate in the computation.
+    # This results in a tensor that does not require gradients.
+    # In such cases, we intentionally skip the backward pass while preserving zero gradients.
+    if output_tensor[0].requires_grad:
+        if config.deallocate_pipeline_outputs:
+            custom_backward(output_tensor[0], output_tensor_grad[0])
+        else:
+            torch.autograd.backward(output_tensor[0], grad_tensors=output_tensor_grad[0])
 
     # Collect the grad of the input_tensor.
     input_tensor_grad = [None]
@@ -578,10 +586,10 @@ def forward_backward_pipelining_with_interleaving(
     assert isinstance(
         data_iterator, list
     ), "interleaved pipeline parallelism expected each model chunk to have a data iterator"
-
     config = get_model_config(model[0])
     set_streams()
-    forward_step_func = wrap_forward_func(config, forward_step_func)
+    if not forward_only:
+        forward_step_func = wrap_forward_func(config, forward_step_func)
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
 
@@ -646,6 +654,8 @@ def forward_backward_pipelining_with_interleaving(
     forward_data_store = []
     if not forward_only:
         output_tensor_grads = [[] for _ in range(len(model))]
+    else:
+        output_tensor_grads = None
 
     pipeline_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     pipeline_parallel_rank = parallel_state.get_pipeline_model_parallel_rank()
@@ -947,6 +957,7 @@ def forward_backward_pipelining_with_interleaving(
             enable_grad_sync()
             synchronized_model_chunks.add(model_chunk_id)
 
+        # pylint: disable=E0606
         if parallel_state.is_pipeline_last_stage():
             if len(output_tensor_grads[model_chunk_id]) == 0:
                 output_tensor_grads[model_chunk_id].append(None)
@@ -1146,7 +1157,7 @@ def forward_backward_pipelining_with_interleaving(
         wrap forward_helper、backward_helper、combined_forward_backward_helper in a unified way
         """
 
-        if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a":
+        if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a" and not forward_only:
             assert (
                 checkpoint_activations_microbatch is None
             ), "checkpoint_activations_microbatch not supported when combined_1f1b is true"
