@@ -1,10 +1,10 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from typing import List, Optional, Tuple
 
 import torch
-from contextlib import contextmanager
 
 from megatron.core.parallel_state import (
     get_expert_model_parallel_group,
@@ -270,7 +270,6 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         return output_total, output_bias_total
 
 
-
 # decouple perbatch state from MoEAlltoAllTokenDispatcher
 class MoEAlltoAllPerBatchState:
     def __init__(self, build_event=False):
@@ -376,7 +375,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         state.hidden_shape = getattr(self, "hidden_shape", None)
         state.probs = getattr(self, "probs", None)
         state.routing_map = getattr(self, "routing_map", None)
-        state.reversed_local_input_permutation_mapping = getattr(self, "reversed_local_input_permutation_mapping", None)
+        state.reversed_local_input_permutation_mapping = getattr(
+            self, "reversed_local_input_permutation_mapping", None
+        )
         state.hidden_shape_before_permute = getattr(self, "hidden_shape_before_permute", None)
         state.cuda_sync_point = getattr(self, "cuda_sync_point", None)
 
@@ -391,10 +392,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.hidden_shape = state.hidden_shape
         self.probs = state.probs
         self.routing_map = state.routing_map
-        self.reversed_local_input_permutation_mapping = state.reversed_local_input_permutation_mapping
+        self.reversed_local_input_permutation_mapping = (
+            state.reversed_local_input_permutation_mapping
+        )
         self.hidden_shape_before_permute = state.hidden_shape_before_permute
         self.cuda_sync_point = state.cuda_sync_point
-
 
     @contextmanager
     def per_batch_state_context(self, state: MoEAlltoAllPerBatchState):
@@ -479,7 +481,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 num_local_tokens_per_expert.reshape(self.ep_size, self.num_local_experts)
                 .sum(axis=1)
                 .to(torch.device("cpu"), non_blocking=True)
-                #.numpy()
+                # .numpy()
             )
             # Gather the global distribution of tokens across ranks.
             # num_global_tokens_per_expert represents the number of tokens sent to each
@@ -502,17 +504,15 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # self.output_splits represents the number of tokens received by the current rank
             # from other EP rank.
             self.output_splits = (
-                num_global_tokens_per_rank[self.tp_rank]
-                .to(torch.device("cpu"), non_blocking=True)
-                #.numpy()
+                num_global_tokens_per_rank[self.tp_rank].to(torch.device("cpu"), non_blocking=True)
+                # .numpy()
             )
             # [tp_size, ep_size] -> [tp_size]
             # self.output_splits_tp represents the number of tokens received by the current
             # rank from other TP rank.
             self.output_splits_tp = (
-                num_global_tokens_per_rank.sum(axis=1)
-                .to(torch.device("cpu"), non_blocking=True)
-                #.numpy()
+                num_global_tokens_per_rank.sum(axis=1).to(torch.device("cpu"), non_blocking=True)
+                # .numpy()
             )
             # [tp_size, ep_size, num_local_experts] -> [num_local_experts]
             num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(dim=(0, 1)).to(
@@ -541,8 +541,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.preprocess_event = torch.cuda.current_stream().record_event()
         return num_tokens_per_local_expert
 
-
-    def meta_prepare(self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor):
+    def meta_prepare(
+        self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
+    ):
         self.hidden_shape = hidden_states.shape
         self.probs = probs
         self.routing_map = routing_map
@@ -559,10 +560,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                 self.input_splits = self.input_splits.numpy()
             if self.output_splits is not None:
                 self.output_splits = self.output_splits.numpy()
-            if  self.output_splits_tp is not None:
+            if self.output_splits_tp is not None:
                 self.output_splits_tp = self.output_splits_tp.numpy()
-                
-
 
     def dispatch_preprocess(self, hidden_states: torch.Tensor, routing_map: torch.Tensor):
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
@@ -581,7 +580,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         )
         return permutated_local_input_tokens
 
-
     def dispatch_all_to_all(self, permutated_local_input_tokens):
         # Perform expert parallel AlltoAll communication
         self.sync_meta_dtoh("before_ep_alltoall")
@@ -589,8 +587,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
         )
         return global_input_tokens
-
-
 
     def dispatch_postprocess(self, global_input_tokens):
         if self.shared_experts is not None:
@@ -629,9 +625,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.sync_meta_dtoh("before_finish")
         return global_input_tokens
 
-
-
-
     def token_permutation(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -660,7 +653,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         global_input_tokens = self.dispatch_all_to_all(permutated_local_input_tokens)
         global_input_tokens = self.dispatch_postprocess(global_input_tokens)
         return global_input_tokens, tokens_per_expert
-
 
     def combine_preprocess(self, hidden_states):
         # Unpermutation 2: Unsort tokens by local expert.
@@ -693,8 +685,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             hidden_states = reduce_scatter_to_sequence_parallel_region(
                 hidden_states, group=self.tp_group, input_split_sizes=input_split_sizes
             )
-        return  hidden_states
-
+        return hidden_states
 
     def combine_all_to_all(self, hidden_states):
         # Perform expert parallel AlltoAll communication
@@ -703,7 +694,6 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.ep_group, hidden_states, self.input_splits, self.output_splits
         )
         return permutated_local_input_tokens
-
 
     def combine_postprocess(self, permutated_local_input_tokens):
         if self.shared_experts is not None:

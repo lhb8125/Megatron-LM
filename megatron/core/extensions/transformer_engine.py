@@ -123,6 +123,7 @@ class TELinear(te.pytorch.Linear):
         skip_weight_param_allocation: bool,
         tp_comm_buffer_name: Optional[str] = None,
         is_expert: bool = False,
+        split_bw: bool = False,
     ):
         self.config = config
 
@@ -138,6 +139,7 @@ class TELinear(te.pytorch.Linear):
             raise ValueError(
                 'Transformer Engine linear layers do not support skip_weight_param_allocation'
             )
+        self.split_bw = split_bw
 
         extra_kwargs = _get_extra_te_kwargs(config)
 
@@ -228,6 +230,7 @@ class TELinear(te.pytorch.Linear):
             bias=bias,
             return_bias=self.te_return_bias,
             parallel_mode=te_parallel_mode,
+            split_bw=self.split_bw,
             **extra_kwargs,
         )
 
@@ -269,6 +272,10 @@ class TELinear(te.pytorch.Linear):
         state_dict = self.state_dict(prefix='', keep_vars=True)
         return make_sharded_tensors_for_checkpoint(state_dict, prefix, None, sharded_offsets)
 
+    def backward_dw(self):
+        if self.split_bw:
+            super().wgrad_comp()
+
 
 class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
     """
@@ -289,6 +296,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         is_expert: bool,
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         self.config = config
 
@@ -312,6 +320,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         self.is_first_microbatch = True
         self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
         extra_kwargs = _get_extra_te_kwargs(config)
+        self.split_bw = split_bw
 
         # Only Transformer-Engine version >= 0.11.0 supports `RMSNorm`
         if is_te_min_version("0.11.0"):
@@ -376,6 +385,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             parallel_mode="column",
             return_layernorm_output=False,
             zero_centered_gamma=self.config.layernorm_zero_centered_gamma,
+            split_bw=self.split_bw,
             **extra_kwargs,
         )
 
@@ -434,6 +444,10 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
+    def backward_dw(self):
+        if self.split_bw:
+            super().wgrad_comp()
+
 
 class TEColumnParallelLinear(TELinear):
     """
@@ -454,6 +468,7 @@ class TEColumnParallelLinear(TELinear):
         is_expert: bool,
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         if gather_output:
             raise ValueError('Transformer Engine linear layers do not support gather_output = True')
@@ -473,6 +488,7 @@ class TEColumnParallelLinear(TELinear):
             is_expert=is_expert,
             skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
+            split_bw=split_bw,
         )
 
         if config.use_cpu_initialization:
@@ -537,6 +553,7 @@ class TERowParallelLinear(TELinear):
         skip_bias_add: bool,
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         if not input_is_parallel:
             raise ValueError(
@@ -558,6 +575,7 @@ class TERowParallelLinear(TELinear):
             skip_weight_param_allocation=False,  # We don't currently use this for row parallel layers # pylint: disable=line-too-long
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
+            split_bw=split_bw,
         )
         if config.use_cpu_initialization:
             if is_expert:
@@ -847,6 +865,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool = False,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
             self.config = config
 
@@ -858,6 +877,8 @@ if is_te_min_version("1.9.0.dev0"):
             self.te_return_bias = skip_bias_add and bias
             self.is_first_microbatch = True
             self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
+
+            self.split_bw = split_bw
 
             extra_kwargs = _get_extra_te_kwargs(config)
             extra_kwargs["ub_name"] = tp_comm_buffer_name
@@ -900,6 +921,7 @@ if is_te_min_version("1.9.0.dev0"):
                 bias=bias,
                 return_bias=self.te_return_bias,
                 parallel_mode=parallel_mode,
+                split_bw=self.split_bw,
                 **extra_kwargs,
             )
 
@@ -1070,6 +1092,10 @@ if is_te_min_version("1.9.0.dev0"):
                 sh_ten.replica_id = (*replica_id[:2], edp_replica_id)
             return sharded_state_dict
 
+        def backward_dw(self):
+            if self.split_bw:
+                super().wgrad_comp()
+
     class TEColumnParallelGroupedLinear(TEGroupedLinear):
         """
         Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
@@ -1088,6 +1114,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
 
             super().__init__(
@@ -1101,6 +1128,7 @@ if is_te_min_version("1.9.0.dev0"):
                 skip_bias_add=skip_bias_add,
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
+                split_bw=split_bw,
             )
 
         def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
@@ -1133,6 +1161,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
 
             super().__init__(
@@ -1146,6 +1175,7 @@ if is_te_min_version("1.9.0.dev0"):
                 skip_bias_add=skip_bias_add,
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
+                split_bw=split_bw,
             )
 
         def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):

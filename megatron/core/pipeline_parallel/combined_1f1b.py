@@ -9,10 +9,11 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-from megatron.legacy.model import Float16Module
+
 # from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
+from megatron.legacy.model import Float16Module
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -36,7 +37,15 @@ def stream_acquire_context(stream, event):
 class ScheduleNode:
     """base node for fine-grained schedule"""
 
-    def __init__(self, forward_func, stream, event, backward_func=None, free_inputs=False, name="schedule_node"):
+    def __init__(
+        self,
+        forward_func,
+        stream,
+        event,
+        backward_func=None,
+        free_inputs=False,
+        name="schedule_node",
+    ):
         self.name = name
         self.forward_func = forward_func
         self.backward_func = backward_func
@@ -83,12 +92,11 @@ class ScheduleNode:
 
                 self.output = data
             torch.cuda.nvtx.range_pop()
-        
+
         if self.free_inputs:
             for input in inputs:
                 input.record_stream(self.stream)
-                input.untyped_storage().resize_(0)        
-
+                input.untyped_storage().resize_(0)
 
         return self.output
 
@@ -421,7 +429,10 @@ def forward_backward_step(
             if parallel_state.is_pipeline_last_stage():
                 if not collect_non_loss_data:
                     loss_node = ScheduleNode(
-                        loss_func, torch.cuda.current_stream(), f_schedule_plan.event, "loss_func"
+                        loss_func,
+                        torch.cuda.current_stream(),
+                        f_schedule_plan.event,
+                        name="loss_func",
                     )
                     loss_func = loss_node.forward
                     outputs = loss_func(output_tensor)
