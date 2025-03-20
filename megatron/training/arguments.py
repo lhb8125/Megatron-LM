@@ -2411,6 +2411,8 @@ def _add_moe_args(parser):
                        choices=['ep_a2a', 'golden'],
                        default='golden',
                        help='Options are "ep_a2a" and "golden".')
+    group.add_argument('--split-bw', action='store_true',
+                       help='Split dgrad and wgrad for batch-level overlapping')                       
 
     return parser
 

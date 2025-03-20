@@ -1,10 +1,10 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 """Utilities for transformer layers."""
+from dataclasses import dataclass
 from functools import lru_cache
 from operator import itemgetter
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple, Union, Callable
-from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
 
@@ -195,16 +195,19 @@ def sharded_state_dict_default(
         )
     return module_sharded_sd
 
+
 @dataclass
 class SubmoduleCallables:
     """
     Holds references to forward, dgrad, and dw (weight-grad) callables
     for a particular submodule.
     """
+
     forward: Optional[Callable] = None
     backward: Optional[Callable] = None
     dgrad: Optional[Callable] = None
     dw: Optional[Callable] = None
+
 
 @dataclass
 class TransformerLayerSubmoduleCallables:
@@ -212,6 +215,7 @@ class TransformerLayerSubmoduleCallables:
     Collects the SubmoduleMethods for each of the submodules:
     'attention', 'dispatch', 'mlp', 'combine'.
     """
+
     attention: SubmoduleCallables
     dispatch: SubmoduleCallables
     mlp: SubmoduleCallables

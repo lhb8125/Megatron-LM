@@ -143,7 +143,11 @@ class TransformerLayerNode(ScheduleNode):
 
     def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
         super().__init__(
-            weak_method(self.forward_impl), stream, event, weak_method(self.backward_impl), free_inputs = free_inputs,
+            weak_method(self.forward_impl),
+            stream,
+            event,
+            weak_method(self.backward_impl),
+            free_inputs=free_inputs,
         )
         # layer state
         self.common_state = common_state
@@ -209,6 +213,10 @@ class MoeAttnNode(TransformerLayerNode):
 
         return permutated_local_input_tokens
 
+    def dw(self, grad_output):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_attention_router_compound_dw()
+
 
 class MoeDispatchNode(TransformerLayerNode):
 
@@ -240,6 +248,10 @@ class MoeMlPNode(TransformerLayerNode):
         # detach shared_expert_output
         self.common_state.shared_output = self.detach(shared_expert_output)
         return expert_output
+
+    def dw(self, grad_output):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_mlp_dw()
 
 
 class MoeCombineNode(TransformerLayerNode):
@@ -448,6 +460,7 @@ def schedule_layer_1f1b(
     b_grad=None,
     pre_forward=None,
     pre_backward=None,
+    pre_backward_dw=None,
     f_context=None,
     b_context=None,
 ):
@@ -465,6 +478,10 @@ def schedule_layer_1f1b(
             b_grad = b_layer.post_combine.backward(b_grad)
             b_grad = b_layer.combine.backward(b_grad)
 
+    if pre_backward_dw is not None:
+        pre_backward_dw()
+        del pre_backward_dw
+
     if pre_forward is not None:
         assert f_input is None
         # post combine from last iter
@@ -479,8 +496,8 @@ def schedule_layer_1f1b(
     if b_layer is not None:
         with b_context:
             grad = b_layer.mlp.backward(b_grad)
-            # b_layer.mlp.dw(b_grad)
             b_grad = b_layer.dispatch.backward(grad)
+            b_layer.mlp.dw(b_grad)
 
     if f_layer is not None:
         with f_context:
@@ -497,13 +514,17 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             with b_context:
                 grad = b_layer.attn.backward(b_grad)
-                # b_layer.attn.dw(b_grad)
                 return grad
 
+    def next_iter_pre_backward_dw():
+        if b_layer is not None:
+            with b_context:
+                b_layer.attn.dw(b_grad)
+
     if f_layer and b_layer:
-        return next_iter_pre_forward, next_iter_pre_backward
+        return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw
     else:
-        return next_iter_pre_forward(), next_iter_pre_backward()
+        return next_iter_pre_forward(), next_iter_pre_backward(), next_iter_pre_backward_dw()
 
 
 def schedule_chunk_1f1b(
@@ -553,6 +574,9 @@ def schedule_chunk_1f1b(
                     tmp = b_schedule_plan.post_process.backward(grad)
         return tmp
 
+    def layer_pre_backward_dw():
+        pass
+
     f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
     b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
     overlaped_layers = min(f_num_layers, b_num_layers)
@@ -561,16 +585,16 @@ def schedule_chunk_1f1b(
         f_layer = f_schedule_plan.get_layer(i)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
         torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
-        layer_pre_forward, layer_pre_backward = schedule_layer_1f1b(
+        layer_pre_forward, layer_pre_backward, layer_pre_backward_dw = schedule_layer_1f1b(
             f_layer,
             b_layer,
             pre_forward=layer_pre_forward,
             pre_backward=layer_pre_backward,
+            pre_backward_dw=layer_pre_backward_dw,
             f_context=f_context,
             b_context=b_context,
         )
         torch.cuda.nvtx.range_pop()
-
 
     # tail backward
     grad = layer_pre_backward()
@@ -579,12 +603,11 @@ def schedule_chunk_1f1b(
         for i in range(overlaped_layers, b_num_layers):
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
             torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-            tmp, grad = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+            tmp, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
             torch.cuda.nvtx.range_pop()
 
         if b_schedule_plan is not None:
             b_schedule_plan.pre_process.backward(grad)
-
 
     # tail forward
     f_input = layer_pre_forward()
@@ -593,7 +616,7 @@ def schedule_chunk_1f1b(
         for i in range(overlaped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
             torch.cuda.nvtx.range_push(f"layer_{i}f")
-            f_input, tmp = schedule_layer_1f1b(f_layer, None, f_input=f_input)
+            f_input, tmp, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()
 
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
@@ -611,6 +634,9 @@ def schedule_chunk_1f1b(
             b_schedule_plan.wait_current_stream()
             post_backward(grad)
 
+    # The last wgrad of attention
+    layer_pre_backward_dw()
+    del layer_pre_backward_dw
 
     if f_schedule_plan:
         f_schedule_plan.wait_current_stream()

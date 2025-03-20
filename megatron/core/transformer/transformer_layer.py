@@ -3,8 +3,8 @@
 import warnings
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Union
 from functools import partial
+from typing import Dict, Optional, Union
 
 import torch
 import torch.distributed
@@ -20,9 +20,11 @@ from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.utils import TransformerLayerSubmoduleCallables, SubmoduleCallables
+from megatron.core.transformer.utils import SubmoduleCallables, TransformerLayerSubmoduleCallables
+
 # from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState, per_batch_state_context
 from megatron.core.utils import deprecate_inference_params, make_viewless_tensor
+
 
 def get_transformer_layer_offset(config: TransformerConfig):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -470,7 +472,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output, context
 
-    def _callable_wrapper(self, is_forward, func, stream, event, *args, skip_detach=False, **kwargs):
+    def _callable_wrapper(
+        self, is_forward, func, stream, event, *args, skip_detach=False, **kwargs
+    ):
         """
         Wraps a function call so that it waits for a given CUDA event before
         proceeding and then runs the function on a specified CUDA stream.
@@ -478,7 +482,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         torch.cuda.nvtx.range_push(func.__name__)
         event.wait(stream)
         with torch.cuda.stream(stream):
-            outputs= func(*args, **kwargs)
+            outputs = func(*args, **kwargs)
         event.record(stream)
         if skip_detach:
             torch.cuda.nvtx.range_pop()
@@ -496,9 +500,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 detached_output_tensors.append(tensor.detach())
         torch.cuda.nvtx.range_pop()
         return outputs, detached_output_tensors
-            
+
     def _submodule_attention_forward(
-        self, 
+        self,
         hidden_states,
         attention_mask=None,
         inference_params=None,
@@ -537,17 +541,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return hidden_states
 
     def _submodule_attention_router_compound_forward(
-            self, 
-            hidden_states,
-            attention_mask=None,
-            inference_params=None,
-            rotary_pos_emb=None,
-            rotary_pos_cos=None,
-            rotary_pos_sin=None,
-            attention_bias=None,
-            packed_seq_params=None,
-            sequence_len_offset=None,
-        ):
+        self,
+        hidden_states,
+        attention_mask=None,
+        inference_params=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+    ):
         """
         Performs a combined forward pass that includes self-attention and MLP routing logic.
         """
@@ -560,21 +564,34 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             rotary_pos_sin,
             attention_bias,
             packed_seq_params,
-            sequence_len_offset)
+            sequence_len_offset,
+        )
 
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
         probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
-        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(pre_mlp_layernorm_output, probs, routing_map)
-        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(pre_mlp_layernorm_output, routing_map)
+        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(
+            pre_mlp_layernorm_output, probs, routing_map
+        )
+        permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
+            pre_mlp_layernorm_output, routing_map
+        )
 
-        outputs = [hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs]
+        outputs = [
+            hidden_states,
+            pre_mlp_layernorm_output,
+            tokens_per_expert,
+            permutated_local_input_tokens,
+            probs,
+        ]
         return tuple(outputs)
-    
+
     def _submodule_dispatch_forward(self, permutated_local_input_tokens):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
+        global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(
+            permutated_local_input_tokens
+        )
         return [global_input_tokens]
 
     def _submodule_dense_forward(self, hidden_states):
@@ -590,7 +607,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         )
 
         return output
-    
+
     def _submodule_moe_forward(self, dispatched_input, tokens_per_expert, hidden_states):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
@@ -606,8 +623,10 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
     def _submodule_combine_forward(self, hidden_states):
         return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
-    
-    def _submodule_post_combine_forward(self, expert_output, shared_expert_output, mlp_bias, residual):
+
+    def _submodule_post_combine_forward(
+        self, expert_output, shared_expert_output, mlp_bias, residual
+    ):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
@@ -626,11 +645,21 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return output
 
-    def _submodule_attention_backward(self, hidden_states, pre_mlp_layernorm_output, detached_inputs):
+    def _submodule_attention_backward(
+        self, hidden_states, pre_mlp_layernorm_output, detached_inputs
+    ):
         pre_mlp_layernorm_output.backward(detached_inputs[1].grad)
         hidden_states.backward(detached_inputs[0].grad)
 
-    def _submodule_attention_router_compound_backward(self, hidden_states, pre_mlp_layernorm_output, tokens_per_expert, permutated_local_input_tokens, probs, detached_inputs):
+    def _submodule_attention_router_compound_backward(
+        self,
+        hidden_states,
+        pre_mlp_layernorm_output,
+        tokens_per_expert,
+        permutated_local_input_tokens,
+        probs,
+        detached_inputs,
+    ):
         permutated_local_input_tokens.backward(detached_inputs[3].grad)
         probs.backward(detached_inputs[4].grad)
         # tokens_per_expert.backward(detached_inputs[2].grad)
@@ -643,15 +672,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
     def _submodule_dense_backward(self, output, detached_inputs):
         output.backward(detached_inputs[0].grad)
 
-    def _submodule_moe_backward(self, expert_output, shared_expert_output, mlp_bias, detached_inputs):
+    def _submodule_moe_backward(
+        self, expert_output, shared_expert_output, mlp_bias, detached_inputs
+    ):
         expert_output.backward(detached_inputs[0].grad)
         shared_expert_output.backward(detached_inputs[1].grad)
         if mlp_bias is not None:
             mlp_bias.backward(detached_inputs[2].grad)
 
-    def _submodule_combine_backward(self,hidden_states, detached_inputs):
+    def _submodule_combine_backward(self, hidden_states, detached_inputs):
         hidden_states.backward(detached_inputs[0].grad)
-    
+
     def _submodule_post_combine_backward(self, output, output_grad):
         output.backward(output_grad)
 
@@ -659,10 +690,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         raise NotImplementedError("Not implemented")
 
     def _submodule_attention_router_compound_dw(self):
-        # self.self_attention.wgrad_comp()
-        pass
+        self.self_attention.backward_dw()
         # raise NotImplementedError("Not implemented")
-    
+
     def _submodule_dispatch_dgrad(self):
         raise NotImplementedError("Not implemented")
 
@@ -670,7 +700,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         raise NotImplementedError("Not implemented")
 
     def _submodule_mlp_dw(self):
-        self.mlp.wgrad_comp()
+        self.mlp.backward_dw()
         # raise NotImplementedError("Not implemented")
 
     def _submodule_combine_dgrad(self):
@@ -687,28 +717,49 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         Returns a dictionary of submodule callables for the transformer layer.
         """
         from megatron.core.transformer.moe.moe_layer import MoELayer
+
         def get_func_with_default(func, default_func):
             if isinstance(self.mlp, MoELayer):
                 return func
             return default_func
 
-        attention_func = get_func_with_default(self._submodule_attention_router_compound_forward, self._submodule_attention_forward)
-        attention_backward_func = get_func_with_default(self._submodule_attention_router_compound_backward, self._submodule_attention_backward)
-        dispatch_func = get_func_with_default(self._submodule_dispatch_forward, self._submodule_identity_forward)
-        dispatch_backward_func = get_func_with_default(self._submodule_dispatch_backward, self._submodule_identity_backward)
+        attention_func = get_func_with_default(
+            self._submodule_attention_router_compound_forward, self._submodule_attention_forward
+        )
+        attention_backward_func = get_func_with_default(
+            self._submodule_attention_router_compound_backward, self._submodule_attention_backward
+        )
+        dispatch_func = get_func_with_default(
+            self._submodule_dispatch_forward, self._submodule_identity_forward
+        )
+        dispatch_backward_func = get_func_with_default(
+            self._submodule_dispatch_backward, self._submodule_identity_backward
+        )
         mlp_func = get_func_with_default(self._submodule_moe_forward, self._submodule_dense_forward)
-        mlp_backward_func = get_func_with_default(self._submodule_moe_backward, self._submodule_dense_backward)
-        combine_func = get_func_with_default(self._submodule_combine_forward, self._submodule_identity_forward)
-        combine_backward_func = get_func_with_default(self._submodule_combine_backward, self._submodule_identity_backward)
-        post_combine_func = get_func_with_default(self._submodule_post_combine_forward, self._submodule_identity_forward)
-        post_combine_backward_func = get_func_with_default(self._submodule_post_combine_backward, self._submodule_identity_backward)
+        mlp_backward_func = get_func_with_default(
+            self._submodule_moe_backward, self._submodule_dense_backward
+        )
+        combine_func = get_func_with_default(
+            self._submodule_combine_forward, self._submodule_identity_forward
+        )
+        combine_backward_func = get_func_with_default(
+            self._submodule_combine_backward, self._submodule_identity_backward
+        )
+        post_combine_func = get_func_with_default(
+            self._submodule_post_combine_forward, self._submodule_identity_forward
+        )
+        post_combine_backward_func = get_func_with_default(
+            self._submodule_post_combine_backward, self._submodule_identity_backward
+        )
 
         callables = TransformerLayerSubmoduleCallables(
             attention=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, attention_func, skip_detach=True),
                 backward=partial(self._callable_wrapper, False, attention_backward_func),
                 # dgrad=partial(self._callable_wrapper, False,self._submodule_attention_router_compound_dgrad),
-                dw=partial(self._callable_wrapper, False, self._submodule_attention_router_compound_dw),
+                dw=partial(
+                    self._callable_wrapper, False, self._submodule_attention_router_compound_dw
+                ),
             ),
             dispatch=SubmoduleCallables(
                 forward=partial(self._callable_wrapper, True, dispatch_func),

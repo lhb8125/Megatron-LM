@@ -80,6 +80,7 @@ class MLP(MegatronModule):
             skip_bias_add=True,
             is_expert=is_expert,
             tp_comm_buffer_name='fc1',
+            split_bw=self.config.split_bw,
         )
 
         self.activation_func = self.config.activation_func
@@ -95,6 +96,7 @@ class MLP(MegatronModule):
             skip_bias_add=True,
             is_expert=is_expert,
             tp_comm_buffer_name='fc2',
+            split_bw=self.config.split_bw,
         )
 
     def forward(self, hidden_states):
@@ -152,8 +154,9 @@ class MLP(MegatronModule):
             sharded_state_dict.update(sub_sd)
         return sharded_state_dict
 
-    def wgrad_comp(self):
-        pass
+    def backward_dw(self):
+        self.linear_fc2.backward_dw()
+        self.linear_fc1.backward_dw()
 
 
 # pylint: disable=missing-function-docstring
