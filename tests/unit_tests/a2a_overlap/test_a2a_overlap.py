@@ -110,7 +110,7 @@ def run_model_ref_with_capture(model, input_tensors, iterations):
         input_tensor = input_tensors[i].clone().detach().requires_grad_(True)
         output = model(input_tensor)[0]
         output_tensors.append(output)
-        output.backward(torch.ones_like(output))
+        output.backward(torch.ones_like(output)*0.01)
         dgrads.append(input_tensor.grad)
     capture = {
         "@outputs": output_tensors,
@@ -211,7 +211,7 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
         grads = callables.combine.backward(
             comm_stream, events[prev_idx],
             combine_outputs[prev_idx], 
-            tuple([torch.ones_like(combine_outputs[prev_idx][0])]),
+            tuple([torch.ones_like(combine_outputs[prev_idx][0])*0.01]),
             combine_detached_inputs[prev_idx],
         )   
         output_grad, shared_expert_output_grad, mlp_bias_grad, _, residual_grad = grads
@@ -283,7 +283,7 @@ def run_model_a2a_overlap_with_capture_deepep(model, input_tensors, microbatches
     grads = callables.combine.backward(
         comm_stream, events[prev_idx],
         combine_outputs[microbatches-1], 
-        tuple([torch.ones_like(combine_outputs[microbatches-1][0])]),
+        tuple([torch.ones_like(combine_outputs[microbatches-1][0])*0.01]),
         combine_detached_inputs[microbatches-1],
     )   
     output_grad, shared_expert_output_grad, mlp_bias_grad, _, residual_grad = grads
@@ -406,7 +406,7 @@ def run_model_a2a_overlap_with_capture_all2all(model, input_tensors, microbatche
         grads = callables.combine.backward(
             comm_stream, events[prev_idx],
             combine_outputs[prev_idx], 
-            tuple([torch.ones_like(combine_outputs[prev_idx][0])]),
+            tuple([torch.ones_like(combine_outputs[prev_idx][0])*0.01]),
             combine_detached_inputs[prev_idx],
         )
         output_grad, shared_expert_output_grad, mlp_bias_grad, probs_grad, residual_grad = grads
@@ -478,7 +478,7 @@ def run_model_a2a_overlap_with_capture_all2all(model, input_tensors, microbatche
     grads = callables.combine.backward(
         comm_stream, events[prev_idx],
         combine_outputs[microbatches-1], 
-        tuple([torch.ones_like(combine_outputs[microbatches-1][0])]),
+        tuple([torch.ones_like(combine_outputs[microbatches-1][0])*0.01]),
         combine_detached_inputs[microbatches-1],
     )   
     output_grad, shared_expert_output_grad, mlp_bias_grad, probs_grad, residual_grad = grads
@@ -512,8 +512,6 @@ def run_model_a2a_overlap_with_capture_all2all(model, input_tensors, microbatche
     torch.cuda.synchronize()
 
     # record activation grad
-    if torch.distributed.get_rank() == 0:
-        print("debug:", len(dgrads[0]))
     dgrads = list(map(lambda x: x[0], dgrads))
 
     # record forward outputs
@@ -583,15 +581,14 @@ def build_transformer_layer(args):
         args.num_experts,
         args.moe_grouped_gemm,
         multi_latent_attention=args.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=True,
     )
     transformer_layer = build_module(model_spec, config=config, layer_number=1)
     return transformer_layer
 
 def test_1f1b_overlap(args):
     microbatches = 16
-    model = build_transformer_layer(args)
-    # model = build_gpt_model(args).decoder.layers[0]
+    # model = build_transformer_layer(args)
+    model = build_gpt_model(args).decoder.layers[0]
     params = reset_model(model)
     input_tensors = [build_data(args) for _ in range(microbatches)]
 
@@ -603,6 +600,8 @@ def test_1f1b_overlap(args):
     capture_a2a_overlap = run_model_a2a_overlap_with_capture(model, input_tensors, microbatches)
     if torch.distributed.get_rank() == 0:
         torch.cuda.cudart().cudaProfilerStop()
+    # if torch.distributed.get_rank() == 0:
+    #     print(capture_ref)
     for i in range(8):
         if torch.distributed.get_rank() == i:
             print(f"########## rank {i} result ##########")
@@ -620,9 +619,6 @@ torch.manual_seed(0)
 random.seed(0)
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
-debug_name="mlp.experts.weight1"
-debug_rank=0
 
 if __name__ == "__main__":
     main()
