@@ -622,7 +622,7 @@ def schedule_chunk_1f1b(
         if b_schedule_plan is not None:
             b_schedule_plan.pre_process.backward(grad)
 
-    # pp grad send / receive, overlapped with attn dw of cur miro-batch and forward attn of next miro-batch
+    # pp grad send / receive, overlapped with attn dw of cur micro-batch and forward attn of next micro-batch
     if b_schedule_plan is not None and post_backward is not None:
         with b_context:
             b_schedule_plan.wait_current_stream()
