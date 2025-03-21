@@ -213,7 +213,7 @@ class MoeAttnNode(TransformerLayerNode):
 
         return permutated_local_input_tokens
 
-    def dw(self, grad_output):
+    def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
             self.layer._submodule_attention_router_compound_dw()
 
@@ -249,7 +249,7 @@ class MoeMlPNode(TransformerLayerNode):
         self.common_state.shared_output = self.detach(shared_expert_output)
         return expert_output
 
-    def dw(self, grad_output):
+    def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
             self.layer._submodule_mlp_dw()
 
@@ -497,7 +497,7 @@ def schedule_layer_1f1b(
         with b_context:
             grad = b_layer.mlp.backward(b_grad)
             b_grad = b_layer.dispatch.backward(grad)
-            b_layer.mlp.dw(b_grad)
+            b_layer.mlp.dw()
 
     if f_layer is not None:
         with f_context:
@@ -519,7 +519,7 @@ def schedule_layer_1f1b(
     def next_iter_pre_backward_dw():
         if b_layer is not None:
             with b_context:
-                b_layer.attn.dw(b_grad)
+                b_layer.attn.dw()
 
     if f_layer and b_layer:
         return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw

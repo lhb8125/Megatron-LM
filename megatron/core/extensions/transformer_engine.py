@@ -139,9 +139,17 @@ class TELinear(te.pytorch.Linear):
             raise ValueError(
                 'Transformer Engine linear layers do not support skip_weight_param_allocation'
             )
-        self.split_bw = split_bw
+
 
         extra_kwargs = _get_extra_te_kwargs(config)
+        
+        self.split_bw = False
+        if split_bw:
+            if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d"):
+                extra_kwargs["split_bw"] = split_bw
+                self.split_bw = True
+            else:
+                raise RuntimeError("Only TE with version 2.2.0.dev0+f3a009d supports split_bw now.")
 
         if is_te_min_version("0.8.0"):
             if self.config.tp_comm_overlap:
@@ -230,7 +238,6 @@ class TELinear(te.pytorch.Linear):
             bias=bias,
             return_bias=self.te_return_bias,
             parallel_mode=te_parallel_mode,
-            split_bw=self.split_bw,
             **extra_kwargs,
         )
 
@@ -320,7 +327,14 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         self.is_first_microbatch = True
         self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
         extra_kwargs = _get_extra_te_kwargs(config)
-        self.split_bw = split_bw
+
+        self.split_bw = False
+        if split_bw:
+            if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d"):
+                extra_kwargs["split_bw"] = split_bw
+                self.split_bw = True
+            else:
+                raise RuntimeError("Only TE with version 2.2.0.dev0+f3a009d supports split_bw now.")
 
         # Only Transformer-Engine version >= 0.11.0 supports `RMSNorm`
         if is_te_min_version("0.11.0"):
@@ -385,7 +399,6 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             parallel_mode="column",
             return_layernorm_output=False,
             zero_centered_gamma=self.config.layernorm_zero_centered_gamma,
-            split_bw=self.split_bw,
             **extra_kwargs,
         )
 
@@ -878,9 +891,16 @@ if is_te_min_version("1.9.0.dev0"):
             self.is_first_microbatch = True
             self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
 
-            self.split_bw = split_bw
-
             extra_kwargs = _get_extra_te_kwargs(config)
+
+            self.split_bw = False
+            if split_bw:
+                if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d"):
+                    extra_kwargs["split_bw"] = split_bw
+                    self.split_bw = True
+                else:
+                    raise RuntimeError("Only TE with version 2.2.0.dev0+f3a009d supports split_bw now.")
+
             extra_kwargs["ub_name"] = tp_comm_buffer_name
 
             self.expert_parallel = self.config.expert_model_parallel_size > 1
@@ -921,7 +941,6 @@ if is_te_min_version("1.9.0.dev0"):
                 bias=bias,
                 return_bias=self.te_return_bias,
                 parallel_mode=parallel_mode,
-                split_bw=self.split_bw,
                 **extra_kwargs,
             )
 
