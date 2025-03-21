@@ -646,6 +646,7 @@ class TEGroupedMLP(MegatronModule):
             skip_bias_add=True,
             is_expert=True,
             tp_comm_buffer_name='fc1',
+            split_bw=self.config.split_bw,
         )
 
         self.activation_func = self.config.activation_func
@@ -661,6 +662,7 @@ class TEGroupedMLP(MegatronModule):
             skip_bias_add=True,
             is_expert=True,
             tp_comm_buffer_name='fc2',
+            split_bw=self.config.split_bw,
         )
 
         if self.config.fp8:
@@ -770,6 +772,10 @@ class TEGroupedMLP(MegatronModule):
             replace_prefix_for_sharding(sub_sd, f'{name}.', f'{prefix}experts.{name}.')
             sharded_state_dict.update({f"{prefix}{k}": v for k, v in sub_sd.items()})
         return sharded_state_dict
+
+    def backward_dw(self):
+        self.linear_fc2.backward_dw()
+        self.linear_fc1.backward_dw()
 
 
 class SequentialMLP(MegatronModule):

@@ -149,3 +149,7 @@ class MoELayer(BaseMoELayer):
             output, mlp_bias = custom_forward(hidden_states)
 
         return output, mlp_bias
+
+    def backward_dw(self):
+        self.experts.backward_dw()
+        self.shared_experts.backward_dw()
