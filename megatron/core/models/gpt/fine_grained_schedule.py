@@ -166,9 +166,12 @@ class TransformerLayerNode(ScheduleNode):
 
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
-        self.default_backward_func(outputs + self.before_detached, output_grad + detached_grad)
+        grads = output_grad + detached_grad
+        self.default_backward_func(outputs + self.before_detached, grads)
         self.before_detached = None
         self.detached = None
+        # return grads for record stream
+        return grads
 
 
 class MoeAttnNode(TransformerLayerNode):
@@ -235,19 +238,15 @@ class MoeMlPNode(TransformerLayerNode):
         pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            inputs = dispatched_input
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
                 dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output
             )
             assert mlp_bias is None
-            # inputs.untyped_storage().resize_(0)
             assert mlp_bias is None
 
         # pre_mlp_layernorm_output  used
         self.common_state.pre_mlp_layernorm_output = None
-        # detach shared_expert_output
-        self.common_state.shared_output = self.detach(shared_expert_output)
-        return expert_output
+        return expert_output, shared_expert_output
 
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
@@ -255,33 +254,20 @@ class MoeMlPNode(TransformerLayerNode):
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, permutated_local_input_tokens):
-        token_dispatcher = self.layer.mlp.token_dispatcher
-        with token_dispatcher.per_batch_state_context(self.common_state):
-            # release tensor not used by backward
-            inputs = permutated_local_input_tokens
-            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
-                permutated_local_input_tokens
-            )
-            # inputs.untyped_storage().resize_(0)
-
-        return permutated_local_input_tokens
-
-
-class MoeCombinePostProcessNode(TransformerLayerNode):
-    def forward_impl(self, permutated_local_input_tokens):
-
-        token_dispatcher = self.layer.mlp.token_dispatcher
+    def forward_impl(self, expert_output, shared_expert_output):
+        # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
         residual = self.common_state.residual
-        shared_output = self.common_state.shared_output
+        token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            output = self.layer._submodule_post_combine_forward(
-                permutated_local_input_tokens, shared_output, None, residual
+            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
+                expert_output
             )
-        # release tensor not used by backward
-        shared_output.untyped_storage().resize_(0)
-        # shared_output\residual\prob used
-        self.common_state.shared_output = None
+            output = self.layer._submodule_post_combine_forward(
+                permutated_local_input_tokens, shared_expert_output, None, residual
+            )
+        cur_stream = torch.cuda.current_stream()
+        self.common_state.residual.record_stream(cur_stream)
+        self.common_state.probs.record_stream(cur_stream)
         self.common_state.residual = None
         self.common_state.probs = None
         return output
@@ -336,8 +322,7 @@ def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
     dispatch = FakeScheduleNode()
     mlp = DenseMlpNode(chunk_state, common_state, layer, comp_stream, event)
     combine = FakeScheduleNode()
-    post_combine = FakeScheduleNode()
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
 
 def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
@@ -352,9 +337,7 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     mlp.name = "mlp"
     combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
     combine.name = "combine"
-    post_combine = MoeCombinePostProcessNode(chunk_state, common_state, layer, comp_stream, event)
-    post_combine.name = "post_combine"
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine, post_combine)
+    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -367,12 +350,11 @@ class ModelChunkSate:
 
 class TransformerLayerSchedulePlan:
 
-    def __init__(self, attn, dispatch, mlp, combine, post_combine):
+    def __init__(self, attn, dispatch, mlp, combine):
         self.attn = attn
         self.dispatch = dispatch
         self.mlp = mlp
         self.combine = combine
-        self.post_combine = post_combine
 
 
 class ModelChunkSchedulePlan(AbstractSchedulePlan):
@@ -467,47 +449,53 @@ def schedule_layer_1f1b(
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
+
+    if pre_forward is not None:
+        assert f_input is None
+        # combine from last iter
+        f_input = pre_forward()
+        del pre_forward
+
+
     if pre_backward is not None:
         # attn backward from last iter
         assert b_grad is None
         b_grad = pre_backward()
         del pre_backward
 
-    if b_layer is not None:
-        with b_context:
-            b_grad = b_layer.post_combine.backward(b_grad)
-            b_grad = b_layer.combine.backward(b_grad)
-
     if pre_backward_dw is not None:
         pre_backward_dw()
         del pre_backward_dw
 
-    if pre_forward is not None:
-        assert f_input is None
-        # post combine from last iter
-        f_input = pre_forward()
-        del pre_forward
-
     if f_layer is not None:
         with f_context:
             f_input = f_layer.attn.forward(f_input)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.combine.backward(b_grad)
+
+    if f_layer is not None:
+        with f_context:
             f_input = f_layer.dispatch.forward(f_input)
 
     if b_layer is not None:
         with b_context:
-            grad = b_layer.mlp.backward(b_grad)
-            b_grad = b_layer.dispatch.backward(grad)
+            b_grad = b_layer.mlp.backward(b_grad)
             b_layer.mlp.dw()
 
     if f_layer is not None:
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
-            f_input = f_layer.combine.forward(f_input)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.dispatch.backward(b_grad)
 
     def next_iter_pre_forward():
         if f_layer is not None:
             with f_context:
-                output = f_layer.post_combine.forward(f_input)
+                output = f_layer.combine.forward(f_input)
                 return output
 
     def next_iter_pre_backward():
@@ -520,6 +508,7 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             with b_context:
                 b_layer.attn.dw()
+
 
     if f_layer and b_layer:
         return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw
@@ -541,20 +530,15 @@ def schedule_chunk_1f1b(
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
+
     if f_schedule_plan:
-        # TODO(liuzhenhai93): defered until first layer_pre_forward when integrated with deepep
-        # output send/receive sync
+        # pp output send/receive sync
         if pre_forward is not None:
             with f_context:
                 pre_forward()
         f_schedule_plan.record_current_stream()
 
     if b_schedule_plan:
-        # TODO(liuzhenhai93): defered until first layer_pre_backward  when integrated with deepep
-        # grad send/receive sync
-        if pre_backward is not None:
-            with b_context:
-                pre_backward()
         b_schedule_plan.record_current_stream()
 
     f_input = None
@@ -572,6 +556,14 @@ def schedule_chunk_1f1b(
             if b_schedule_plan.post_process is not None:
                 with b_context:
                     tmp = b_schedule_plan.post_process.backward(grad)
+
+            if pre_backward is not None:
+                # pp grad send receive sync here, safe for now, maybe not safe in the future
+                with torch.cuda.stream(get_com_stream()):
+                    b_schedule_plan.wait_current_stream()
+                    pre_backward()
+                    b_schedule_plan.record_current_stream()
+
         return tmp
 
     def layer_pre_backward_dw():
@@ -596,19 +588,6 @@ def schedule_chunk_1f1b(
         )
         torch.cuda.nvtx.range_pop()
 
-    # tail backward
-    grad = layer_pre_backward()
-    del layer_pre_backward
-    with b_context:
-        for i in range(overlaped_layers, b_num_layers):
-            b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-            torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-            tmp, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
-            torch.cuda.nvtx.range_pop()
-
-        if b_schedule_plan is not None:
-            b_schedule_plan.pre_process.backward(grad)
-
     # tail forward
     f_input = layer_pre_forward()
     del layer_pre_forward
@@ -622,13 +601,27 @@ def schedule_chunk_1f1b(
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
             f_input = f_schedule_plan.post_process.forward(f_input)
 
-    # output pp send receive
+    # output pp send receive, overlapped with attn backward
     if f_schedule_plan is not None and post_forward is not None:
         with f_context:
             f_schedule_plan.wait_current_stream()
             post_forward(f_input)
 
-    # grad send receive
+
+    # tail backward
+    grad = layer_pre_backward()
+    del layer_pre_backward
+    with b_context:
+        for i in range(overlaped_layers, b_num_layers):
+            b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+            torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
+            tmp, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+            torch.cuda.nvtx.range_pop()
+
+        if b_schedule_plan is not None:
+            b_schedule_plan.pre_process.backward(grad)
+
+    # pp grad send / receive, overlapped with attn dw of cur miro-batch and forward attn of next miro-batch
     if b_schedule_plan is not None and post_backward is not None:
         with b_context:
             b_schedule_plan.wait_current_stream()
