@@ -28,6 +28,10 @@ We are working on enabling A2A overlap in the interleaved 1F1B pipeline parallel
 ```
 To enable dW&dX split, you need to pull and compile a specific version of TransformerEngine: https://github.com/lhb8125/TransformerEngine/tree/hongbinl/split_wgrad
 - Known issues
+  - Not support DeepEP yet.
+- Contributors
+  - NVIDIA: [Hongbin](https://github.com/lhb8125), [Pingtian](https://github.com/Wohox), Shunkang, Youngeun, Sangkug, [Zijie](https://github.com/yanring)
+  - Xiaohongshu: [Zhenhai](https://github.com/liuzhenhai93)
 - References
   - [Wechat Post]: [基于 1F1B 的 MoE A2A 通信计算 Overlap](https://mp.weixin.qq.com/s/vCy6ga5EA2dzvFoL8p6QjA)
 
