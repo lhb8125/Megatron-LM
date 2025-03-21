@@ -561,7 +561,8 @@ def schedule_chunk_1f1b(
                 # pp grad send receive sync here, safe for now, maybe not safe in the future
                 with torch.cuda.stream(get_com_stream()):
                     b_schedule_plan.wait_current_stream()
-                    pre_backward()
+                    with b_context:
+                        pre_backward()
                     b_schedule_plan.record_current_stream()
 
         return tmp
