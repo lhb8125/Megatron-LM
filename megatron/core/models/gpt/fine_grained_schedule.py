@@ -463,17 +463,19 @@ def schedule_layer_1f1b(
         b_grad = pre_backward()
         del pre_backward
 
-    if pre_backward_dw is not None:
-        pre_backward_dw()
-        del pre_backward_dw
-
-    if f_layer is not None:
-        with f_context:
-            f_input = f_layer.attn.forward(f_input)
 
     if b_layer is not None:
         with b_context:
             b_grad = b_layer.combine.backward(b_grad)
+
+    if pre_backward_dw is not None:
+        pre_backward_dw()
+        del pre_backward_dw
+
+
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.attn.forward(f_input)
 
     if f_layer is not None:
         with f_context:
@@ -482,15 +484,15 @@ def schedule_layer_1f1b(
     if b_layer is not None:
         with b_context:
             b_grad = b_layer.mlp.backward(b_grad)
+            b_grad = b_layer.dispatch.backward(b_grad)
             b_layer.mlp.dw()
+
 
     if f_layer is not None:
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
 
-    if b_layer is not None:
-        with b_context:
-            b_grad = b_layer.dispatch.backward(b_grad)
+
 
     def next_iter_pre_forward():
         if f_layer is not None:
