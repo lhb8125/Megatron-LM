@@ -10,10 +10,10 @@ from torch.autograd.variable import Variable
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
 
-# from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-from megatron.legacy.model import Float16Module
+
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -65,6 +65,7 @@ class ScheduleNode:
             allow_unreachable=True,
             accumulate_grad=True,
         )
+        return output_grad
 
     def forward(self, inputs=()):
         """schedule node forward"""
@@ -121,9 +122,9 @@ class ScheduleNode:
                     output_grad
                 ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
                 if self.backward_func is not None:
-                    self.backward_func(outputs, output_grad)
+                    output_grad = self.backward_func(outputs, output_grad)
                 else:
-                    self.default_backward_func(outputs, output_grad)
+                    output_grad = self.default_backward_func(outputs, output_grad)
             torch.cuda.nvtx.range_pop()
 
         # output_grad maybe from another stream
@@ -492,8 +493,17 @@ def forward_backward_step(
 
     return output_tensor, num_tokens, input_tensor_grad
 
+def get_default_cls_for_unwrap():
+    cls = (DistributedDataParallel, Float16Module)
+    try:
+        # legacy should not be used in core, but for backward compatibility, we support it here
+        from megatron.legacy.model import Float16Module as LegacyFloat16Module
+        cls = cls + (LegacyFloat16Module,)
+    except:
+        pass
+    return cls
 
-def unwrap_model(model, module_instances=(DistributedDataParallel, Float16Module)):
+def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     """unwrap_model DistributedDataParallel and Float16Module wrapped model"""
     return_list = True
     if not isinstance(model, list):

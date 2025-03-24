@@ -239,7 +239,10 @@ class GroupedMLP(MegatronModule):
             fc2_output = h
 
         return fc2_output, None
-
+    
+    def backward_dw(self):
+        pass
+        
     @expert_dist_ckpt_decorator
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """
