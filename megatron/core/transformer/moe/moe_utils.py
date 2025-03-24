@@ -8,6 +8,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.transformer.moe.fused_aux_loss import fused_calculate_aux_loss
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -33,6 +34,7 @@ def switch_load_balancing_loss_func(
     topk: int,
     moe_aux_loss_coeff: float,
     sequence_partition_group=None,
+    fused_aux_loss: bool = False,
 ):
     """Calculate the auxiliary loss for load balancing.
     Refer to the Switch Transformer paper (https://arxiv.org/abs/2101.03961) for details.
@@ -47,6 +49,7 @@ def switch_load_balancing_loss_func(
         sequence_partition_group (optional): The parallel group over which the sequence is
                                              partitioned. If None, no partitioning is applied.
                                              Defaults to None.
+        fused_aux_loss (bool, optional): Whether to use the fused implementation. Defaults to False.
 
     Returns:
         torch.Tensor: The auxiliary loss for load balancing.
@@ -62,6 +65,11 @@ def switch_load_balancing_loss_func(
         num_sub_sequence = torch.distributed.get_world_size(sequence_partition_group)
         torch.distributed.all_reduce(tokens_per_expert, group=sequence_partition_group)
 
+    if fused_aux_loss:
+        return fused_calculate_aux_loss(
+            probs, tokens_per_expert, topk, moe_aux_loss_coeff, num_sub_sequence
+        )
+
     num_tokens = probs.shape[0] * num_sub_sequence
     num_experts = probs.shape[1]
 
@@ -69,10 +77,11 @@ def switch_load_balancing_loss_func(
     # (tokens_per_expert/(num_tokens*topk))) * num_experts * moe_aux_loss_coeff.
     # This can be simplified to fuse the division and multiplication operations.
     aggregated_probs_per_expert = probs.sum(dim=0)
-    aux_loss = torch.sum(aggregated_probs_per_expert * tokens_per_expert) * (
-        num_experts * moe_aux_loss_coeff / (num_tokens * num_tokens * topk)
+    aux_loss_for_logging = torch.sum(aggregated_probs_per_expert * tokens_per_expert) * (
+        num_experts / (num_tokens * num_tokens * topk)
     )
-    return aux_loss
+    aux_loss = aux_loss_for_logging * moe_aux_loss_coeff
+    return aux_loss, aux_loss_for_logging
 
 
 def sequence_load_balancing_loss_func(
@@ -122,10 +131,10 @@ def sequence_load_balancing_loss_func(
         )
 
     cost_coeff = routing_map.sum(dim=0, dtype=torch.float).div_(seq_length * topk / num_experts)
-    seq_aux_loss = (cost_coeff * probs_for_aux_loss.mean(dim=0)).sum(dim=1).mean()
-    seq_aux_loss *= moe_aux_loss_coeff
+    seq_aux_loss_for_logging = (cost_coeff * probs_for_aux_loss.mean(dim=0)).sum(dim=1).mean()
+    seq_aux_loss = seq_aux_loss_for_logging * moe_aux_loss_coeff
 
-    return seq_aux_loss
+    return seq_aux_loss, seq_aux_loss_for_logging
 
 
 def z_loss_func(logits, z_loss_coeff):
@@ -160,7 +169,9 @@ def sinkhorn(cost: torch.Tensor, tol: float = 0.0001):
     return d1 * cost * d0.unsqueeze(1)
 
 
-def get_capacity(num_tokens: int, num_experts: int, capacity_factor: float, min_capacity=None):
+def get_capacity(
+    num_tokens: int, num_experts: int, capacity_factor: float, min_capacity=None
+) -> int:
     """
     Calculate the capacity of each expert.
 
@@ -171,7 +182,7 @@ def get_capacity(num_tokens: int, num_experts: int, capacity_factor: float, min_
         min_capacity (int, optional): Minimum capacity. Defaults to None.
 
     Returns:
-        Tensor: Capacity of each expert.
+        Int: Capacity of each expert.
     """
     capacity = math.ceil((num_tokens / num_experts) * capacity_factor)
     if min_capacity is not None and capacity < min_capacity:

@@ -8,6 +8,7 @@ import torch
 
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.moe.fused_router import fused_topk_softmax_with_capacity
 from megatron.core.transformer.moe.moe_utils import (
     ModelCommProcessGroups,
     MoEAuxLossAutoScaler,
@@ -215,20 +216,43 @@ class TopKRouter(Router):
             probs (torch.Tensor): The probabilities of token to experts assignment.
             routing_map (torch.Tensor): The mask of token to experts assignment.
         """
-        probs, routing_map, tokens_per_expert = topk_softmax_with_capacity(
-            logits,
-            self.topk,
-            capacity_factor=self.config.moe_expert_capacity_factor,
-            pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
-            drop_policy=self.config.moe_token_drop_policy,
-            use_pre_softmax=self.config.moe_router_pre_softmax,
-            num_groups=self.config.moe_router_num_groups,
-            group_topk=self.config.moe_router_group_topk,
-            scaling_factor=self.config.moe_router_topk_scaling_factor,
-            deterministic_mode=self.config.deterministic_mode,
-            score_function=self.score_function,
-            expert_bias=self.expert_bias,
-        )
+
+        if self.config.moe_router_aux_loss_fusion:
+            probs, scores, routing_map, tokens_per_expert = fused_topk_softmax_with_capacity(
+                logits,
+                self.topk,
+                capacity_factor=self.config.moe_expert_capacity_factor,
+                pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                drop_policy=self.config.moe_token_drop_policy,
+                use_pre_softmax=self.config.moe_router_pre_softmax,
+            )
+            if self.training and torch.is_grad_enabled():
+                # Apply load balancing loss
+                aux_loss_func = partial(
+                    switch_load_balancing_loss_func,
+                    probs=scores,
+                    tokens_per_expert=tokens_per_expert,
+                    topk=self.topk,
+                    fused_aux_loss=True,
+                )
+                probs = self.apply_load_balancing_loss(
+                    activation=probs, load_balancing_loss_func=aux_loss_func
+                )
+        else:
+            probs, routing_map, tokens_per_expert = topk_softmax_with_capacity(
+                logits,
+                self.topk,
+                capacity_factor=self.config.moe_expert_capacity_factor,
+                pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                drop_policy=self.config.moe_token_drop_policy,
+                use_pre_softmax=self.config.moe_router_pre_softmax,
+                num_groups=self.config.moe_router_num_groups,
+                group_topk=self.config.moe_router_group_topk,
+                scaling_factor=self.config.moe_router_topk_scaling_factor,
+                deterministic_mode=self.config.deterministic_mode,
+                score_function=self.score_function,
+                expert_bias=self.expert_bias,
+            )
 
         if self.training and torch.is_grad_enabled():
             # Apply auxiliary load balancing loss
@@ -305,12 +329,12 @@ class TopKRouter(Router):
         elif self.tp_cp_group.size() > 1:
             sequence_partition_group = self.tp_cp_group
 
-        aux_loss = load_balancing_loss_func(
+        aux_loss, aux_loss_for_logging = load_balancing_loss_func(
             moe_aux_loss_coeff=moe_aux_loss_coeff, sequence_partition_group=sequence_partition_group
         )
         save_to_aux_losses_tracker(
             "load_balancing_loss",
-            aux_loss / moe_aux_loss_coeff,
+            aux_loss_for_logging,
             self.layer_number,
             self.config.num_layers,
             reduce_group=sequence_partition_group,

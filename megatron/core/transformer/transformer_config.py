@@ -11,7 +11,14 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.enums import AttnBackend
 
 from ..model_parallel_config import ModelParallelConfig
-from ..utils import get_te_version, init_method_normal, is_te_min_version, scaled_init_method_normal
+from ..utils import (
+    get_te_version,
+    get_triton_version,
+    init_method_normal,
+    is_te_min_version,
+    is_triton_min_version,
+    scaled_init_method_normal,
+)
 
 
 @dataclass
@@ -349,6 +356,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_topk: int = 2
     """Number of experts to route to for each token."""
+
+    moe_router_aux_loss_fusion: bool = False
+    """Fusion for router layer with aux loss load balancing."""
 
     moe_router_topk_limited_devices: Optional[int] = None
     """Number of EP ranks to consider for each token in group-limited routing,
@@ -1069,6 +1079,29 @@ class TransformerConfig(ModelParallelConfig):
                 or fused_unpermute is None
             ):
                 raise ValueError("fused permutation is not available. Please install TE >= 2.1.0.")
+
+        if self.moe_router_aux_loss_fusion:
+            if not is_triton_min_version("2.2.0"):
+                raise ValueError(
+                    "Only triton>=2.2.0 supports MoE aux loss fusion, "
+                    f"but your version is {get_triton_version()}."
+                )
+            if self.moe_router_num_groups is not None:
+                raise ValueError("MoE aux loss fusion does not support moe_router_num_groups.")
+            if self.moe_router_group_topk is not None:
+                raise ValueError("MoE aux loss fusion does not support moe_router_group_topk.")
+            if self.moe_router_topk_scaling_factor is not None:
+                raise ValueError(
+                    "MoE aux loss fusion does not support moe_router_topk_scaling_factor."
+                )
+            if self.moe_router_score_function != "softmax":
+                raise ValueError(
+                    "MoE aux loss fusion only supports moe_router_score_function = 'softmax'."
+                )
+            if self.moe_router_enable_expert_bias:
+                raise ValueError(
+                    "MoE aux loss fusion does not support moe_router_enable_expert_bias."
+                )
 
         if self.context_parallel_size > 1 and self.cp_comm_type is not None:
             if isinstance(self.cp_comm_type, list):

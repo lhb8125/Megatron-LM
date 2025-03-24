@@ -48,6 +48,7 @@ except Exception:
     _torch_version = PkgVersion("0.0.0")
 _te_version = None
 _fa_version = None
+_triton_version = None
 
 
 class ExperimentalNotEnabledError(Exception):
@@ -302,6 +303,27 @@ def is_fa_min_version(version, check_equality=True):
     if check_equality:
         return get_fa_version() >= PkgVersion(version)
     return get_fa_version() > PkgVersion(version)
+
+
+def get_triton_version():
+    """Get Triton version from __version__; Use caching."""
+
+    def get_triton_version_str():
+        import triton
+
+        return str(triton.__version__)
+
+    global _triton_version
+    if _triton_version is None:
+        _triton_version = PkgVersion(get_triton_version_str())
+    return _triton_version
+
+
+def is_triton_min_version(version, check_equality=True):
+    """Check if minimum version of `triton` is installed."""
+    if check_equality:
+        return get_triton_version() >= PkgVersion(version)
+    return get_triton_version() > PkgVersion(version)
 
 
 def ensure_divisibility(numerator, denominator):
