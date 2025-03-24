@@ -696,12 +696,10 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return tuple([t.grad if t is not None else None for t in inputs])
 
     def _submodule_attention_router_compound_dw(self):
-        pass
-        # raise NotImplementedError("Not implemented")
+        self.self_attention.backward_dw()
 
     def _submodule_mlp_dw(self):
-        pass
-        # raise NotImplementedError("Not implemented")
+        self.mlp.backward_dw()
 
     def _submodule_identity_forward(self, *args):
         return args
