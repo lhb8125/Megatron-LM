@@ -8,6 +8,7 @@ from typing import Optional, Union
 import torch
 
 from megatron.core import parallel_state, tensor_parallel
+from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TELinear
 from megatron.core.fusions.fused_mla_yarn_rope_apply import (
     fused_apply_mla_rope_for_kv,
     fused_apply_mla_rope_for_q,
@@ -19,6 +20,7 @@ from megatron.core.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
 from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
@@ -277,6 +279,13 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
         else:
+            q_down_proj_kwargs = {}
+            if submodules.linear_q_down_proj == TELinear:
+                q_down_proj_kwargs['parallel_mode'] = 'duplicated'
+            elif submodules.linear_q_down_proj in [TEColumnParallelLinear, ColumnParallelLinear]:
+                q_down_proj_kwargs['gather_output'] = False
+            else:
+                raise ValueError(f"Unsupported linear_q_down_proj: {submodules.linear_q_down_proj}")
 
             self.linear_q_down_proj = build_module(
                 submodules.linear_q_down_proj,
@@ -286,9 +295,10 @@ class MLASelfAttention(MultiLatentAttention):
                 init_method=self.config.init_method,
                 bias=False,
                 skip_bias_add=False,
-                gather_output=False,
                 is_expert=False,
                 tp_comm_buffer_name='q_down_proj',
+                skip_weight_param_allocation=False,
+                **q_down_proj_kwargs
             )
 
             self.linear_q_up_proj = build_module(
@@ -304,6 +314,14 @@ class MLASelfAttention(MultiLatentAttention):
                 tp_comm_buffer_name='q_up_proj',
             )
 
+        kv_down_proj_kwargs = {}
+        if submodules.linear_kv_down_proj == TELinear:
+            kv_down_proj_kwargs['parallel_mode'] = 'duplicated'
+        elif submodules.linear_kv_down_proj in [TEColumnParallelLinear, ColumnParallelLinear]:
+            kv_down_proj_kwargs['gather_output'] = False
+        else:
+            raise ValueError(f"Unsupported linear_kv_down_proj: {submodules.linear_kv_down_proj}")
+
         self.linear_kv_down_proj = build_module(
             submodules.linear_kv_down_proj,
             self.config.hidden_size,
@@ -312,9 +330,10 @@ class MLASelfAttention(MultiLatentAttention):
             init_method=self.config.init_method,
             bias=False,
             skip_bias_add=False,
-            gather_output=False,
             is_expert=False,
             tp_comm_buffer_name='kv_down_proj',
+            skip_weight_param_allocation=False,
+            **kv_down_proj_kwargs
         )
 
         self.linear_kv_up_proj = build_module(
