@@ -2643,6 +2643,9 @@ def _add_mla_args(parser):
                        help="Mscale for YaRN RoPE in multi-latent attention.")
     group.add_argument('--mscale-all-dim', type=float, default=1.0,
                        help="Mscale all dimensions for YaRN RoPE in multi-latent attention.")
+    group.add_argument('--mla-yarn-rope-fusion', action='store_true',
+                       help='Fuse YaRN RoPE in multi-latent attention. '
+                       'This is an experimental feature and may change in future versions.')
 
     return parser
 

@@ -118,6 +118,44 @@ class TestParallelMLAAttention:
             assert output.shape[2] == config.hidden_size
             assert bias.shape[0] == config.hidden_size
 
+    @pytest.mark.experimental
+    def test_gpu_forward_with_yarn_rope_fusion(self):
+        if self.transformer_config.rope_type == "rope":
+            pytest.skip("Rope is not supported for this test")
+        if is_te_min_version("1.10.0"):
+            transformer_config = self.transformer_config
+            transformer_config.mla_yarn_rope_fusion = True
+            checkpointed_parallel_attention = MLASelfAttention(
+                transformer_config,
+                get_gpt_layer_with_transformer_engine_spec(
+                    multi_latent_attention=True
+                ).submodules.self_attention.submodules,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+            )
+            config = checkpointed_parallel_attention.config
+
+            sequence_length = 32
+            micro_batch_size = 2
+
+            checkpointed_parallel_attention.cuda()
+
+            # [sequence length, batch size, hidden size]
+            hidden_states = torch.ones(
+                (
+                    sequence_length,
+                    micro_batch_size,
+                    checkpointed_parallel_attention.config.hidden_size,
+                )
+            )
+            hidden_states = hidden_states.cuda()
+
+            attention_mask = torch.ones((1, 1, sequence_length, sequence_length), dtype=bool).cuda()
+
+            output, bias = checkpointed_parallel_attention(hidden_states, attention_mask)
+
+            assert config.mla_yarn_rope_fusion == True
+
     def test_gpu_forward_thd(self):
         if is_te_min_version("1.10.0"):
             # use flash attention for hopper, future may support fused attention for ampere

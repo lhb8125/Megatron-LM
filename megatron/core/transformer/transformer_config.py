@@ -1202,3 +1202,12 @@ class MLATransformerConfig(TransformerConfig):
 
     mscale_all_dim: float = 0.707
     """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention, used by yarn."""
+
+    mla_yarn_rope_fusion: bool = False
+    """Fuse YaRN RoPE in Multi-Latent Attention, used by yarn.
+    This is an experimental feature and may change in future versions."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.multi_latent_attention and self.mla_yarn_rope_fusion and self.rope_type != "yarn":
+            raise ValueError("mla_yarn_rope_fusion only works with YARN RoPE.")
