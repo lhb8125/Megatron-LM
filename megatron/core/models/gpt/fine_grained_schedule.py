@@ -16,6 +16,7 @@ from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
+from megatron.core.pipeline_parallel.combined_1f1b import NoOpMemoryStrategy, FreeInputsMemoryStrategy
 
 
 def weak_method(method):
@@ -27,6 +28,26 @@ def weak_method(method):
         return method_ref()(*args, **kwarg)
 
     return wrapped_func
+
+
+class MemoryStrategyRegistry:
+    """Registry for memory management strategies based on node names.
+    
+    This class centralizes the definition of which memory strategy
+    should be used for each type of node in the computation graph.
+    """
+    
+    _strategies = {
+        "default": NoOpMemoryStrategy(),
+        "attn": NoOpMemoryStrategy(),          # Attention nodes keep their inputs
+        "dispatch": FreeInputsMemoryStrategy(), # Dispatch nodes free inputs after use
+        "mlp": FreeInputsMemoryStrategy(),     # MLP nodes free inputs after use 
+        "combine": FreeInputsMemoryStrategy(), # Combine nodes free inputs after use
+    }
+    
+    @classmethod
+    def get_strategy_by_name(cls, name):
+        return cls._strategies.get(name, cls._strategies["default"])
 
 
 class PreProcessNode(ScheduleNode):
@@ -140,23 +161,50 @@ class PostProcessNode(ScheduleNode):
 
 
 class TransformerLayerNode(ScheduleNode):
+    """Base class for transformer layer computation nodes.
+    
+    This class provides common functionality for different types of
+    transformer layer nodes (attention, MLP, etc.)
+    """
 
-    def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
+    def __init__(
+        self, 
+        chunk_state, 
+        common_state, 
+        layer, 
+        stream, 
+        event, 
+        name="default"
+    ):
+        """Initialize a transformer layer node.
+        
+        Args:
+            chunk_state: State shared across the model chunk
+            common_state: State shared within a transformer layer
+            layer: The transformer layer this node belongs to
+            stream (torch.cuda.Stream): CUDA stream for execution
+            event (torch.cuda.Event): Synchronization event
+            name (str): Node name, also used to determine memory strategy
+        """
+        # Get memory strategy based on node name
+        memory_strategy = MemoryStrategyRegistry.get_strategy_by_name(name)
+        
         super().__init__(
             weak_method(self.forward_impl),
             stream,
             event,
             weak_method(self.backward_impl),
-            free_inputs=free_inputs,
+            memory_strategy=memory_strategy,
+            name=name,
         )
-        # layer state
+        # Layer state
         self.common_state = common_state
-        # model chunk state
+        # Model chunk state
         self.chunk_state = chunk_state
         self.layer = layer
         self.detached = tuple()
         self.before_detached = tuple()
-
+        
     def detach(self, t):
         detached = make_viewless(t).detach()
         detached.requires_grad = t.requires_grad
@@ -176,6 +224,8 @@ class TransformerLayerNode(ScheduleNode):
 
 class MoeAttnNode(TransformerLayerNode):
 
+    def __init__(self, chunk_state, common_state, layer, stream, event, name="attn"):
+        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
     def forward_impl(self, hidden_states):
         attention_mask = self.chunk_state.attention_mask
         context = self.chunk_state.context
@@ -223,6 +273,9 @@ class MoeAttnNode(TransformerLayerNode):
 
 class MoeDispatchNode(TransformerLayerNode):
 
+    def __init__(self, chunk_state, common_state, layer, stream, event, name="dispatch"):
+        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
+
     def forward_impl(self, permutated_local_input_tokens):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
@@ -234,6 +287,8 @@ class MoeDispatchNode(TransformerLayerNode):
 
 
 class MoeMlPNode(TransformerLayerNode):
+    def __init__(self, chunk_state, common_state, layer, stream, event, name="mlp"):
+        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
     def forward_impl(self, dispatched_input):
         pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
         token_dispatcher = self.layer.mlp.token_dispatcher
@@ -254,6 +309,8 @@ class MoeMlPNode(TransformerLayerNode):
 
 
 class MoeCombineNode(TransformerLayerNode):
+    def __init__(self, chunk_state, common_state, layer, stream, event, name="combine"):
+        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
     def forward_impl(self, expert_output, shared_expert_output):
         # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
         residual = self.common_state.residual
@@ -326,17 +383,33 @@ def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
 
 
 def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
+    """Build schedule plan for a transformer layer.
+    
+    This function creates the appropriate nodes based on whether 
+    the layer is a MoE (Mixture of Experts) layer or not.
+    
+    Args:
+        layer: The transformer layer
+        event (torch.cuda.Event): Synchronization event
+        chunk_state: State shared across the model chunk
+        comp_stream (torch.cuda.Stream): Computation stream
+        com_stream (torch.cuda.Stream): Communication stream
+        
+    Returns:
+        TransformerLayerSchedulePlan: A schedule plan for the layer
+    """
     if not isinstance(layer.mlp, MoELayer):
         return build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
+        
     common_state = TransformerLayerState()
+    
+    # Create nodes for different operations in the layer
+    # Each node type has a predefined name that determines its memory strategy
     attn = MoeAttnNode(chunk_state, common_state, layer, comp_stream, event)
-    attn.name = "attn"
-    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event, True)
-    dispatch.name = "dispatch"
-    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event, True)
-    mlp.name = "mlp"
-    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
-    combine.name = "combine"
+    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event)
+    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event)
+    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event)
+    
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
 
@@ -446,9 +519,27 @@ def schedule_layer_1f1b(
     f_context=None,
     b_context=None,
 ):
+    """Schedule one-forward-one-backward operations for a single layer.
+    
+    This function interleaves forward and backward operations to maximize
+    parallelism and efficiency.
+    
+    Args:
+        f_layer: Forward layer (for current microbatch)
+        b_layer: Backward layer (for previous microbatch)
+        f_input: Input for forward computation
+        b_grad: Gradient for backward computation
+        pre_forward: Callback to get forward input if not provided
+        pre_backward: Callback to get backward gradient if not provided
+        pre_backward_dw: Callback for weight gradient computation
+        f_context: Context for forward computation
+        b_context: Context for backward computation
+        
+    Returns:
+        Functions or values for next iteration's computation
+    """
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
-
 
     if pre_forward is not None:
         assert f_input is None
@@ -456,13 +547,11 @@ def schedule_layer_1f1b(
         f_input = pre_forward()
         del pre_forward
 
-
     if pre_backward is not None:
         # attn backward from last iter
         assert b_grad is None
         b_grad = pre_backward()
         del pre_backward
-
 
     if b_layer is not None:
         with b_context:
@@ -471,7 +560,6 @@ def schedule_layer_1f1b(
     if pre_backward_dw is not None:
         pre_backward_dw()
         del pre_backward_dw
-
 
     if f_layer is not None:
         with f_context:
@@ -487,12 +575,9 @@ def schedule_layer_1f1b(
             b_grad = b_layer.dispatch.backward(b_grad)
             b_layer.mlp.dw()
 
-
     if f_layer is not None:
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
-
-
 
     def next_iter_pre_forward():
         if f_layer is not None:
@@ -510,7 +595,6 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             with b_context:
                 b_layer.attn.dw()
-
 
     if f_layer and b_layer:
         return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw
@@ -531,7 +615,6 @@ def schedule_chunk_1f1b(
 ):
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
-
 
     if f_schedule_plan:
         # pp output send/receive sync
