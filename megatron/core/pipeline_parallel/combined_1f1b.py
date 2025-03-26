@@ -35,7 +35,11 @@ def stream_acquire_context(stream, event):
 
 
 class ScheduleNode:
-    """base node for fine-grained schedule"""
+    """Base node for fine-grained scheduling.
+    
+    This class represents a computational node in the pipeline schedule.
+    It handles the execution of forward and backward operations on a stream.
+    """
 
     def __init__(
         self,
@@ -43,15 +47,25 @@ class ScheduleNode:
         stream,
         event,
         backward_func=None,
-        free_inputs=False,
+        memory_strategy=None,
         name="schedule_node",
     ):
+        """Initialize a schedule node.
+        
+        Args:
+            forward_func (callable): Function to execute during forward pass
+            stream (torch.cuda.Stream): CUDA stream for computation
+            event (torch.cuda.Event): Event for synchronization
+            backward_func (callable, optional): Function for backward pass
+            memory_strategy (MemoryManagementStrategy, optional): Strategy for memory management
+            name (str): Name of the node for debugging
+        """
         self.name = name
         self.forward_func = forward_func
         self.backward_func = backward_func
         self.stream = stream
         self.event = event
-        self.free_inputs = free_inputs
+        self.memory_strategy = memory_strategy or NoOpMemoryStrategy()
         self.inputs = None
         self.outputs = None
 
@@ -94,10 +108,8 @@ class ScheduleNode:
                 self.output = data
             torch.cuda.nvtx.range_pop()
 
-        if self.free_inputs:
-            for input in inputs:
-                input.record_stream(self.stream)
-                input.untyped_storage().resize_(0)
+        # 使用策略处理输入
+        self.memory_strategy.handle_inputs(inputs, self.stream)
 
         return self.output
 
@@ -529,3 +541,54 @@ def wrap_forward_func(config, forward_step_func):
         return wrapped_func
     else:
         return forward_step_func
+
+
+class MemoryManagementStrategy:
+    """Base class for memory management strategies.
+    
+    Different memory management strategies can be implemented by subclassing this class.
+    These strategies control how tensors are handled in memory during the computation.
+    """
+    
+    def handle_inputs(self, inputs, stream):
+        """Process input tensors after computation.
+        
+        Args:
+            inputs (tuple): Input tensors that have been used
+            stream (torch.cuda.Stream): Current CUDA stream
+        """
+        pass
+        
+    def handle_outputs(self, outputs, stream):
+        """Process output tensors after computation.
+        
+        Args:
+            outputs (tuple): Output tensors produced by the computation
+            stream (torch.cuda.Stream): Current CUDA stream
+        """
+        pass
+
+class NoOpMemoryStrategy(MemoryManagementStrategy):
+    """Strategy that performs no memory management operations.
+    
+    This is the default strategy - it doesn't free any memory.
+    """
+    pass
+    
+class FreeInputsMemoryStrategy(MemoryManagementStrategy):
+    """Strategy that immediately frees input tensors after they are used.
+    
+    This strategy is useful for nodes where inputs are no longer needed
+    after computation, helping to reduce memory usage.
+    """
+    def handle_inputs(self, inputs, stream):
+        """Free input tensors by resizing their storage to zero.
+        
+        Args:
+            inputs (tuple): Input tensors to be freed
+            stream (torch.cuda.Stream): Current CUDA stream
+        """
+        for input in inputs:
+            if input is not None:
+                input.record_stream(stream)
+                input.untyped_storage().resize_(0)
