@@ -469,6 +469,14 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_apply_probs_on_input: bool = False
     """Apply probs on input of experts instead of applying after activation and glu."""
+    
+    moe_track_imbalance_rate: bool = False
+    """Track the imbalance rate of routing across expert parallel ranks. The imbalance rate measures
+    load balancing efficiency by calculating the ratio of maximum tokens per expert parallel rank to 
+    the ideal balanced distribution. Setting to False disables this tracking."""
+
+    moe_router_force_load_balancing: bool = False
+    """Force load balancing for MoE router, supports naive topk and group-limited topk. This is an experimental feature and may change in future versions."""
 
     ##################
     # Context Parallel

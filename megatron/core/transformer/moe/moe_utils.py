@@ -718,15 +718,15 @@ def track_moe_metrics(
     else:
         raise ValueError(f"Invalid moe_layer_freq: {moe_layer_freq}")
 
-    if writer is not None:
-        aux_losses = {k: v['values'].float() * loss_scale for k, v in tracker.items()}
-        for name, loss_list in aux_losses.items():
-            if total_loss_dict is not None:
-                if name not in total_loss_dict:
-                    total_loss_dict[name] = loss_list.sum() / num_moe_layers
-                else:
-                    total_loss_dict[name] += loss_list.sum() / num_moe_layers
+    aux_losses = {k: v['values'].float() * loss_scale for k, v in tracker.items()}
+    for name, loss_list in aux_losses.items():
+        if total_loss_dict is not None:
+            if name not in total_loss_dict:
+                total_loss_dict[name] = loss_list.sum() / num_moe_layers
+            else:
+                total_loss_dict[name] += loss_list.sum() / num_moe_layers
 
+        if writer is not None:
             # currently when using add_scalars,
             # torch.utils.add_scalars makes each timer its own run, which
             # polutes the runs list, so we just add each as a scalar

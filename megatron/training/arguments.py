@@ -2606,6 +2606,10 @@ def _add_moe_args(parser):
                        help='Add noise to the input tensor by applying jitter with a specified epsilon value.')
     group.add_argument('--moe-per-layer-logging', action='store_true',
                        help='Enable per-layer logging for MoE, currently supports auxiliary loss and z loss.')
+    group.add_argument('--moe-track-imbalance-rate', action='store_true',
+                       help='Track the imbalance rate of routing across expert parallel ranks. This measures load balancing efficiency by calculating the ratio of maximum tokens per expert parallel rank to the ideal balanced distribution. The logging value is averaged over all layers.')
+    group.add_argument('--moe-router-force-load-balancing', action='store_true',
+                       help='Force load balancing for MoE router, supporting naive topk and group-limited topk. This experimental feature is for performance analysis only; enabling it will cause model divergence.')
     # Token dispatcher arguments
     group.add_argument('--moe-token-dispatcher-type', type=str,
                        choices=['allgather', 'alltoall', 'flex', 'alltoall_seq'],

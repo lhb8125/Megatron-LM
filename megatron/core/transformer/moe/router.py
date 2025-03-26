@@ -21,6 +21,32 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+# Define the custom autograd function with rank-specific seeding
+class ForcedLoadBalancingSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, logits, generator):
+        """
+        Forward pass returns random logits using the provided generator,
+        but gradients flow through the original logits (identity).
+        """
+        if generator is not None:
+            # Use the provided rank-specific generator
+            shape = logits.shape
+            device = logits.device
+            random_logits = torch.randn(shape, device=device, generator=generator)
+        else:
+            # Fallback if no generator is provided (e.g., single GPU or first call)
+            random_logits = torch.randn_like(logits)
+        return random_logits
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass propagates the gradient for logits.
+        The gradient for the generator input is None.
+        """
+        # Return gradient for logits, None for generator
+        return grad_output, None
 
 class Router(ABC, MegatronModule):
     """Base Router class"""
@@ -127,6 +153,7 @@ class TopKRouter(Router):
         self.routing_type = self.config.moe_router_load_balancing_type
         self.score_function = self.config.moe_router_score_function
         self.input_jitter = None
+        self.ste_generator = None # Initialize generator placeholder
 
         self.enable_expert_bias = self.config.moe_router_enable_expert_bias
         if self.enable_expert_bias:
@@ -404,6 +431,135 @@ class TopKRouter(Router):
         else:
             return input
 
+    def _track_imbalance_rate(self, routing_map: torch.Tensor) -> None:
+        """Track the imbalance rate of routing across expert parallel ranks.
+
+        The imbalance rate measures load balancing efficiency by calculating the ratio of
+        maximum tokens per expert parallel rank to the ideal balanced distribution.
+        Here we calculate the imbalance rate for each layer, and then average them across
+        different layers.
+
+        Formula:
+            imbalance rate = max(num_tokens_per_ep_rank) / (num_tokens_per_ep_rank * topk)
+
+        A perfectly balanced distribution would have an imbalance rate of 1.0.
+        Higher values indicate worse load balancing.
+
+        Args:
+            routing_map (torch.Tensor): Binary tensor of shape [num_tokens, num_local_experts] indicating
+                                         which tokens are routed to which experts.
+        """
+        from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+        from megatron.core.transformer.moe.moe_utils import save_to_aux_losses_tracker
+        from megatron.core import parallel_state
+
+        ep_group = parallel_state.get_expert_model_parallel_group()
+        ep_size = torch.distributed.get_world_size(group=ep_group)
+        num_local_experts = self.config.num_moe_experts // ep_size
+
+        # Count tokens per expert locally
+        num_tokens_per_expert_local = routing_map.sum(dim=0)  # [num_local_experts]
+
+        # Gather and reshape to get global distribution
+        # This collects token counts from all sequence parallel regions
+        num_tokens_per_expert_global = (
+            gather_from_sequence_parallel_region(num_tokens_per_expert_local, group=ep_group)
+            .reshape(-1, self.config.num_moe_experts)
+            .sum(dim=0)
+        )
+
+        # Calculate tokens per expert parallel rank
+        # By reshaping to [ep_size, num_local_experts] and summing across local experts
+        num_tokens_per_ep_rank = num_tokens_per_expert_global.reshape(-1, num_local_experts).sum(
+            dim=1
+        )
+
+        # Calculate imbalance rate:
+        # max tokens on any rank / ideal balanced distribution (total local tokens * topk)
+        total_tokens_per_ep_rank = routing_map.size(0)
+        ideal_tokens_per_rank = total_tokens_per_ep_rank * self.config.moe_router_topk
+        moe_imbalance_rate = num_tokens_per_ep_rank.max() / ideal_tokens_per_rank
+
+        # Save to auxiliary losses tracker for logging
+        save_to_aux_losses_tracker(
+            "moe_imbalance_rate", moe_imbalance_rate, self.layer_number, self.config.num_layers
+        )
+
+    def _force_load_balancing(self, routing_map: torch.Tensor):
+        """
+        Force load balancing for MoE router, supports naive topk and group-limited topk.
+        Will override the original routing map.
+        """
+        if getattr(self, '_balanced_routing_map', None) is not None:
+            return self._balanced_routing_map
+
+        def evenly_select_k_from_n(ids: torch.Tensor, N: int, K: int) -> torch.Tensor:
+            """
+            Using PyTorch to evenly select K indices from range [0, N-1] for each id in the input tensor.
+            The selection is a deterministic process based on the id. Selected indices are approximately
+            spaced N/K positions apart and wrap around the range [0, N-1]. The starting position of the
+            selection pattern is offset based on the id.
+            """
+            # --- Calculation ---
+            # Generate range [0, 1, ..., K-1]
+            i_values = torch.arange(K).cuda()  # shape (K,)
+
+            # Calculate base indices for each of the K selections
+            # base_indices = floor(i * N / K)
+            base_indices = torch.floor(i_values * N / K).long()  # shape (K,)
+
+            # Calculate final indices for each id
+            # ids.unsqueeze(1) has shape (num_ids, 1)
+            # base_indices.unsqueeze(0) has shape (1, K)
+            selected_indices = (ids.unsqueeze(1) + base_indices.unsqueeze(0)) % N
+
+            # selected_indices will have shape (num_ids, K), dtype is torch.long
+            return selected_indices
+
+        # Pesudo code for group-limited topk:
+        # group_id = select(range(0, num_group), group_topk)
+        # local_expert_id = select(range(0, group_size), topk // num_group)
+        # global_expert_id = group_id * (group_size) + local_expert_id
+
+        ids = torch.arange(routing_map.shape[0]).cuda()
+        num_group = (
+            self.config.moe_router_num_groups
+            if self.config.moe_router_num_groups is not None
+            else 1
+        )
+        group_topk = (
+            self.config.moe_router_group_topk
+            if self.config.moe_router_group_topk is not None
+            else 1
+        )
+        group_size = self.config.num_moe_experts // num_group
+
+        group_id = evenly_select_k_from_n(ids, num_group, group_topk)
+        local_expert_id = evenly_select_k_from_n(
+            ids, group_size, self.config.moe_router_topk // group_topk
+        )
+
+        # Create all combinations using broadcasting
+        # 1. Reshape tensors to enable broadcasting
+        # group_id: [N, group_topk, 1]
+        # local_expert_id: [N, 1, topk//group_topk]
+        group_id_expanded = group_id.unsqueeze(2)  # [N, group_topk, 1]
+        local_expert_id_expanded = local_expert_id.unsqueeze(1)  # [N, 1, topk//group_topk]
+
+        # 2. Compute global_expert_id with broadcasting
+        # Result shape: [N, group_topk, topk//group_topk]
+        global_expert_id = group_id_expanded * group_size + local_expert_id_expanded
+
+        # 3. Reshape to [N, group_topk * (topk//group_topk)]
+        global_expert_id = global_expert_id.reshape(routing_map.shape[0], -1)
+
+        # 4. Scatter to create the balanced routing map
+        self._balanced_routing_map = (
+            torch.zeros_like(routing_map).scatter(1, global_expert_id, 1).bool()
+        )
+
+        return self._balanced_routing_map
+
     def routing(self, logits: torch.Tensor):
         """Top-k routing function
 
@@ -418,6 +574,19 @@ class TopKRouter(Router):
         seq_length, bsz = logits.shape[:2]
         logits = logits.view(-1, self.config.num_moe_experts)
 
+        if self.config.moe_router_force_load_balancing:
+            # Use different random seeds for each rank
+            if self.ste_generator is None:
+                rank = torch.distributed.get_rank()
+                base_seed = 42
+                seed = base_seed + rank
+                self.ste_generator = torch.Generator(device=logits.device)
+                self.ste_generator.manual_seed(seed)
+
+            # Apply the custom STE function, passing the generator
+            logits = ForcedLoadBalancingSTE.apply(logits, self.ste_generator)
+            if self.enable_expert_bias:
+                self.expert_bias.zero_()
         # Apply Z-Loss
         logits = self.apply_z_loss(logits)
 
@@ -471,4 +640,6 @@ class TopKRouter(Router):
 
         scores, routing_map = self.routing(logits)
 
+        if self.config.moe_track_imbalance_rate and torch.is_grad_enabled():
+            self._track_imbalance_rate(routing_map)
         return scores, routing_map
