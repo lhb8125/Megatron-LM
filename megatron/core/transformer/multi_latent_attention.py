@@ -123,6 +123,7 @@ class MultiLatentAttention(Attention):
             skip_bias_add=True,
             is_expert=False,
             tp_comm_buffer_name='proj',
+            split_bw=self.config.split_bw,
         )
 
     def forward(
@@ -247,6 +248,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                split_bw=self.config.split_bw,
             )
 
         else:
@@ -261,6 +263,7 @@ class MLASelfAttention(MultiLatentAttention):
                 skip_bias_add=False,
                 gather_output=False,
                 is_expert=False,
+                split_bw=self.config.split_bw,
             )
 
             self.linear_q_up_proj = build_module(
@@ -273,6 +276,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                split_bw=self.config.split_bw,
             )
 
         self.linear_kv_down_proj = build_module(
@@ -285,6 +289,7 @@ class MLASelfAttention(MultiLatentAttention):
             skip_bias_add=False,
             gather_output=False,
             is_expert=False,
+            split_bw=self.config.split_bw,
         )
 
         self.linear_kv_up_proj = build_module(
@@ -297,6 +302,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
+            split_bw=self.config.split_bw,
         )
 
         if self.config.q_lora_rank is not None:
@@ -429,3 +435,13 @@ class MLASelfAttention(MultiLatentAttention):
         key = torch.cat([k_no_pe, k_pos_emb], dim=-1)
 
         return query, key, value
+
+    def backward_dw(self):
+        self.linear_kv_up_proj.backward_dw()
+        self.linear_kv_down_proj.backward_dw()
+        if self.config.q_lora_rank is None:
+            self.linear_q_proj.backward_dw()
+        else:
+            self.linear_q_down_proj.backward_dw()
+            self.linear_q_up_proj.backward_dw()
+        self.linear_proj.backward_dw()
