@@ -275,9 +275,9 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     # Create nodes for different operations in the layer
     # Each node type has a predefined name that determines its memory strategy
     attn = TransformerLayerNode(comp_stream, event, common_state, attn_callable, True, ctx, name="attn")
-    dispatch = TransformerLayerNode(comp_stream, event, common_state, dispatch_callable, True, ctx, name="dispatch")
+    dispatch = TransformerLayerNode(com_stream, event, common_state, dispatch_callable, True, ctx, name="dispatch")
     mlp = TransformerLayerNode(comp_stream, event, common_state, mlp_callable, True, ctx, name="mlp")
-    combine = TransformerLayerNode(comp_stream, event, common_state, combine_callable, True, ctx, name="combine")
+    combine = TransformerLayerNode(com_stream, event, common_state, combine_callable, True, ctx, name="combine")
     
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
