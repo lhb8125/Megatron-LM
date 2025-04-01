@@ -9,11 +9,9 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -36,7 +34,7 @@ def stream_acquire_context(stream, event):
 
 class ScheduleNode:
     """Base node for fine-grained scheduling.
-    
+
     This class represents a computational node in the pipeline schedule.
     It handles the execution of forward and backward operations on a stream.
     """
@@ -51,7 +49,7 @@ class ScheduleNode:
         name="schedule_node",
     ):
         """Initialize a schedule node.
-        
+
         Args:
             forward_func (callable): Function to execute during forward pass
             stream (torch.cuda.Stream): CUDA stream for computation
@@ -505,15 +503,18 @@ def forward_backward_step(
 
     return output_tensor, num_tokens, input_tensor_grad
 
+
 def get_default_cls_for_unwrap():
     cls = (DistributedDataParallel, Float16Module)
     try:
         # legacy should not be used in core, but for backward compatibility, we support it here
         from megatron.legacy.model import Float16Module as LegacyFloat16Module
+
         cls = cls + (LegacyFloat16Module,)
     except:
         pass
     return cls
+
 
 def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     """unwrap_model DistributedDataParallel and Float16Module wrapped model"""
@@ -545,45 +546,49 @@ def wrap_forward_func(config, forward_step_func):
 
 class MemoryManagementStrategy:
     """Base class for memory management strategies.
-    
+
     Different memory management strategies can be implemented by subclassing this class.
     These strategies control how tensors are handled in memory during the computation.
     """
-    
+
     def handle_inputs(self, inputs, stream):
         """Process input tensors after computation.
-        
+
         Args:
             inputs (tuple): Input tensors that have been used
             stream (torch.cuda.Stream): Current CUDA stream
         """
         pass
-        
+
     def handle_outputs(self, outputs, stream):
         """Process output tensors after computation.
-        
+
         Args:
             outputs (tuple): Output tensors produced by the computation
             stream (torch.cuda.Stream): Current CUDA stream
         """
         pass
 
+
 class NoOpMemoryStrategy(MemoryManagementStrategy):
     """Strategy that performs no memory management operations.
-    
+
     This is the default strategy - it doesn't free any memory.
     """
+
     pass
-    
+
+
 class FreeInputsMemoryStrategy(MemoryManagementStrategy):
     """Strategy that immediately frees input tensors after they are used.
-    
+
     This strategy is useful for nodes where inputs are no longer needed
     after computation, helping to reduce memory usage.
     """
+
     def handle_inputs(self, inputs, stream):
         """Free input tensors by resizing their storage to zero.
-        
+
         Args:
             inputs (tuple): Input tensors to be freed
             stream (torch.cuda.Stream): Current CUDA stream

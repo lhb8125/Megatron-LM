@@ -140,12 +140,13 @@ class TELinear(te.pytorch.Linear):
                 'Transformer Engine linear layers do not support skip_weight_param_allocation'
             )
 
-
         extra_kwargs = _get_extra_te_kwargs(config)
-        
+
         self.split_bw = False
         if split_bw:
-            if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d") or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
+            if get_te_version() == PkgVersion(
+                "2.2.0.dev0+f3a009d"
+            ) or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
                 extra_kwargs["split_bw"] = split_bw
                 self.split_bw = True
             else:
@@ -330,7 +331,9 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         self.split_bw = False
         if split_bw:
-            if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d") or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
+            if get_te_version() == PkgVersion(
+                "2.2.0.dev0+f3a009d"
+            ) or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
                 extra_kwargs["split_bw"] = split_bw
                 self.split_bw = True
             else:
@@ -895,11 +898,15 @@ if is_te_min_version("1.9.0.dev0"):
 
             self.split_bw = False
             if split_bw:
-                if get_te_version() == PkgVersion("2.2.0.dev0+f3a009d") or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
+                if get_te_version() == PkgVersion(
+                    "2.2.0.dev0+f3a009d"
+                ) or get_te_version() == PkgVersion("2.2.0.dev0+ccd6634"):
                     extra_kwargs["split_bw"] = split_bw
                     self.split_bw = True
                 else:
-                    raise RuntimeError("Only TE with version 2.2.0.dev0+f3a009d supports split_bw now.")
+                    raise RuntimeError(
+                        "Only TE with version 2.2.0.dev0+f3a009d supports split_bw now."
+                    )
 
             extra_kwargs["ub_name"] = tp_comm_buffer_name
 
