@@ -54,7 +54,7 @@ class MemoryStrategyRegistry:
 class PreProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event, name="pre_process")
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -128,7 +128,7 @@ class PreProcessNode(ScheduleNode):
 class PostProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event, name="post_process")
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -170,10 +170,12 @@ class TransformerLayerNode(ScheduleNode):
 
     def __init__(
         self, 
-        common_state, 
-        callables,
         stream, 
         event, 
+        common_state, 
+        callables,
+        is_moe,
+        forward_ctx=None,
         name="default"
     ):
         """Initialize a transformer layer node.
@@ -198,6 +200,8 @@ class TransformerLayerNode(ScheduleNode):
         )
         self.common_state = common_state
         self.callables = callables
+        self.forward_ctx = forward_ctx
+        self.is_moe = is_moe
         self.detached = tuple()
         self.before_detached = tuple()
         
@@ -207,6 +211,11 @@ class TransformerLayerNode(ScheduleNode):
         self.before_detached = self.before_detached + (t,)
         self.detached = self.detached + (detached,)
         return detached
+
+    def forward_impl(self, *args):
+        if self.is_moe:
+            return self.callables.forward(self, *args)
+        return self.callables.forward(*args)
 
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
@@ -222,97 +231,7 @@ class TransformerLayerNode(ScheduleNode):
             self.callables.dw()
 
 
-class MoeAttnNode(TransformerLayerNode):
-
-    def __init__(self, common_state, callables, forward_ctx, stream, event, name="attn"):
-        super().__init__(common_state, callables, stream, event, name=name)
-        self.forward_ctx = forward_ctx
-
-    def forward_impl(self, hidden_states):
-        with self.forward_ctx():
-            (
-                residual,
-                pre_mlp_layernorm_output,
-                tokens_per_expert,
-                local_tokens,
-            ) = self.callables.forward(
-                hidden_states,
-            )
-        
-        # detached here
-        self.common_state.tokens_per_expert = tokens_per_expert
-        self.common_state.probs = self.detach(self.common_state.probs)
-        self.common_state.residual = self.detach(residual)
-        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
-
-        return local_tokens
-
-
-class MoeDispatchNode(TransformerLayerNode):
-    def __init__(self, common_state, callables, forward_ctx, stream, event, name="dispatch"):
-        super().__init__(common_state, callables, stream, event, name=name)
-        self.forward_ctx = forward_ctx
-
-    def forward_impl(self, permutated_local_input_tokens):
-        with self.forward_ctx():
-            dispatched_input = self.callables.forward(permutated_local_input_tokens)
-        return dispatched_input
-
-
-class MoeMlPNode(TransformerLayerNode):
-    def __init__(self, common_state, callables, forward_ctx, stream, event, name="mlp"):
-        super().__init__(common_state, callables, stream, event, name=name)
-        self.forward_ctx = forward_ctx
-
-    def forward_impl(self, dispatched_input):
-        with self.forward_ctx():
-            expert_output, shared_expert_output, mlp_bias = self.callables.forward(
-                dispatched_input, self.common_state.pre_mlp_layernorm_output, self.common_state.tokens_per_expert,
-            )
-            assert mlp_bias is None
-        self.common_state.probs = self.detach(self.common_state.probs)
-        self.common_state.pre_mlp_layernorm_output = None
-        return expert_output, shared_expert_output
-
-
-class MoeCombineNode(TransformerLayerNode):
-    def __init__(self, common_state, callables, forward_ctx, stream, event, name="combine"):
-        super().__init__(common_state, callables, stream, event, name=name)
-        self.forward_ctx = forward_ctx
-
-    def forward_impl(self, expert_output, shared_expert_output):
-        # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
-        residual = self.common_state.residual
-        with self.forward_ctx():
-            output = self.callables.forward(
-                expert_output, 
-                shared_expert_output, 
-                residual,
-            )
-        cur_stream = torch.cuda.current_stream()
-        self.common_state.residual.record_stream(cur_stream)
-        self.common_state.probs.record_stream(cur_stream)
-        self.common_state.residual = None
-        self.common_state.probs = None
-        return output
-
-
-class DenseAttnNode(TransformerLayerNode):
-
-    def forward_impl(self, hidden_states):
-        hidden_states = self.callables.forward(
-            hidden_states,
-        )
-        return hidden_states
-
-
-class DenseMlpNode(TransformerLayerNode):
-    def forward_impl(self, hidden_states):
-        return self.callables.forward(hidden_states)
-
-
 class FakeScheduleNode:
-
     def forward(self, inputs):
         return inputs
 
@@ -323,10 +242,9 @@ class FakeScheduleNode:
 def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
     common_state = TransformerLayerState()
     attn_callable, _, mlp_callable, _ = layer.get_submodule_callables(chunk_state).as_array()
-    attn = DenseAttnNode(common_state, attn_callable, comp_stream, event)
-    attn.name = "attn"
+    attn = TransformerLayerNode(comp_stream, event, common_state, attn_callable, False, name="attn")
     dispatch = FakeScheduleNode()
-    mlp = DenseMlpNode(common_state, mlp_callable, comp_stream, event)
+    mlp = TransformerLayerNode(comp_stream, event, common_state, mlp_callable, False, name="mlp")
     combine = FakeScheduleNode()
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
@@ -356,10 +274,10 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     
     # Create nodes for different operations in the layer
     # Each node type has a predefined name that determines its memory strategy
-    attn = MoeAttnNode(common_state, attn_callable, ctx, comp_stream, event)
-    dispatch = MoeDispatchNode(common_state, dispatch_callable, ctx, com_stream, event)
-    mlp = MoeMlPNode(common_state, mlp_callable, ctx, comp_stream, event)
-    combine = MoeCombineNode(common_state, combine_callable, ctx, comp_stream, event)
+    attn = TransformerLayerNode(comp_stream, event, common_state, attn_callable, True, ctx, name="attn")
+    dispatch = TransformerLayerNode(comp_stream, event, common_state, dispatch_callable, True, ctx, name="dispatch")
+    mlp = TransformerLayerNode(comp_stream, event, common_state, mlp_callable, True, ctx, name="mlp")
+    combine = TransformerLayerNode(comp_stream, event, common_state, combine_callable, True, ctx, name="combine")
     
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
@@ -709,7 +627,6 @@ def build_model_chunk_schedule_plan(
 
     # build preprocess
     model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
-    model_chunk_schedule_plan.pre_process.name = "pre_process"
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
@@ -717,8 +634,6 @@ def build_model_chunk_schedule_plan(
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
-
         model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
-        model_chunk_schedule_plan.post_process.name = "post_process"
 
     return model_chunk_schedule_plan
