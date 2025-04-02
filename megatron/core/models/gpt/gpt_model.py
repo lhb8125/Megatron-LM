@@ -346,7 +346,6 @@ class GPTModel(LanguageModule):
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
         runtime_gather_output: Optional[bool] = None,
-        loss_mask: Optional[Tensor] = None,
     ):
         from .fine_grained_schedule import build_model_chunk_schedule_plan
 
@@ -361,7 +360,6 @@ class GPTModel(LanguageModule):
             packed_seq_params=packed_seq_params,
             extra_block_kwargs=extra_block_kwargs,
             runtime_gather_output=runtime_gather_output,
-            loss_mask=loss_mask,
         )
 
     def sharded_state_dict(

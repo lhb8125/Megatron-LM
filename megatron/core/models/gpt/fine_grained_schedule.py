@@ -735,7 +735,6 @@ def build_model_chunk_schedule_plan(
     packed_seq_params=None,
     extra_block_kwargs=None,
     runtime_gather_output: Optional[bool] = None,
-    loss_mask: Optional[Tensor] = None,
 ):
 
     comp_stream = torch.cuda.current_stream()
@@ -756,7 +755,7 @@ def build_model_chunk_schedule_plan(
     state.context = None
     state.context_mask = None
     state.attention_bias = None
-    state.loss_mask = loss_mask # TODO: need to handle loss_mask in the schedule plan
+
     # build preprocess
     model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
     model_chunk_schedule_plan.pre_process.name = "pre_process"
