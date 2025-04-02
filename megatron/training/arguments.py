@@ -861,6 +861,48 @@ def validate_args(args, defaults={}):
             assert not args.account_for_loss_in_pipeline_split, \
                 "Cannot support load balancing loss and z loss with --account-for-loss-in-pipeline-split"
 
+    if args.combined_1f1b:
+        # Basic requirements for combined 1F1B
+        assert args.distributed_backend == 'nccl', \
+            'combined 1F1B is only supported with NCCL backend'
+        assert args.pipeline_model_parallel_size > 1, \
+            'combined 1F1B is only supported with pipeline model parallelism'
+        assert args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
+            'virtual pipeline parallel should be enabled for combined 1F1B'
+        
+        # Handle p2p communication overlap
+        if args.overlap_p2p_comm:
+            # Combined 1F1B overlaps also overlaps p2p communication, 
+            # however, it uses the code path of args.overlap_p2p_comm == False
+            # Todo: @Youngeun to check the schedule.py since the flag may cause some confusions.
+            args.overlap_p2p_comm = False
+
+        # Additional requirements for ep_a2a recipe
+        if args.combined_1f1b_recipe == 'ep_a2a':
+            # Expert model parallelism requirements
+            assert args.expert_model_parallel_size > 1, \
+                'Combined 1f1b recipe ep_a2a is only supported with expert model parallelism'
+            assert args.moe_token_dispatcher_type == 'alltoall', \
+                'Combined 1f1b recipe ep_a2a is only supported with alltoall token dispatcher'
+            
+            # Disable recomputation as it conflicts with combined 1F1B's memory management
+            recomputation_params = {
+                'recompute_activations': args.recompute_activations,
+                'recompute_granularity': args.recompute_granularity,
+                'recompute_method': args.recompute_method,
+                'recompute_num_layers': args.recompute_num_layers
+            }
+            for param_name, param_value in recomputation_params.items():
+                if param_value is not None and param_value is not False:
+                    raise ValueError(f'{param_name} is not supported when combined_1f1b_recipe is ep_a2a')
+            
+            # Disable shared expert overlap as it conflicts with ep_a2a
+            assert not args.moe_shared_expert_overlap, \
+                'moe_shared_expert_overlap is not supported when combined_1f1b_recipe is ep_a2a'
+
+        # Check split_bw compatibility with legacy groupedgemm
+        if args.split_bw and args.moe_use_legacy_grouped_gemm:
+            raise ValueError('split_bw is not supported with legacy groupedgemm implementation')
 
     if args.non_persistent_ckpt_type == "local":
         assert args.non_persistent_local_ckpt_dir is not None, "Tried to use local checkpointing without specifying --local-ckpt-dir!"
@@ -1299,7 +1341,7 @@ def _add_logging_args(parser):
                        help='Report to tensorboard interval.')
     group.add_argument('--tensorboard-queue-size', type=int, default=1000,
                        help='Size of the tensorboard queue for pending events '
-                       'and summaries before one of the ‘add’ calls forces a '
+                       'and summaries before one of the 'add' calls forces a '
                        'flush to disk.')
     group.add_argument('--log-timers-to-tensorboard', action='store_true',
                        help='If set, write timers to tensorboard.')

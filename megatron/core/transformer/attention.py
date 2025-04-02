@@ -847,6 +847,22 @@ class SelfAttention(Attention):
 
         return query, key, value
 
+    def backward_dw(self) -> NoReturn:
+        """Execute weight update operations"""
+        try:
+            self._backward_qkv_proj()
+            self._backward_output_proj()
+        except Exception as e:
+            raise RuntimeError(f"Error in SelfAttention backward_dw: {str(e)}")
+
+    def _backward_qkv_proj(self):
+        """Update weights for QKV projection layer"""
+        self.linear_qkv.backward_dw()
+
+    def _backward_output_proj(self):
+        """Update weights for output projection layer"""
+        self.linear_proj.backward_dw()
+
 
 class CrossAttention(Attention):
     """Cross-attention layer class
