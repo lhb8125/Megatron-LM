@@ -886,15 +886,12 @@ def validate_args(args, defaults={}):
                 'Combined 1f1b recipe ep_a2a is only supported with alltoall token dispatcher'
             
             # Disable recomputation as it conflicts with combined 1F1B's memory management
-            recomputation_params = {
-                'recompute_activations': args.recompute_activations,
-                'recompute_granularity': args.recompute_granularity,
-                'recompute_method': args.recompute_method,
-                'recompute_num_layers': args.recompute_num_layers
-            }
-            for param_name, param_value in recomputation_params.items():
-                if param_value is not None and param_value is not False:
-                    raise ValueError(f'{param_name} is not supported when combined_1f1b_recipe is ep_a2a')
+            assert args.recompute_granularity != 'full', \
+                'recompute_granularity must not be full when combined_1f1b_recipe is ep_a2a'
+            assert args.recompute_method is None, \
+                'recompute_method must be None when combined_1f1b_recipe is ep_a2a'
+            assert args.recompute_num_layers is None, \
+                'recompute_num_layers must be None when combined_1f1b_recipe is ep_a2a'
             
             # Disable shared expert overlap as it conflicts with ep_a2a
             assert not args.moe_shared_expert_overlap, \
@@ -1341,7 +1338,7 @@ def _add_logging_args(parser):
                        help='Report to tensorboard interval.')
     group.add_argument('--tensorboard-queue-size', type=int, default=1000,
                        help='Size of the tensorboard queue for pending events '
-                       'and summaries before one of the 'add' calls forces a '
+                       'and summaries before one of the "add" calls forces a '
                        'flush to disk.')
     group.add_argument('--log-timers-to-tensorboard', action='store_true',
                        help='If set, write timers to tensorboard.')
