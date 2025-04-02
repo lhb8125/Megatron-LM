@@ -175,7 +175,6 @@ class TransformerLayerNode(ScheduleNode):
         event, 
         common_state, 
         callables,
-        is_moe,
         forward_ctx=None,
         name="default"
     ):
@@ -202,7 +201,6 @@ class TransformerLayerNode(ScheduleNode):
         self.common_state = common_state
         self.callables = callables
         self.forward_ctx = forward_ctx
-        self.is_moe = is_moe
         self.detached = tuple()
         self.before_detached = tuple()
         
@@ -214,9 +212,7 @@ class TransformerLayerNode(ScheduleNode):
         return detached
 
     def forward_impl(self, *args):
-        if self.is_moe:
-            return self.callables.forward(self, *args)
-        return self.callables.forward(*args)
+        return self.callables.forward(self, *args)
 
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
@@ -250,11 +246,11 @@ class TransformerLayerSchedulePlan:
         # Create nodes for different operations in the layer
         # Each node type has a predefined name that determines its memory strategy
         is_moe = isinstance(layer.mlp, MoELayer)
-        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, is_moe, ctx, name="attn")
-        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, is_moe, ctx, name="mlp")
+        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, ctx, name="attn")
+        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, ctx, name="mlp")
         if is_moe:
-            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable, is_moe, ctx, name="dispatch")
-            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, is_moe, ctx, name="combine")
+            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable, ctx, name="dispatch")
+            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, ctx, name="combine")
         else:
             self.dispatch = FakeScheduleNode()
             self.combine = FakeScheduleNode()

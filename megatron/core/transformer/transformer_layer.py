@@ -627,33 +627,39 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         node.common_state.residual = None
         node.common_state.probs = None
         return output
-
+    
+    def _submodule_non_moe_postprocess(self, node, hidden_states):
+        return hidden_states
+    
     def _submodule_not_implemented(self, *args):
         raise NotImplementedError("This callable is not implemented.")
 
     def get_submodule_callables(self, chunk_state):
         """
-        Returns a dictionary of submodule callables for the transformer layer.
+        The forward callables take 2 parts of inputs:
+        1. The ScheduleNode object.
+        2. The input tensors.
         """
         from megatron.core.transformer.moe.moe_layer import MoELayer
-
+        is_moe = isinstance(self.mlp, MoELayer)
         def get_func_with_default(func, default_func):
-            if isinstance(self.mlp, MoELayer):
+            if is_moe:
                 return func
             return default_func
         
         def callable_wrapper(forward_func, postprocess_func, node, *args):
             with node.forward_ctx():
-                callable_outputs = forward_func(*args, state=node.common_state)
+                state = getattr(node, 'common_state', None)
+                callable_outputs = forward_func(*args, state=state)
             if isinstance(callable_outputs, tuple):
                 outputs = postprocess_func(node, *callable_outputs)
             else:
                 outputs = postprocess_func(node, callable_outputs)
             return outputs
-        
-        cur_attention_func = get_func_with_default(self._submodule_attn_router_forward, self._submodule_attn_forward)
+
+        attn_func = get_func_with_default(self._submodule_attn_router_forward, self._submodule_attn_forward)
         def attn_wrapper(hidden_states, state=None):
-            return cur_attention_func(
+            return attn_func(
                 hidden_states, 
                 attention_mask = chunk_state.attention_mask,
                 attention_bias = chunk_state.attention_bias,
@@ -665,28 +671,33 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 rotary_pos_sin = chunk_state.rotary_pos_sin,
                 state = state
             )
-        attn_router_forward = partial(callable_wrapper, attn_wrapper, self._submodule_attn_router_postprocess)
-        dispatch_forward = partial(callable_wrapper, self._submodule_dispatch_forward, self._submodule_dispatch_postprocess)
-        mlp_forward = partial(callable_wrapper, self._submodule_moe_forward, self._submodule_mlp_postprocess)
-        combine_forward = partial(callable_wrapper, self._submodule_combine_forward, self._submodule_combine_postprocess)
+        attn_postprocess_func = get_func_with_default(self._submodule_attn_router_postprocess, self._submodule_non_moe_postprocess)
+        
+        dispatch_func = get_func_with_default(self._submodule_dispatch_forward, self._submodule_not_implemented)
+        dispatch_postprocess_func = get_func_with_default(self._submodule_dispatch_postprocess, self._submodule_non_moe_postprocess)
+        
+        mlp_func = get_func_with_default(self._submodule_moe_forward, self._submodule_dense_forward)
+        mlp_postprocess_func = get_func_with_default(self._submodule_mlp_postprocess, self._submodule_non_moe_postprocess)
+        
+        combine_func = get_func_with_default(self._submodule_combine_forward, self._submodule_not_implemented)
+        combine_postprocess_func = get_func_with_default(self._submodule_combine_postprocess, self._submodule_non_moe_postprocess)
+        
+        attn_forward = partial(callable_wrapper, attn_wrapper, attn_postprocess_func)
+        dispatch_forward = partial(callable_wrapper, dispatch_func, dispatch_postprocess_func)
+        mlp_forward = partial(callable_wrapper, mlp_func, mlp_postprocess_func)
+        combine_forward = partial(callable_wrapper, combine_func, combine_postprocess_func)
 
-        attention_func = get_func_with_default(attn_router_forward, attn_wrapper)
-        dispatch_func = get_func_with_default(dispatch_forward, self._submodule_not_implemented)
-        mlp_func = get_func_with_default(mlp_forward, self._submodule_dense_forward)
-        combine_func = get_func_with_default(combine_forward, self._submodule_not_implemented)
-        
-        
         callables = TransformerLayerSubmoduleCallables(
             attention=SubmoduleCallables(
-                forward=attention_func,
+                forward=attn_forward,
                 dw=self._submodule_attn_router_dw,
             ),
-            dispatch=SubmoduleCallables(forward=dispatch_func),
+            dispatch=SubmoduleCallables(forward=dispatch_forward),
             mlp=SubmoduleCallables(
-                forward=mlp_func,
+                forward=mlp_forward,
                 dw=self._submodule_mlp_dw,
             ),
-            combine=SubmoduleCallables(forward=combine_func),
+            combine=SubmoduleCallables(forward=combine_forward),
         )
         return callables
 
