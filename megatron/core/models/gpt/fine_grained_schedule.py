@@ -9,6 +9,7 @@ from torch import Tensor
 from megatron.core.pipeline_parallel.combined_1f1b import (
     AbstractSchedulePlan,
     ScheduleNode,
+    FakeScheduleNode,
     get_com_stream,
     get_comp_stream,
     make_viewless,
@@ -231,57 +232,6 @@ class TransformerLayerNode(ScheduleNode):
             self.callables.dw()
 
 
-class FakeScheduleNode:
-    def forward(self, inputs):
-        return inputs
-
-    def backward(self, outgrads):
-        return outgrads
-
-
-def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
-    common_state = TransformerLayerState()
-    attn_callable, _, mlp_callable, _ = layer.get_submodule_callables(chunk_state).as_array()
-    attn = TransformerLayerNode(comp_stream, event, common_state, attn_callable, False, name="attn")
-    dispatch = FakeScheduleNode()
-    mlp = TransformerLayerNode(comp_stream, event, common_state, mlp_callable, False, name="mlp")
-    combine = FakeScheduleNode()
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
-
-
-def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
-    """Build schedule plan for a transformer layer.
-    
-    This function creates the appropriate nodes based on whether 
-    the layer is a MoE (Mixture of Experts) layer or not.
-    
-    Args:
-        layer: The transformer layer
-        event (torch.cuda.Event): Synchronization event
-        chunk_state: State shared across the model chunk
-        comp_stream (torch.cuda.Stream): Computation stream
-        com_stream (torch.cuda.Stream): Communication stream
-        
-    Returns:
-        TransformerLayerSchedulePlan: A schedule plan for the layer
-    """
-    if not isinstance(layer.mlp, MoELayer):
-        return build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
-    
-    common_state = TransformerLayerState()
-    ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, common_state)
-    attn_callable, dispatch_callable, mlp_callable, combine_callable = layer.get_submodule_callables(chunk_state).as_array()
-    
-    # Create nodes for different operations in the layer
-    # Each node type has a predefined name that determines its memory strategy
-    attn = TransformerLayerNode(comp_stream, event, common_state, attn_callable, True, ctx, name="attn")
-    dispatch = TransformerLayerNode(com_stream, event, common_state, dispatch_callable, True, ctx, name="dispatch")
-    mlp = TransformerLayerNode(comp_stream, event, common_state, mlp_callable, True, ctx, name="mlp")
-    combine = TransformerLayerNode(com_stream, event, common_state, combine_callable, True, ctx, name="combine")
-    
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
-
-
 class TransformerLayerState(MoEAlltoAllPerBatchState):
     pass
 
@@ -292,11 +242,22 @@ class ModelChunkSate:
 
 class TransformerLayerSchedulePlan:
 
-    def __init__(self, attn, dispatch, mlp, combine):
-        self.attn = attn
-        self.dispatch = dispatch
-        self.mlp = mlp
-        self.combine = combine
+    def __init__(self, layer, event, chunk_state, comp_stream, com_stream):
+        self.common_state = TransformerLayerState()
+        ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, self.common_state)
+        attn_callable, dispatch_callable, mlp_callable, combine_callable = layer.get_submodule_callables(chunk_state).as_array()
+        
+        # Create nodes for different operations in the layer
+        # Each node type has a predefined name that determines its memory strategy
+        is_moe = isinstance(layer.mlp, MoELayer)
+        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, is_moe, ctx, name="attn")
+        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, is_moe, ctx, name="mlp")
+        if is_moe:
+            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable, is_moe, ctx, name="dispatch")
+            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, is_moe, ctx, name="combine")
+        else:
+            self.dispatch = FakeScheduleNode()
+            self.combine = FakeScheduleNode()
 
 
 class ModelChunkSchedulePlan(AbstractSchedulePlan):
@@ -630,7 +591,7 @@ def build_model_chunk_schedule_plan(
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
+        layer_plan = TransformerLayerSchedulePlan(layer, event, state, comp_stream, com_stream)
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
