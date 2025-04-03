@@ -1153,7 +1153,6 @@ def forward_backward_pipelining_with_interleaving(
             assert (
                 checkpoint_activations_microbatch is None
             ), "checkpoint_activations_microbatch not supported when combined_1f1b is true"
-            assert not forward_only, "forward_only not supported when combined_1f1b is true"
 
             return combined_forward_backward_helper(
                 f_virtual_microbatch_id=f_virtual_microbatch_id,
