@@ -9,24 +9,24 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
-
+from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-
 
 # Types
 Shape = Union[List[int], torch.Size]
 
 
 def make_viewless(e):
-    """make_viewless util func"""
+    """Make_viewless util func"""
     e = make_viewless_tensor(inp=e, requires_grad=e.requires_grad, keep_graph=True)
     return e
 
 
 @contextmanager
 def stream_acquire_context(stream, event):
+    """Stream acquire context"""
     event.wait(stream)
     try:
         yield
@@ -42,7 +42,7 @@ class FakeScheduleNode:
 
 class ScheduleNode:
     """Base node for fine-grained scheduling.
-    
+
     This class represents a computational node in the pipeline schedule.
     It handles the execution of forward and backward operations on a stream.
     """
@@ -57,7 +57,7 @@ class ScheduleNode:
         name="schedule_node",
     ):
         """Initialize a schedule node.
-        
+
         Args:
             forward_func (callable): Function to execute during forward pass
             stream (torch.cuda.Stream): CUDA stream for computation
@@ -68,7 +68,7 @@ class ScheduleNode:
         """
         self.name = name
         self.forward_func = forward_func
-        self.backward_func = backward_func
+        self.backward_func = backward_func if backward_func else self.default_backward_func
         self.stream = stream
         self.event = event
         self.memory_strategy = memory_strategy or NoOpMemoryStrategy()
@@ -76,6 +76,7 @@ class ScheduleNode:
         self.outputs = None
 
     def default_backward_func(self, outputs, output_grad):
+        """Default backward function"""
         Variable._execution_engine.run_backward(
             tensors=outputs,
             grad_tensors=output_grad,
@@ -88,8 +89,7 @@ class ScheduleNode:
         return output_grad
 
     def forward(self, inputs=()):
-        """schedule node forward"""
-
+        """Schedule node forward"""
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
         return self._forward(*inputs)
@@ -114,17 +114,17 @@ class ScheduleNode:
                 self.output = data
             torch.cuda.nvtx.range_pop()
 
-        # 使用策略处理输入
+        # Handle inputs using the memory strategy
         self.memory_strategy.handle_inputs(inputs, self.stream)
 
         return self.output
 
     def get_output(self):
-        """get the forward output"""
+        """Get the forward output"""
         return self.output
 
     def backward(self, output_grad):
-        """schedule node backward"""
+        """Schedule node backward"""
         if not isinstance(output_grad, tuple):
             output_grad = (output_grad,)
         return self._backward(*output_grad)
@@ -139,10 +139,7 @@ class ScheduleNode:
                 assert len(outputs) == len(
                     output_grad
                 ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
-                if self.backward_func is not None:
-                    output_grad = self.backward_func(outputs, output_grad)
-                else:
-                    output_grad = self.default_backward_func(outputs, output_grad)
+                output_grad = self.backward_func(outputs, output_grad)
             torch.cuda.nvtx.range_pop()
 
         # output_grad maybe from another stream
@@ -152,7 +149,7 @@ class ScheduleNode:
         return self.get_grad()
 
     def get_grad(self):
-        """get the grad of inputs"""
+        """Get the grad of inputs"""
         grad = tuple([e.grad if e is not None else None for e in self.inputs])
         # clear state
         self.inputs = None
@@ -164,7 +161,7 @@ class ScheduleNode:
 
 
 class AbstractSchedulePlan(ABC):
-    """to use combined 1f1b, model must implement build_schedule_plan while take the same
+    """To use combined 1f1b, model must implement build_schedule_plan while take the same
     signature as model forward but return an instance of AbstractSchedulePlan"""
 
     @classmethod
@@ -196,7 +193,29 @@ def schedule_chunk_1f1b(
     post_forward=None,
     post_backward=None,
 ):
-    """model level 1f1b fine-grained schedule"""
+    """Model level 1f1b fine-grained schedule
+
+    This function schedules the forward and backward passes for a chunk of the model.
+    It takes in the forward schedule plan, backward schedule plan, gradient, and optional
+    context managers for the forward and backward passes.
+
+    Args:
+        f_schedule_plan (subclass of AbstractSchedulePlan): The forward schedule plan
+        b_schedule_plan (subclass of AbstractSchedulePlan): The backward schedule plan
+        grad (Tensor or None): The gradient of the loss function
+        f_context (VppContextManager or None): The VppContextManager for the forward pass
+        b_context (VppContextManager or None): The VppContextManager for the backward pass
+        pre_forward (callable or None): The function to call before the forward pass
+        pre_backward (callable or None): The function to call before the backward pass
+        post_forward (callable or None): The function to call after the forward pass
+        post_backward (callable or None): The function to call after the backward pass
+
+    Returns:
+        The output of the forward pass
+    """
+
+    # Calls fine_grained_schedule.py::ModelChunkSchedulePlan.forward_backward(),
+    # which calls fine_grained_schedule.py::schedule_chunk_1f1b()
     return type(f_schedule_plan or b_schedule_plan).forward_backward(
         f_schedule_plan,
         b_schedule_plan,
@@ -210,29 +229,19 @@ def schedule_chunk_1f1b(
     )
 
 
-def schedule_chunk_forward(schedule_plan):
-    """model level fine-grained forward schedule"""
-    f_input = schedule_chunk_1f1b(schedule_plan, None, None)
-    return f_input
-
-
-def schedule_chunk_backward(schedule_plan, grad):
-    """model level fine-grained backward schedule"""
-    tmp = schedule_chunk_1f1b(None, schedule_plan, grad)
-
-
 _COMP_STREAM = None
 _COM_STREAM = None
 
 
 def set_streams(comp_stream=None, com_stream=None):
-    """set the streams for communication and computation"""
+    """Set the streams for communication and computation"""
     global _COMP_STREAM
     global _COM_STREAM
     if _COMP_STREAM is not None:
         return
 
     if comp_stream is None:
+        # TODO: should be sync with the memory fix PR
         comp_stream = torch.cuda.Stream(device="cuda")
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
@@ -244,19 +253,19 @@ def set_streams(comp_stream=None, com_stream=None):
 
 
 def get_comp_stream():
-    """get the stream for computation"""
+    """Get the stream for computation"""
     global _COMP_STREAM
     return _COMP_STREAM
 
 
 def get_com_stream():
-    """get the stream for communication"""
+    """Get the stream for communication"""
     global _COM_STREAM
     return _COM_STREAM
 
 
 class VppContextManager:
-    """a reusable context manager for switch vpp stage"""
+    """A reusable context manager for switch vpp stage"""
 
     def __init__(self, vpp_rank):
         self.vpp_rank = vpp_rank
@@ -294,72 +303,55 @@ def forward_backward_step(
     current_microbatch=None,
     encoder_decoder_xattn=False,
 ):
-    """Forward step for passed-in model.
-
-    If it is the first stage, the input tensor is obtained from the data_iterator.
-    Otherwise, the passed-in input_tensor is used.
+    """Merged forward and backward step for combined_1f1b.
 
     Args:
-        forward_step_func (callable):
-            The forward step function for the model that takes the
-            data iterator as the first argument, and model as the second.
-            This user's forward step is expected to output a tuple of two elements:
+        Need to accept the argument of both forward_step() and backward_step().
+        forward_step_func (callable): is wrapped by wrap_forward_func() which is now returning
+            a forward schedule plan which is an input of schedule_chunk_1f1b function.
+        f_context (VppContextManager or nullcontext): The context manager for setting vpp ranks.
+        b_context (VppContextManager or nullcontext): The context manager for setting vpp ranks.
 
-                1. The output object from the forward step. This output object needs to be a
-                    tensor or some kind of collection of tensors. The only hard requirement
-                    for this object is that it needs to be acceptible as input into the second
-                    function.
-                2. A function to reduce (optionally) the output from the forward step. This
-                    could be a reduction over the loss from the model, it could be a function that
-                    grabs the output from the model and reformats, it could be a function that just
-                    passes through the model output. This function must have one of the following
-                    patterns, and depending on the pattern different things happen internally:
-
-                        a. A tuple of reduced loss and some other data. Note that in this case
-                            the first argument is divided by the number of global microbatches,
-                            assuming it is a loss, so that the loss is stable as a function of
-                            the number of devices the step is split across.
-                        b. A triple of reduced loss, number of tokens, and some other data. This
-                            is similar to case (a), but the loss is further averaged across the
-                            number of tokens in the batch. If the user is not already averaging
-                            across the number of tokens, this pattern is useful to use.
-                        c. Any arbitrary data the user wants (eg a dictionary of tensors, a list
-                            of tensors, etc in the case of inference). To trigger case 3 you need
-                            to specify `collect_non_loss_data=True` and you may also want to
-                            specify `forward_only=True` in the call to the parent forward_backward
-                            function.
-        data_iterator (iterator):
-            The data iterator.
-        model (nn.Module):
-            The model to perform the forward step on.
-        num_microbatches (int):
-            The number of microbatches.
-        input_tensor (Tensor or list[Tensor]):
-            The input tensor(s) for the forward step.
-        forward_data_store (list):
-            The list to store the forward data. If you go down path 2.a or
-            2.b for the return of your forward reduction function then this will store only the
-            final dimension of the output, for example the metadata output by the loss function.
-            If you go down the path of 2.c then this will store the entire output of the forward
-            reduction function applied to the model output.
-        config (object):
-            The configuration object.
-        collect_non_loss_data (bool, optional):
-            Whether to collect non-loss data. Defaults to False.
-            This is the path to use if you want to collect arbitrary output from the model forward,
-            such as with inference use cases. Defaults to False.
-        checkpoint_activations_microbatch (int, optional):
-            The microbatch to checkpoint activations.
-            Defaults to None.
-        is_first_microbatch (bool, optional):
-            Whether it is the first microbatch. Defaults to False.
-        current_microbatch (int, optional):
-            The current microbatch. Defaults to None.
+        Only exists in 1f1b steady state with p2p overlap.
+            pre_forward (callable): The function to call before the forward_step.
+            pre_backward (callable): The function to call before the backward_step.
+            post_forward (callable): The function to call after the forward_step.
+            post_backward (callable): The function to call after the backward_step.
 
     Returns:
-        Tensor or list[Tensor]: The output object(s) from the forward step.
-        Tensor: The number of tokens.
+        forward_output_tensor (Tensor or list[Tensor]): The output object(s) from the forward step.
+        forward_num_tokens (Tensor): The number of tokens.
+        backward_input_tensor_grad (Tensor): The grad of the input tensor.
+
+    Descriptions:
+        This method merges the forward_step() and backward_step() methods in the schedules.py file.
+        Assuming that:
+            def forward_step():
+                # forward_preprocess()
+                # forward_compute()
+                # forward_postprocess()
+            def backward_step():
+                # backward_preprocess()
+                # backward_compute()
+                # backward_postprocess()
+        Then the forward_backward_step() method will be:
+            def forward_backward_step():
+                # forward_preprocess() // the same as the forward_step()
+                # GENERATE f_schedule_plan // schedule happens in schedule_chunk_1f1b()
+                # backward_preprocess() // the same as the backward_step()
+                # COMBINED_FORWARD_BACKWARD_COMPUTE() // by calling schedule_chunk_1f1b()
+                # forward_postprocess() // the same as the forward_step()
+                # backward_postprocess() // the same as the backward_step()
     """
+    assert (
+        checkpoint_activations_microbatch is None
+    ), "checkpoint_activations_microbatch is not supported for combined_1f1b"
+
+    if config.combined_1f1b_recipe != "ep_a2a":
+        raise NotImplementedError(
+            f"combined_1f1b_recipe {config.combined_1f1b_recipe} not supported yet"
+        )
+
     from .schedules import set_current_microbatch
 
     if config.timers is not None:
@@ -372,6 +364,7 @@ def forward_backward_step(
 
     # forward preprocess
     unwrap_output_tensor = False
+    f_schedule_plan = None
     if f_model is not None:
         with f_context:
             if is_first_microbatch and hasattr(f_model, 'set_is_first_microbatch'):
@@ -385,15 +378,11 @@ def forward_backward_step(
             set_input_tensor = get_attr_wrapped_model(f_model, "set_input_tensor")
             set_input_tensor(input_tensor)
 
-            with context_manager:
-                if checkpoint_activations_microbatch is None:
-                    output_tensor, loss_func = forward_step_func(data_iterator, f_model)
-                else:
-                    output_tensor, loss_func = forward_step_func(
-                        data_iterator, f_model, checkpoint_activations_microbatch
-                    )
+            with context_manager:  # autocast context
+                # calls `forward_step_func(data_iterator, GPTModel.build_schedule_plan)`, which returns f_schedule_plan and loss_func
+                f_schedule_plan, loss_func = forward_step_func(data_iterator, f_model)
                 assert isinstance(
-                    output_tensor, AbstractSchedulePlan
+                    f_schedule_plan, AbstractSchedulePlan
                 ), "first output of forward_step_func must be one instance of AbstractSchedulePlan"
 
     # backward preprocess
@@ -424,7 +413,6 @@ def forward_backward_step(
             torch.autograd.backward(b_output_tensor[0], grad_tensors=b_output_tensor_grad[0])
             b_output_tensor_grad[0] = loss_node.get_grad()
 
-    f_schedule_plan = output_tensor if f_model else None
     grad = b_output_tensor_grad[0] if b_model else None
     with context_manager:
         # schedule forward and backward
@@ -442,7 +430,7 @@ def forward_backward_step(
 
     # forward post process
     num_tokens = None
-    if f_model:
+    if f_model is not None:
         with f_context:
             num_tokens = torch.tensor(0, dtype=torch.int)
             if parallel_state.is_pipeline_last_stage():
@@ -511,18 +499,21 @@ def forward_backward_step(
 
     return output_tensor, num_tokens, input_tensor_grad
 
+
 def get_default_cls_for_unwrap():
     cls = (DistributedDataParallel, Float16Module)
     try:
         # legacy should not be used in core, but for backward compatibility, we support it here
         from megatron.legacy.model import Float16Module as LegacyFloat16Module
+
         cls = cls + (LegacyFloat16Module,)
     except:
         pass
     return cls
 
+
 def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
-    """unwrap_model DistributedDataParallel and Float16Module wrapped model"""
+    """Unwrap_model DistributedDataParallel and Float16Module wrapped model"""
     return_list = True
     if not isinstance(model, list):
         model = [model]
@@ -531,65 +522,74 @@ def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     for model_module in model:
         while isinstance(model_module, module_instances):
             model_module = model_module.module
+        assert isinstance(
+            model_module, GPTModel
+        ), "The final unwrapped model must be a GPTModel instance"
         unwrapped_model.append(model_module)
     if not return_list:
         return unwrapped_model[0]
     return unwrapped_model
 
 
-def wrap_forward_func(config, forward_step_func):
-    """wrap the input to forward_step_func, to make forward_step_func return schedule plan"""
+def wrap_forward_func(forward_step_func):
+    """Wrap the input to forward_step_func.
+    The wrapped function will return forward_schedule_plan and the loss_function.
+    """
 
     def wrapped_func(data_iterator, model):
+        # Model is unwrapped to get GPTModel instance.
+        # GPTModel.build_schedule_plan(model_forward_inputs) is called in the forward_step.
+        # The return value becomes (forward_schedule_plan, loss_function), which is used to be (forward_output_tensor, loss_function).
         return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
 
-    if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a":
-        return wrapped_func
-    else:
-        return forward_step_func
+    return wrapped_func
 
 
 class MemoryManagementStrategy:
     """Base class for memory management strategies.
-    
+
     Different memory management strategies can be implemented by subclassing this class.
     These strategies control how tensors are handled in memory during the computation.
     """
-    
+
     def handle_inputs(self, inputs, stream):
         """Process input tensors after computation.
-        
+
         Args:
             inputs (tuple): Input tensors that have been used
             stream (torch.cuda.Stream): Current CUDA stream
         """
         pass
-        
+
     def handle_outputs(self, outputs, stream):
         """Process output tensors after computation.
-        
+
         Args:
             outputs (tuple): Output tensors produced by the computation
             stream (torch.cuda.Stream): Current CUDA stream
         """
         pass
 
+
 class NoOpMemoryStrategy(MemoryManagementStrategy):
     """Strategy that performs no memory management operations.
-    
+
     This is the default strategy - it doesn't free any memory.
     """
+
     pass
-    
+
+
 class FreeInputsMemoryStrategy(MemoryManagementStrategy):
     """Strategy that immediately frees input tensors after they are used.
-    
+
     This strategy is useful for nodes where inputs are no longer needed
     after computation, helping to reduce memory usage.
     """
+
     def handle_inputs(self, inputs, stream):
         """Free input tensors by resizing their storage to zero.
-        
+
         Args:
             inputs (tuple): Input tensors to be freed
             stream (torch.cuda.Stream): Current CUDA stream
