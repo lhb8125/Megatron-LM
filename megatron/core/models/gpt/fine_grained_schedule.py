@@ -1,7 +1,9 @@
 import contextlib
 import weakref
 from functools import partial
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Optional
+from contextlib import nullcontext
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
@@ -49,8 +51,10 @@ class MemoryStrategyRegistry:
     }
 
     @classmethod
-    def get_strategy_by_name(cls, name):
-        return cls._strategies.get(name, cls._strategies["default"])
+    def get_strategy_by_name(cls, name, is_moe):
+        if is_moe:
+            return cls._strategies.get(name, cls._strategies["default"])
+        return NoOpMemoryStrategy()
 
 
 class PreProcessNode(ScheduleNode):
@@ -170,18 +174,19 @@ class TransformerLayerNode(ScheduleNode):
     transformer layer nodes (attention, MLP, etc.)
     """
 
-    def __init__(self, stream, event, common_state, callables, forward_ctx=None, name="default"):
+    def __init__(self, stream, event, state, callables, name="default"):
         """Initialize a transformer layer node.
 
         Args:
-            common_state: State shared within a transformer layer
-            func: The forward function to be executed
             stream (torch.cuda.Stream): CUDA stream for execution
             event (torch.cuda.Event): Synchronization event
+            common_state: State shared within a transformer layer
+            callables: The callables contain forward and dw function
+            forward_ctx: Context for forward computation, for moe, it's the per_batch_state_context, o.w. nullcontext
             name (str): Node name, also used to determine memory strategy
         """
         # Get memory strategy based on node name
-        memory_strategy = MemoryStrategyRegistry.get_strategy_by_name(name)
+        memory_strategy = MemoryStrategyRegistry.get_strategy_by_name(name, state.is_moe)
 
         super().__init__(
             weak_method(self.forward_impl),
@@ -191,9 +196,9 @@ class TransformerLayerNode(ScheduleNode):
             memory_strategy=memory_strategy,
             name=name,
         )
-        self.common_state = common_state
+        self.common_state = state.dispatcher_state
         self.callables = callables
-        self.forward_ctx = forward_ctx
+        self.forward_ctx = state.forward_ctx
         self.detached = tuple()
         self.before_detached = tuple()
 
@@ -221,8 +226,11 @@ class TransformerLayerNode(ScheduleNode):
             self.callables.dw()
 
 
-class TransformerLayerState(MoEAlltoAllPerBatchState):
-    pass
+@dataclass
+class TransformerLayerState:
+    is_moe: bool
+    forward_ctx = nullcontext
+    dispatcher_state = MoEAlltoAllPerBatchState()
 
 
 class ModelChunkSate:
@@ -232,28 +240,22 @@ class ModelChunkSate:
 class TransformerLayerSchedulePlan:
 
     def __init__(self, layer, event, chunk_state, comp_stream, com_stream):
-        self.common_state = TransformerLayerState()
-        ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, self.common_state)
+        is_moe = isinstance(layer.mlp, MoELayer)
+        self.common_state = TransformerLayerState(is_moe)
+        if is_moe:
+            self.common_state.forward_ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, self.common_state.dispatcher_state)
+        # get callables for transformer layer
         attn_callable, dispatch_callable, mlp_callable, combine_callable = (
             layer.get_submodule_callables(chunk_state).as_array()
         )
 
         # Create nodes for different operations in the layer
         # Each node type has a predefined name that determines its memory strategy
-        is_moe = isinstance(layer.mlp, MoELayer)
-        self.attn = TransformerLayerNode(
-            comp_stream, event, self.common_state, attn_callable, ctx, name="attn"
-        )
-        self.mlp = TransformerLayerNode(
-            comp_stream, event, self.common_state, mlp_callable, ctx, name="mlp"
-        )
+        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, name="attn")
+        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, name="mlp")
         if is_moe:
-            self.dispatch = TransformerLayerNode(
-                com_stream, event, self.common_state, dispatch_callable, ctx, name="dispatch"
-            )
-            self.combine = TransformerLayerNode(
-                com_stream, event, self.common_state, combine_callable, ctx, name="combine"
-            )
+            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable,name="dispatch")
+            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, name="combine")
         else:
             self.dispatch = FakeScheduleNode()
             self.combine = FakeScheduleNode()
