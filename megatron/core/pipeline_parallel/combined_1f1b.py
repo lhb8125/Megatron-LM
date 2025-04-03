@@ -9,6 +9,7 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
+from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
@@ -207,7 +208,8 @@ def schedule_chunk_1f1b(
         The output of the forward pass
     """
 
-    # Calls ModelChunkSchedulePlan.forward_backward()
+    # Calls fine_grained_schedule.py::ModelChunkSchedulePlan.forward_backward(), 
+    # which calls fine_grained_schedule.py::schedule_chunk_1f1b()
     return type(f_schedule_plan or b_schedule_plan).forward_backward(
         f_schedule_plan,
         b_schedule_plan,
@@ -233,7 +235,8 @@ def set_streams(comp_stream=None, com_stream=None):
         return
 
     if comp_stream is None:
-        comp_stream = torch.cuda.Stream(device="cuda")
+        # @lhb8125: maybe it will be better to set comp_stream = torch.cuda.current_stream() in here?
+        comp_stream = torch.cuda.Stream(device="cuda") 
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
@@ -421,7 +424,7 @@ def forward_backward_step(
 
     # forward post process
     num_tokens = None
-    if f_model:
+    if f_model is not None:
         with f_context:
             num_tokens = torch.tensor(0, dtype=torch.int)
             if parallel_state.is_pipeline_last_stage():
@@ -513,6 +516,7 @@ def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     for model_module in model:
         while isinstance(model_module, module_instances):
             model_module = model_module.module
+        assert isinstance(model_module, GPTModel), "The final unwrapped model must be a GPTModel instance"
         unwrapped_model.append(model_module)
     if not return_list:
         return unwrapped_model[0]
@@ -520,9 +524,14 @@ def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
 
 
 def wrap_forward_func(forward_step_func):
-    """Wrap the input to forward_step_func, to make forward_step_func return schedule plan"""
+    """Wrap the input to forward_step_func.
+        The wrapped function will return forward_schedule_plan and the loss_function.
+    """
 
     def wrapped_func(data_iterator, model):
+        # Model is unwrapped to get GPTModel instance.
+        # GPTModel.build_schedule_plan(model_forward_inputs) is called in the forward_step.
+        # The return value becomes (forward_schedule_plan, loss_function), which is used to be (forward_output_tensor, loss_function).
         return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
 
     return wrapped_func
