@@ -33,12 +33,14 @@ def stream_acquire_context(stream, event):
     finally:
         event.record(stream)
 
+
 class FakeScheduleNode:
     def forward(self, inputs):
         return inputs
 
     def backward(self, outgrads):
         return outgrads
+
 
 class ScheduleNode:
     """Base node for fine-grained scheduling.

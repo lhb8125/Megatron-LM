@@ -1,15 +1,17 @@
 import contextlib
 import weakref
-from typing import Any, Callable, Optional, Tuple, Union
 from functools import partial
+from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 from torch import Tensor
 
 from megatron.core.pipeline_parallel.combined_1f1b import (
     AbstractSchedulePlan,
-    ScheduleNode,
     FakeScheduleNode,
+    FreeInputsMemoryStrategy,
+    NoOpMemoryStrategy,
+    ScheduleNode,
     get_com_stream,
     get_comp_stream,
     make_viewless,
@@ -18,7 +20,6 @@ from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
-from megatron.core.pipeline_parallel.combined_1f1b import NoOpMemoryStrategy, FreeInputsMemoryStrategy
 
 
 def weak_method(method):
@@ -34,19 +35,19 @@ def weak_method(method):
 
 class MemoryStrategyRegistry:
     """Registry for memory management strategies based on node names.
-    
+
     This class centralizes the definition of which memory strategy
     should be used for each type of node in the computation graph.
     """
-    
+
     _strategies = {
         "default": NoOpMemoryStrategy(),
-        "attn": NoOpMemoryStrategy(),          # Attention nodes keep their inputs
-        "dispatch": FreeInputsMemoryStrategy(), # Dispatch nodes free inputs after use
-        "mlp": FreeInputsMemoryStrategy(),     # MLP nodes free inputs after use 
-        "combine": FreeInputsMemoryStrategy(), # Combine nodes free inputs after use
+        "attn": NoOpMemoryStrategy(),  # Attention nodes keep their inputs
+        "dispatch": FreeInputsMemoryStrategy(),  # Dispatch nodes free inputs after use
+        "mlp": FreeInputsMemoryStrategy(),  # MLP nodes free inputs after use
+        "combine": FreeInputsMemoryStrategy(),  # Combine nodes free inputs after use
     }
-    
+
     @classmethod
     def get_strategy_by_name(cls, name):
         return cls._strategies.get(name, cls._strategies["default"])
@@ -164,22 +165,14 @@ class PostProcessNode(ScheduleNode):
 
 class TransformerLayerNode(ScheduleNode):
     """Base class for transformer layer computation nodes.
-    
+
     This class provides common functionality for different types of
     transformer layer nodes (attention, MLP, etc.)
     """
 
-    def __init__(
-        self, 
-        stream, 
-        event, 
-        common_state, 
-        callables,
-        forward_ctx=None,
-        name="default"
-    ):
+    def __init__(self, stream, event, common_state, callables, forward_ctx=None, name="default"):
         """Initialize a transformer layer node.
-        
+
         Args:
             common_state: State shared within a transformer layer
             func: The forward function to be executed
@@ -189,7 +182,7 @@ class TransformerLayerNode(ScheduleNode):
         """
         # Get memory strategy based on node name
         memory_strategy = MemoryStrategyRegistry.get_strategy_by_name(name)
-        
+
         super().__init__(
             weak_method(self.forward_impl),
             stream,
@@ -203,7 +196,7 @@ class TransformerLayerNode(ScheduleNode):
         self.forward_ctx = forward_ctx
         self.detached = tuple()
         self.before_detached = tuple()
-        
+
     def detach(self, t):
         detached = make_viewless(t).detach()
         detached.requires_grad = t.requires_grad
@@ -241,16 +234,26 @@ class TransformerLayerSchedulePlan:
     def __init__(self, layer, event, chunk_state, comp_stream, com_stream):
         self.common_state = TransformerLayerState()
         ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, self.common_state)
-        attn_callable, dispatch_callable, mlp_callable, combine_callable = layer.get_submodule_callables(chunk_state).as_array()
-        
+        attn_callable, dispatch_callable, mlp_callable, combine_callable = (
+            layer.get_submodule_callables(chunk_state).as_array()
+        )
+
         # Create nodes for different operations in the layer
         # Each node type has a predefined name that determines its memory strategy
         is_moe = isinstance(layer.mlp, MoELayer)
-        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, ctx, name="attn")
-        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, ctx, name="mlp")
+        self.attn = TransformerLayerNode(
+            comp_stream, event, self.common_state, attn_callable, ctx, name="attn"
+        )
+        self.mlp = TransformerLayerNode(
+            comp_stream, event, self.common_state, mlp_callable, ctx, name="mlp"
+        )
         if is_moe:
-            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable, ctx, name="dispatch")
-            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, ctx, name="combine")
+            self.dispatch = TransformerLayerNode(
+                com_stream, event, self.common_state, dispatch_callable, ctx, name="dispatch"
+            )
+            self.combine = TransformerLayerNode(
+                com_stream, event, self.common_state, combine_callable, ctx, name="combine"
+            )
         else:
             self.dispatch = FakeScheduleNode()
             self.combine = FakeScheduleNode()
@@ -346,10 +349,10 @@ def schedule_layer_1f1b(
     b_context=None,
 ):
     """Schedule one-forward-one-backward operations for a single layer.
-    
+
     This function interleaves forward and backward operations to maximize
     parallelism and efficiency.
-    
+
     Args:
         f_layer: Forward layer (for current microbatch)
         b_layer: Backward layer (for previous microbatch)
@@ -360,7 +363,7 @@ def schedule_layer_1f1b(
         pre_backward_dw: Callback for weight gradient computation
         f_context: Context for forward computation
         b_context: Context for backward computation
-        
+
     Returns:
         Functions or values for next iteration's computation
     """

@@ -3,7 +3,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Union, NoReturn
+from typing import NoReturn, Union
 
 import torch
 
