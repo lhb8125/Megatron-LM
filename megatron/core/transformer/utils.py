@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from functools import lru_cache
 from operator import itemgetter
+from functools import partial
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
@@ -202,11 +203,10 @@ class SubmoduleCallables:
     Holds references to forward, dgrad, and dw (weight-grad) callables
     for a particular submodule.
     """
-
-    forward: Optional[Callable] = None
-    backward: Optional[Callable] = None
-    dgrad: Optional[Callable] = None
-    dw: Optional[Callable] = None
+    def raise_not_implemented(name: str):
+        raise NotImplementedError(f"{name} not implemented.")
+    forward: Optional[Callable] = partial(raise_not_implemented, "forward")
+    dw: Optional[Callable] = partial(raise_not_implemented, "dw")
 
 
 @dataclass
@@ -220,7 +220,6 @@ class TransformerLayerSubmoduleCallables:
     dispatch: SubmoduleCallables
     mlp: SubmoduleCallables
     combine: SubmoduleCallables
-    post_combine: SubmoduleCallables
 
     def as_array(self):
-        return [self.attention, self.dispatch, self.mlp, self.combine, self.post_combine]
+        return [self.attention, self.dispatch, self.mlp, self.combine]
