@@ -208,7 +208,7 @@ def schedule_chunk_1f1b(
         The output of the forward pass
     """
 
-    # Calls fine_grained_schedule.py::ModelChunkSchedulePlan.forward_backward(), 
+    # Calls fine_grained_schedule.py::ModelChunkSchedulePlan.forward_backward(),
     # which calls fine_grained_schedule.py::schedule_chunk_1f1b()
     return type(f_schedule_plan or b_schedule_plan).forward_backward(
         f_schedule_plan,
@@ -236,7 +236,7 @@ def set_streams(comp_stream=None, com_stream=None):
 
     if comp_stream is None:
         # @lhb8125: maybe it will be better to set comp_stream = torch.cuda.current_stream() in here?
-        comp_stream = torch.cuda.Stream(device="cuda") 
+        comp_stream = torch.cuda.Stream(device="cuda")
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
@@ -516,7 +516,9 @@ def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     for model_module in model:
         while isinstance(model_module, module_instances):
             model_module = model_module.module
-        assert isinstance(model_module, GPTModel), "The final unwrapped model must be a GPTModel instance"
+        assert isinstance(
+            model_module, GPTModel
+        ), "The final unwrapped model must be a GPTModel instance"
         unwrapped_model.append(model_module)
     if not return_list:
         return unwrapped_model[0]
@@ -525,7 +527,7 @@ def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
 
 def wrap_forward_func(forward_step_func):
     """Wrap the input to forward_step_func.
-        The wrapped function will return forward_schedule_plan and the loss_function.
+    The wrapped function will return forward_schedule_plan and the loss_function.
     """
 
     def wrapped_func(data_iterator, model):
