@@ -1,6 +1,7 @@
 import contextlib
 import weakref
 from typing import Any, Callable, Optional, Tuple, Union
+from functools import partial
 
 import torch
 from torch import Tensor
@@ -8,6 +9,7 @@ from torch import Tensor
 from megatron.core.pipeline_parallel.combined_1f1b import (
     AbstractSchedulePlan,
     ScheduleNode,
+    FakeScheduleNode,
     get_com_stream,
     get_comp_stream,
     make_viewless,
@@ -53,7 +55,7 @@ class MemoryStrategyRegistry:
 class PreProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event, name="pre_process")
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -127,7 +129,7 @@ class PreProcessNode(ScheduleNode):
 class PostProcessNode(ScheduleNode):
 
     def __init__(self, gpt_model, model_chunk_state, event, stream):
-        super().__init__(weak_method(self.forward_impl), stream, event)
+        super().__init__(weak_method(self.forward_impl), stream, event, name="post_process")
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
@@ -169,19 +171,18 @@ class TransformerLayerNode(ScheduleNode):
 
     def __init__(
         self, 
-        chunk_state, 
-        common_state, 
-        layer, 
         stream, 
         event, 
+        common_state, 
+        callables,
+        forward_ctx=None,
         name="default"
     ):
         """Initialize a transformer layer node.
         
         Args:
-            chunk_state: State shared across the model chunk
             common_state: State shared within a transformer layer
-            layer: The transformer layer this node belongs to
+            func: The forward function to be executed
             stream (torch.cuda.Stream): CUDA stream for execution
             event (torch.cuda.Event): Synchronization event
             name (str): Node name, also used to determine memory strategy
@@ -197,11 +198,9 @@ class TransformerLayerNode(ScheduleNode):
             memory_strategy=memory_strategy,
             name=name,
         )
-        # Layer state
         self.common_state = common_state
-        # Model chunk state
-        self.chunk_state = chunk_state
-        self.layer = layer
+        self.callables = callables
+        self.forward_ctx = forward_ctx
         self.detached = tuple()
         self.before_detached = tuple()
         
@@ -212,6 +211,9 @@ class TransformerLayerNode(ScheduleNode):
         self.detached = self.detached + (detached,)
         return detached
 
+    def forward_impl(self, *args):
+        return self.callables.forward(self, *args)
+
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
         grads = output_grad + detached_grad
@@ -221,196 +223,9 @@ class TransformerLayerNode(ScheduleNode):
         # return grads for record stream
         return grads
 
-
-class MoeAttnNode(TransformerLayerNode):
-
-    def __init__(self, chunk_state, common_state, layer, stream, event, name="attn"):
-        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
-    def forward_impl(self, hidden_states):
-        attention_mask = self.chunk_state.attention_mask
-        context = self.chunk_state.context
-        context_mask = self.chunk_state.context_mask
-        rotary_pos_emb = self.chunk_state.rotary_pos_emb
-        rotary_pos_cos = self.chunk_state.rotary_pos_cos
-        rotary_pos_sin = self.chunk_state.rotary_pos_sin
-        attention_bias = self.chunk_state.attention_bias
-        inference_params = self.chunk_state.inference_params
-        packed_seq_params = self.chunk_state.packed_seq_params
-        sequence_len_offset = self.chunk_state.sequence_len_offset
-
-        token_dispatcher = self.layer.mlp.token_dispatcher
-        with token_dispatcher.per_batch_state_context(self.common_state):
-            (
-                hidden_states,
-                pre_mlp_layernorm_output,
-                tokens_per_expert,
-                permutated_local_input_tokens,
-                probs,
-            ) = self.layer._submodule_attention_router_compound_forward(
-                hidden_states,
-                attention_mask=attention_mask,
-                inference_params=inference_params,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-            )
-        self.common_state.tokens_per_expert = tokens_per_expert
-
-        # detached here
-        self.common_state.probs = self.detach(probs)
-        self.common_state.residual = self.detach(hidden_states)
-        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
-
-        return permutated_local_input_tokens
-
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
-            self.layer._submodule_attention_router_compound_dw()
-
-
-class MoeDispatchNode(TransformerLayerNode):
-
-    def __init__(self, chunk_state, common_state, layer, stream, event, name="dispatch"):
-        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
-
-    def forward_impl(self, permutated_local_input_tokens):
-        token_dispatcher = self.layer.mlp.token_dispatcher
-        with token_dispatcher.per_batch_state_context(self.common_state):
-            inputs = permutated_local_input_tokens
-            dispatched_input = token_dispatcher.dispatch_all_to_all(permutated_local_input_tokens)
-            # release tensor not used by backward
-            # inputs.untyped_storage().resize_(0)
-        return dispatched_input
-
-
-class MoeMlPNode(TransformerLayerNode):
-    def __init__(self, chunk_state, common_state, layer, stream, event, name="mlp"):
-        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
-    def forward_impl(self, dispatched_input):
-        pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
-        token_dispatcher = self.layer.mlp.token_dispatcher
-        with token_dispatcher.per_batch_state_context(self.common_state):
-            expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
-                dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output
-            )
-            assert mlp_bias is None
-            assert mlp_bias is None
-
-        # pre_mlp_layernorm_output  used
-        self.common_state.pre_mlp_layernorm_output = None
-        return expert_output, shared_expert_output
-
-    def dw(self):
-        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
-            self.layer._submodule_mlp_dw()
-
-
-class MoeCombineNode(TransformerLayerNode):
-    def __init__(self, chunk_state, common_state, layer, stream, event, name="combine"):
-        super().__init__(chunk_state, common_state, layer, stream, event, name=name)
-    def forward_impl(self, expert_output, shared_expert_output):
-        # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
-        residual = self.common_state.residual
-        token_dispatcher = self.layer.mlp.token_dispatcher
-        with token_dispatcher.per_batch_state_context(self.common_state):
-            permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
-                expert_output
-            )
-            output = self.layer._submodule_post_combine_forward(
-                permutated_local_input_tokens, shared_expert_output, None, residual
-            )
-        cur_stream = torch.cuda.current_stream()
-        self.common_state.residual.record_stream(cur_stream)
-        self.common_state.probs.record_stream(cur_stream)
-        self.common_state.residual = None
-        self.common_state.probs = None
-        return output
-
-
-class DenseAttnNode(TransformerLayerNode):
-
-    def forward_impl(self, hidden_states):
-        attention_mask = self.chunk_state.attention_mask
-        context = self.chunk_state.context
-        context_mask = self.chunk_state.context_mask
-        rotary_pos_emb = self.chunk_state.rotary_pos_emb
-        rotary_pos_cos = self.chunk_state.rotary_pos_cos
-        rotary_pos_sin = self.chunk_state.rotary_pos_sin
-        attention_bias = self.chunk_state.attention_bias
-        inference_params = self.chunk_state.inference_params
-        packed_seq_params = self.chunk_state.packed_seq_params
-        sequence_len_offset = self.chunk_state.sequence_len_offset
-
-        hidden_states = self.layer._submodule_attention_forward(
-            hidden_states,
-            attention_mask=attention_mask,
-            inference_params=inference_params,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
-        )
-        return hidden_states
-
-
-class FakeScheduleNode:
-
-    def forward(self, inputs):
-        return inputs
-
-    def backward(self, outgrads):
-        return outgrads
-
-
-class DenseMlpNode(TransformerLayerNode):
-    def forward_impl(self, hidden_states):
-        return self.layer._submodule_dense_forward(hidden_states)
-
-
-def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
-    common_state = TransformerLayerState()
-    attn = DenseAttnNode(chunk_state, common_state, layer, comp_stream, event)
-    attn.name = "attn"
-    dispatch = FakeScheduleNode()
-    mlp = DenseMlpNode(chunk_state, common_state, layer, comp_stream, event)
-    combine = FakeScheduleNode()
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
-
-
-def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream):
-    """Build schedule plan for a transformer layer.
-    
-    This function creates the appropriate nodes based on whether 
-    the layer is a MoE (Mixture of Experts) layer or not.
-    
-    Args:
-        layer: The transformer layer
-        event (torch.cuda.Event): Synchronization event
-        chunk_state: State shared across the model chunk
-        comp_stream (torch.cuda.Stream): Computation stream
-        com_stream (torch.cuda.Stream): Communication stream
-        
-    Returns:
-        TransformerLayerSchedulePlan: A schedule plan for the layer
-    """
-    if not isinstance(layer.mlp, MoELayer):
-        return build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
-        
-    common_state = TransformerLayerState()
-    
-    # Create nodes for different operations in the layer
-    # Each node type has a predefined name that determines its memory strategy
-    attn = MoeAttnNode(chunk_state, common_state, layer, comp_stream, event)
-    dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event)
-    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event)
-    combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event)
-    
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
+            self.callables.dw()
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -423,11 +238,22 @@ class ModelChunkSate:
 
 class TransformerLayerSchedulePlan:
 
-    def __init__(self, attn, dispatch, mlp, combine):
-        self.attn = attn
-        self.dispatch = dispatch
-        self.mlp = mlp
-        self.combine = combine
+    def __init__(self, layer, event, chunk_state, comp_stream, com_stream):
+        self.common_state = TransformerLayerState()
+        ctx = partial(layer.mlp.token_dispatcher.per_batch_state_context, self.common_state)
+        attn_callable, dispatch_callable, mlp_callable, combine_callable = layer.get_submodule_callables(chunk_state).as_array()
+        
+        # Create nodes for different operations in the layer
+        # Each node type has a predefined name that determines its memory strategy
+        is_moe = isinstance(layer.mlp, MoELayer)
+        self.attn = TransformerLayerNode(comp_stream, event, self.common_state, attn_callable, ctx, name="attn")
+        self.mlp = TransformerLayerNode(comp_stream, event, self.common_state, mlp_callable, ctx, name="mlp")
+        if is_moe:
+            self.dispatch = TransformerLayerNode(com_stream, event, self.common_state, dispatch_callable, ctx, name="dispatch")
+            self.combine = TransformerLayerNode(com_stream, event, self.common_state, combine_callable, ctx, name="combine")
+        else:
+            self.dispatch = FakeScheduleNode()
+            self.combine = FakeScheduleNode()
 
 
 class ModelChunkSchedulePlan(AbstractSchedulePlan):
@@ -758,16 +584,13 @@ def build_model_chunk_schedule_plan(
 
     # build preprocess
     model_chunk_schedule_plan.pre_process = PreProcessNode(model, state, event, comp_stream)
-    model_chunk_schedule_plan.pre_process.name = "pre_process"
     # build for layers
     for layer_idx in range(model.decoder.num_layers_per_pipeline_rank):
         layer = model.decoder._get_layer(layer_idx)
-        layer_plan = build_layer_schedule_plan(layer, event, state, comp_stream, com_stream)
+        layer_plan = TransformerLayerSchedulePlan(layer, event, state, comp_stream, com_stream)
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
-
         model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
-        model_chunk_schedule_plan.post_process.name = "post_process"
 
     return model_chunk_schedule_plan
