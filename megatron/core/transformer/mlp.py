@@ -155,8 +155,11 @@ class MLP(MegatronModule):
         return sharded_state_dict
 
     def backward_dw(self):
-        self.linear_fc2.backward_dw()
-        self.linear_fc1.backward_dw()
+        try:
+            self.linear_fc2.backward_dw()
+            self.linear_fc1.backward_dw()
+        except Exception as e:
+            raise RuntimeError(f"MLP backward_dw execution failed: {str(e)}") from e
 
 
 # pylint: disable=missing-function-docstring

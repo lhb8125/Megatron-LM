@@ -240,8 +240,6 @@ class GroupedMLP(MegatronModule):
 
         return fc2_output, None
     
-    def backward_dw(self):
-        pass
         
     @expert_dist_ckpt_decorator
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
@@ -777,8 +775,11 @@ class TEGroupedMLP(MegatronModule):
         return sharded_state_dict
 
     def backward_dw(self):
-        self.linear_fc2.backward_dw()
-        self.linear_fc1.backward_dw()
+        try:
+            self.linear_fc2.backward_dw()
+            self.linear_fc1.backward_dw()
+        except Exception as e:
+            raise Exception(f"Unknown error occurred during TEGroupedMLP backward_dw() execution: {str(e)}")
 
 
 class SequentialMLP(MegatronModule):
@@ -854,6 +855,14 @@ class SequentialMLP(MegatronModule):
                 output_bias_local = None
 
             return output_local, output_bias_local
+
+    def backward_dw(self):
+        """Backward pass for weight gradients in SequentialMLP."""
+        try:
+            for expert in self.local_experts:
+                expert.backward_dw()
+        except Exception as e:
+            raise Exception(f"Unknown error occurred during SequentialMLP backward_dw() execution: {str(e)}")
 
     @expert_dist_ckpt_decorator
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
