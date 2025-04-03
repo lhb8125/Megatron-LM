@@ -563,7 +563,7 @@ def build_model_chunk_schedule_plan(
     runtime_gather_output: Optional[bool] = None,
 ):
 
-    comp_stream = torch.cuda.current_stream()
+    comp_stream = get_comp_stream()
     com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     event = model_chunk_schedule_plan.event

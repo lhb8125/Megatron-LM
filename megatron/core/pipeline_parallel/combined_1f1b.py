@@ -241,8 +241,7 @@ def set_streams(comp_stream=None, com_stream=None):
         return
 
     if comp_stream is None:
-        # TODO: should be sync with the memory fix PR
-        comp_stream = torch.cuda.Stream(device="cuda")
+        comp_stream = torch.cuda.current_stream()
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
