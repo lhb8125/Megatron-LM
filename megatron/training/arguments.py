@@ -869,13 +869,6 @@ def validate_args(args, defaults={}):
             'combined 1F1B is only supported with pipeline model parallelism'
         assert args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
             'virtual pipeline parallel should be enabled for combined 1F1B'
-        
-        # Handle p2p communication overlap
-        if args.overlap_p2p_comm:
-            # Combined 1F1B overlaps also overlaps p2p communication, 
-            # however, it uses the code path of args.overlap_p2p_comm == False
-            # Todo: @Youngeun to check the schedule.py since the flag may cause some confusions.
-            args.overlap_p2p_comm = False
 
         # Additional requirements for ep_a2a recipe
         if args.combined_1f1b_recipe == 'ep_a2a':
