@@ -2440,9 +2440,9 @@ def _add_moe_args(parser):
     group.add_argument('--combined-1f1b', action='store_true',
                        help='Batch-level overlapping in 1f1b stage.')
     group.add_argument('--combined-1f1b-recipe', type=str,
-                       choices=['ep_a2a', 'golden'],
-                       default='golden',
-                       help='Options are "ep_a2a" and "golden".')
+                       choices=['ep_a2a'],
+                       default='ep_a2a',
+                       help='Options are only "ep_a2a" now.')
     group.add_argument('--split-bw', action='store_true',
                        help='Split dgrad and wgrad for batch-level overlapping')                       
 

@@ -316,7 +316,7 @@ class ModelParallelConfig:
     """If true, use combined 1F1B for communication hiding."""
 
     combined_1f1b_recipe: str = 'ep_a2a'
-    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
+    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' is supported."""
 
     split_bw: bool = False
     """If true, split dgrad and wgrad for better overlapping in combined 1F1B."""
@@ -406,10 +406,10 @@ class ModelParallelConfig:
                 )
 
         if self.combined_1f1b:
-            if self.combined_1f1b_recipe not in ["ep_a2a", "golden"]:
+            if self.combined_1f1b_recipe not in ["ep_a2a"]:
                 raise ValueError(
                     f"combined_1f1b_recipe {self.combined_1f1b_recipe} not supported, "
-                    f"supported recipes are 'ep_a2a' and 'golden' "
+                    f"supported recipes are 'ep_a2a' now."
                 )
         if self.split_bw and not (self.combined_1f1b and self.combined_1f1b_recipe == "ep_a2a"):
             raise ValueError(

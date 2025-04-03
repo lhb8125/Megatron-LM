@@ -239,8 +239,7 @@ class GroupedMLP(MegatronModule):
             fc2_output = h
 
         return fc2_output, None
-    
-        
+
     @expert_dist_ckpt_decorator
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """
@@ -779,7 +778,9 @@ class TEGroupedMLP(MegatronModule):
             self.linear_fc2.backward_dw()
             self.linear_fc1.backward_dw()
         except Exception as e:
-            raise Exception(f"Unknown error occurred during TEGroupedMLP backward_dw() execution: {str(e)}")
+            raise Exception(
+                f"Unknown error occurred during TEGroupedMLP backward_dw() execution: {str(e)}"
+            )
 
 
 class SequentialMLP(MegatronModule):
@@ -862,7 +863,9 @@ class SequentialMLP(MegatronModule):
             for expert in self.local_experts:
                 expert.backward_dw()
         except Exception as e:
-            raise Exception(f"Unknown error occurred during SequentialMLP backward_dw() execution: {str(e)}")
+            raise Exception(
+                f"Unknown error occurred during SequentialMLP backward_dw() execution: {str(e)}"
+            )
 
     @expert_dist_ckpt_decorator
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):

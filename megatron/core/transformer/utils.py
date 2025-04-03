@@ -2,9 +2,8 @@
 
 """Utilities for transformer layers."""
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from operator import itemgetter
-from functools import partial
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
@@ -203,8 +202,10 @@ class SubmoduleCallables:
     Holds references to forward, dgrad, and dw (weight-grad) callables
     for a particular submodule.
     """
+
     def raise_not_implemented(name: str):
         raise NotImplementedError(f"{name} not implemented.")
+
     forward: Optional[Callable] = partial(raise_not_implemented, "forward")
     dw: Optional[Callable] = partial(raise_not_implemented, "dw")
 
