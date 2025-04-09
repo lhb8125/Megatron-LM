@@ -814,3 +814,30 @@ def get_default_model_comm_pgs():
     model_comm_pgs.tp_ep = parallel_state.get_expert_tensor_and_model_parallel_group()
     model_comm_pgs.tp_cp = parallel_state.get_tensor_and_context_parallel_group()
     return model_comm_pgs
+class RouterGatingLinear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, weight: torch.Tensor, router_dtype: torch.dtype):
+        ctx.save_for_backward(input, weight)
+        ctx.router_dtype = router_dtype
+        ctx.input_dtype = input.dtype
+        ctx.weight_dtype = weight.dtype
+        input_shape = input.shape
+        input = input.view(-1, input_shape[-1])
+        output = torch.matmul(input.to(router_dtype), weight.to(router_dtype).t())
+        output = output.view(*input_shape[:-1], -1)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        input, weight = ctx.saved_tensors
+        input_shape = input.shape
+        grad_shape = grad_output.shape
+        input = input.view(-1, input_shape[-1])
+        grad_output = grad_output.view(-1, grad_shape[-1])
+        grad_input = torch.matmul(grad_output, weight.to(ctx.router_dtype)).to(ctx.input_dtype)
+        grad_weight = torch.matmul(grad_output.t(), input.to(ctx.router_dtype)).to(ctx.weight_dtype)
+        grad_input = grad_input.view(*input_shape)
+        return grad_input, grad_weight, None
+
+
+router_gating_linear = RouterGatingLinear.apply
