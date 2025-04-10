@@ -20,6 +20,14 @@ We are working on enabling A2A overlap in the interleaved 1F1B pipeline parallel
   - Support dW&dX split for better overlapping
 - Usage
 ```
+# Following ENVs are prefered for a better performance
+  CUDA_DEVICE_MAX_CONNECTIONS: 32
+  TORCH_NCCL_AVOID_RECORD_STREAMS: 1
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: 1
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  NCCL_NVLS_ENABLE: 0
+  NVTE_FWD_LAYERNORM_SM_MARGIN: 8
+  NVTE_BWD_LAYERNORM_SM_MARGIN: 8
 # Add the following flags to your training scripts
 --combined-1f1b
 --combined-1f1b-recipe ep_a2a
