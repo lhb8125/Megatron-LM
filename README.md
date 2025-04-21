@@ -38,6 +38,7 @@ To enable dW&dX split, you need to pull latest main branch of TransformerEngine,
 - Known issues
   - dW&dX split doesn't work with DP overlap.
   - 1F1B with A2A overlap will deteriorate the TP overlapping pattern on Hopper because the env ```CUDA_DEVICE_MAX_CONNECTIONS``` is set to 32, while this won't impact the performance on Blackwell chips.
+  - Sometimes we observed performance fluctuation when enabling DeepEP dispatcher in 1f1b with a2a overlap, we are working on it now.
 - Contributors
   - NVIDIA: [Hongbin](https://github.com/lhb8125), [Pingtian](https://github.com/Wohox), Shunkang, Youngeun, Sangkug, [Zijie](https://github.com/yanring)
   - Xiaohongshu: [Zhenhai](https://github.com/liuzhenhai93)
