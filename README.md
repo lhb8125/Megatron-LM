@@ -10,6 +10,40 @@ Megatron-LM & Megatron-Core
 
 <div align="left">
 
+# 1F1B with A2A overlap
+
+We are working on enabling A2A overlap in the interleaved 1F1B pipeline parallel. Now we have a preview version for EA test. Feel free to test it and report issues.
+
+- Features
+  - Hide ep a2a communication by batch-level overlapping
+  - Compatitable with interleaved 1F1B pipeline parallel
+  - Support dW&dX split for better overlapping
+- Usage
+```
+# Following ENVs are prefered for a better performance
+  CUDA_DEVICE_MAX_CONNECTIONS: 32
+  TORCH_NCCL_AVOID_RECORD_STREAMS: 1
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: 1
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  NCCL_NVLS_ENABLE: 0
+  NVTE_FWD_LAYERNORM_SM_MARGIN: 8
+  NVTE_BWD_LAYERNORM_SM_MARGIN: 8 # 24 for DeepEP
+# Add the following flags to your training scripts
+--combined-1f1b
+--combined-1f1b-recipe ep_a2a
+# [optional] only works with TE main branch (after 4/19, will be released at v2.3.0)
+--split-bw
+```
+To enable dW&dX split, you need to pull latest main branch of TransformerEngine, and the MR could be found here: https://github.com/NVIDIA/TransformerEngine/pull/1653
+- Known issues
+  - dW&dX split doesn't work with DP overlap.
+  - 1F1B with A2A overlap will deteriorate the TP overlapping pattern on Hopper because the env ```CUDA_DEVICE_MAX_CONNECTIONS``` is set to 32, while this won't impact the performance on Blackwell chips.
+- Contributors
+  - NVIDIA: [Hongbin](https://github.com/lhb8125), [Pingtian](https://github.com/Wohox), Shunkang, Youngeun, Sangkug, [Zijie](https://github.com/yanring)
+  - Xiaohongshu: [Zhenhai](https://github.com/liuzhenhai93)
+- References
+  - [Wechat Post]: [基于 1F1B 的 MoE A2A 通信计算 Overlap](https://mp.weixin.qq.com/s/vCy6ga5EA2dzvFoL8p6QjA)
+
 # Latest News
 
 - **[2024/7]** Megatron-Core v0.7 improves scalability and training resiliency and adds support for multimodal training ([blog](https://developer.nvidia.com/blog/train-generative-ai-models-more-efficiently-with-new-nvidia-megatron-core-functionalities/)). 
@@ -19,6 +53,7 @@ Megatron-LM & Megatron-Core
 # Table of Contents
 
 - [Megatron-LM \& Megatron-Core](#megatron-lm--megatron-core)
+- [1F1B with A2A overlap](#1f1b-with-a2a-overlap)
 - [Latest News](#latest-news)
 - [Table of Contents](#table-of-contents)
 - [Megatron Overview](#megatron-overview)
