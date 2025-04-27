@@ -573,7 +573,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             if self.config.fp8:
                 # import here to avoid circular import
                 from megatron.core.extensions.transformer_engine import te_checkpoint
-
                 mlp_output_with_bias = te_checkpoint(
                     self.mlp,
                     False,
