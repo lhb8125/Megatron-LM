@@ -4,6 +4,8 @@ import math
 from typing import List, Optional, Union
 
 import torch
+import triton
+import triton.language as tl
 
 from megatron.core import parallel_state
 from megatron.core.process_groups_config import ModelCommProcessGroups
@@ -271,6 +273,8 @@ def permute(
                                        If set to true, routing_map has a fixed number of non-zeros
                                        in each column.
     """
+    # print(num_out_tokens)
+    # exit(0)
     if fused and probs is None:
         if not HAVE_TE or fused_permute is None:
             raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")
@@ -498,6 +502,99 @@ def group_limited_topk(
 
     return probs, top_indices
 
+@triton.jit
+def _pad_routing_map_kernel(
+    routing_map_ptr,
+    output_ptr,
+    num_experts: tl.constexpr,
+    num_tokens,
+    pad_multiple: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    expert_idx = tl.program_id(axis=0)
+    
+    # Pointers for the current expert's row
+    row_offset = expert_idx * num_tokens
+    input_row_ptr = routing_map_ptr + row_offset
+    output_row_ptr = output_ptr + row_offset
+    
+    # Token indices for this block
+    token_indices = tl.arange(0, BLOCK_SIZE)
+    token_mask = token_indices < num_tokens
+    
+    # Load the row for the current expert, masking out-of-bounds elements
+    row = tl.load(input_row_ptr + token_indices, mask=token_mask, other=0)
+
+    # 1. Calculate num_ones for the current expert
+    # Ensure summation happens correctly even with masking
+    # Convert boolean/int row to int if necessary before sum
+    num_ones = tl.sum(row.to(tl.int32), axis=0)
+
+    # 2. Calculate num_to_pad for the current expert
+    remainder = num_ones % pad_multiple
+    num_to_pad = tl.where(remainder != 0, pad_multiple - remainder, 0)
+
+    # 3. Calculate zero ranks using cumsum (vectorized)
+    is_zero = (row == 0)
+    # Cast to int32 for cumsum
+    zero_ranks = tl.cumsum(is_zero.to(tl.int32), axis=0)
+
+    # 4. Create mask for elements to be flipped to 1
+    # Only flip if the element is zero AND its rank is within the padding limit
+    mask_to_flip = (zero_ranks <= num_to_pad) & is_zero
+
+    # 5. Determine the output row values
+    output_row = tl.where(mask_to_flip, 1, row)
+
+    # 6. Store the result, masking out-of-bounds elements
+    tl.store(output_row_ptr + token_indices, output_row, mask=token_mask)
+
+
+def pad_routing_map(routing_map: torch.Tensor, pad_multiple: int) -> torch.Tensor:
+    # routing_map: [num_tokens, num_experts] (expecting bool or int)
+    # Ensure input is boolean or int for the kernel
+    input_map = routing_map.transpose(0, 1).contiguous().int() # [num_experts, num_tokens]
+    num_experts, num_tokens = input_map.shape
+
+    # Output tensor
+    output_map = torch.empty_like(input_map)
+
+    # Kernel launch
+    grid = (num_experts,)
+    # Choose BLOCK_SIZE carefully. Needs to be >= num_tokens for the simplified kernel.
+    # A power of 2 is standard. Let's find the next power of 2 >= num_tokens.
+    BLOCK_SIZE = triton.next_power_of_2(num_tokens)
+
+    _pad_routing_map_kernel[grid](
+        input_map,
+        output_map,
+        num_experts,
+        num_tokens,
+        pad_multiple,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return output_map.transpose(0, 1) # [num_tokens, num_experts]
+
+# def pad_routing_map(routing_map: torch.Tensor, pad_multiple: int) -> torch.Tensor:
+#     # routing_map: [num_tokens, num_experts]
+#     routing_map = routing_map.transpose(0, 1) # [num_experts, num_tokens]
+#     # 1. calculate padding number for each row
+#     num_ones = routing_map.sum(dim=1)
+#     remainder = num_ones % pad_multiple
+#     num_to_pad = torch.where(remainder != 0, pad_multiple - remainder, torch.zeros_like(remainder)).int()
+
+#     # 2. calculate zero element's rank in each row
+#     is_zero = (routing_map == 0)
+#     zero_ranks = torch.cumsum(is_zero.int(), dim=1)
+
+#     # 3. create mask for elements to be set to 1
+#     mask = zero_ranks <= num_to_pad.unsqueeze(1)
+
+#     # apply mask to padding
+#     routing_map[mask] = 1
+#     routing_map = routing_map.transpose(0, 1) # [num_tokens, num_experts]
+#     return routing_map
 
 def topk_softmax_with_capacity(
     logits: torch.Tensor,
@@ -531,7 +628,6 @@ def topk_softmax_with_capacity(
         deterministic_mode (bool): Deprecated.
         score_function (str): The score function to use. Can be either "softmax" or "sigmoid".
         expert_bias (torch.Tensor): The bias added to logits for expert routing.
-
     Returns:
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             - routing_probs (torch.Tensor): A tensor of shape [num_tokens, num_experts] containing

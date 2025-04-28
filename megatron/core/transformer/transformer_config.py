@@ -365,6 +365,9 @@ class TransformerConfig(ModelParallelConfig):
     DEPRECATED and replaced by moe_router_num_groups and moe_router_group_topk.
     """
 
+    moe_router_expert_pad_multiple: Optional[int] = None
+    """Number of tokens to pad to a multiple of for each expert."""
+
     moe_router_num_groups: Optional[int] = None
     """Number of groups to divide experts into for group-limited routing.
     When using group-limited routing:
@@ -1020,6 +1023,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"but your version is {get_te_version()}."
                 )
 
+            self.moe_router_expert_pad_multiple = 16
         if (
             self.moe_router_topk == 1
             and self.moe_router_score_function == 'softmax'

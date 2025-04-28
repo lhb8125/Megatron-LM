@@ -746,7 +746,7 @@ class TEGroupedMLP(MegatronModule):
             output (torch.Tensor): The output of the local experts.
         """
         tokens_per_expert = tokens_per_expert.tolist()
-        if self.config.fp8:
+        if self.config.fp8 and self.config.moe_router_expert_pad_multiple == None:
             actual_tokens_per_expert = tokens_per_expert
             permuted_local_hidden_states, tokens_per_expert = self.fp8_padding(
                 permuted_local_hidden_states, tokens_per_expert
@@ -825,7 +825,7 @@ class TEGroupedMLP(MegatronModule):
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
 
         # upad and concat the output
-        if self.config.fp8:
+        if self.config.fp8 and self.config.moe_router_expert_pad_multiple == None:
             output = self.fp8_unpadding(output, actual_tokens_per_expert)
 
         return output, output_bias

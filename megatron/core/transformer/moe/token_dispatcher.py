@@ -17,6 +17,7 @@ from megatron.core.transformer.moe.moe_utils import (
     ModelCommProcessGroups,
     get_capacity,
     maybe_move_tensor_to_cpu,
+    pad_routing_map,
     permute,
     sort_chunks_by_idxs,
     unpermute,
@@ -386,8 +387,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self._maybe_update_cuda_sync_point("before_permutation_1")
         else:
             # Dropless
-            self.num_out_tokens = routing_map.size(0) * self.config.moe_router_topk
-
+            if self.config.moe_router_expert_pad_multiple:
+                self.num_out_tokens = num_local_tokens_per_expert.sum()
+                self._maybe_update_cuda_sync_point("before_permutation_1")
+            else:
+                self.num_out_tokens = routing_map.size(0) * self.config.moe_router_topk
         if self.ep_size > 1 or self.tp_size > 1:
             # ===================================================
             # Calculate input_splits, output_splits for alltoall/allgather in variable size.
@@ -486,6 +490,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         assert routing_map.dim() == 2, "Expected 2D tensor for token2expert mask"
         assert routing_map.dtype == torch.bool, "Expected bool tensor for mask"
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
+        if self.config.moe_router_expert_pad_multiple:
+            with torch.cuda.nvtx.range("pad_routing_map"):
+                self.routing_map = pad_routing_map(
+                    self.routing_map, self.config.moe_router_expert_pad_multiple
+                )
         tokens_per_expert = self.preprocess(self.routing_map)
 
         if self.shared_experts is not None:
@@ -502,7 +511,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.reversed_local_input_permutation_mapping,
         ) = permute(
             hidden_states,
-            routing_map,
+            self.routing_map,
             probs=probs,
             num_out_tokens=self.num_out_tokens,
             fused=self.config.moe_permute_fusion,
@@ -785,6 +794,7 @@ class _DeepepManager(_DispatchManager):
         num_experts: Optional[int] = None,
         num_local_experts: Optional[int] = None,
         router_dtype: Optional[str] = None,
+        moe_router_expert_pad_multiple: Optional[int] = None,
     ):
         self.group = group
         self.router_topk = router_topk
@@ -793,6 +803,7 @@ class _DeepepManager(_DispatchManager):
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.router_dtype = router_dtype
+        self.moe_router_expert_pad_multiple = moe_router_expert_pad_multiple
 
         # Metadata
         self.token_indices: Optional[torch.Tensor] = None
@@ -891,13 +902,22 @@ class _DeepepManager(_DispatchManager):
             self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs
             )
+        if self.moe_router_expert_pad_multiple:
+            with torch.cuda.nvtx.range("pad_routing_map"):
+                self.dispatched_routing_map = pad_routing_map(
+                    self.dispatched_routing_map, self.moe_router_expert_pad_multiple
+                )
+            # self.tokens_per_expert = self.dispatched_routing_map.sum(dim=0)
+            self.tokens_per_expert = torch.ceil(self.tokens_per_expert / self.moe_router_expert_pad_multiple) * self.moe_router_expert_pad_multiple
+            self.tokens_per_expert = self.tokens_per_expert.long()
+
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "DeepEP only supports float32 probs"
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
-            num_out_tokens=sum(self.tokens_per_expert),
+            num_out_tokens=self.tokens_per_expert.sum().item(),
             fused=self.permute_fusion,
         )
         if self.router_dtype == "fp64":
@@ -955,6 +975,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             num_experts=self.tp_size * self.config.num_moe_experts,
             num_local_experts=self.num_local_experts,
             router_dtype=self.config.moe_router_dtype,
+            moe_router_expert_pad_multiple=self.config.moe_router_expert_pad_multiple,
         )
 
     def set_shared_experts(self, shared_experts):
