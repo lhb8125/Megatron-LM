@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from megatron.core.enums import Fp8Recipe
 from megatron.core.transformer.enums import AttnBackend
+from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 
 from ..model_parallel_config import ModelParallelConfig
 from ..utils import (
@@ -49,6 +50,12 @@ class TransformerConfig(ModelParallelConfig):
     num_layers_in_last_pipeline_stage: Optional[int] = None
     """Number of transformer layers on last pipeline stage.
     None implies equal layer division across PP ranks."""
+
+    pipeline_model_parallel_layout: Optional[str | list | PipelineParallelLayerLayout] = None
+    """Custom interleaved pipeline parallelism layout among all pipeline stages.
+       If given a string or a list, it will be transferred into a PipelineParallelLayerLayout
+       in post init.
+    """
 
     account_for_embedding_in_pipeline_split: bool = False
     """If set, the embedding layer will be treated as a standard transformer
@@ -826,114 +833,150 @@ class TransformerConfig(ModelParallelConfig):
                 'and account_for_loss_in_pipeline_split'
             )
 
-        if (
-            self.num_layers_in_first_pipeline_stage is not None
-            or self.num_layers_in_last_pipeline_stage is not None
-        ):
-            pipeline_parallel_size = self.pipeline_model_parallel_size
-            num_layers = self.num_layers
-
-            if self.num_layers_in_first_pipeline_stage is not None:
-                if self.num_layers_in_first_pipeline_stage <= 0:
-                    raise ValueError('num_layers_in_first_pipeline_stage must be larger than 0')
-
-                if self.virtual_pipeline_model_parallel_size is not None:
-                    if (
-                        self.num_layers_in_first_pipeline_stage
-                        % self.virtual_pipeline_model_parallel_size
-                        != 0
-                    ):
-                        raise ValueError(
-                            f'number of layers at first stage: '
-                            f'{self.num_layers_in_first_pipeline_stage}'
-                            f'must be divisible by virtual pipeline'
-                            f'parallel degree {self.virtual_pipeline_model_parallel_size}'
-                        )
-                num_layers -= self.num_layers_in_first_pipeline_stage
-                pipeline_parallel_size -= 1
-
-            if self.num_layers_in_last_pipeline_stage is not None:
-                if self.num_layers_in_last_pipeline_stage <= 0:
-                    raise ValueError('num_layers_in_last_pipeline_stage must be larger than 0')
-
-                if self.virtual_pipeline_model_parallel_size is not None:
-                    if (
-                        self.num_layers_in_last_pipeline_stage
-                        % self.virtual_pipeline_model_parallel_size
-                        != 0
-                    ):
-                        raise ValueError(
-                            f'number of layers at last stage: '
-                            f'{self.num_layers_in_last_pipeline_stage}'
-                            f'must be divisible by virtual pipeline'
-                            f'parallel degree {self.virtual_pipeline_model_parallel_size}'
-                        )
-                num_layers -= self.num_layers_in_last_pipeline_stage
-                pipeline_parallel_size -= 1
-
-            if not num_layers % pipeline_parallel_size == 0:
-                raise ValueError(
-                    f'number of layers at middle stage: {num_layers} must be divisible by'
-                    f'the middle pipeline model parallel size {pipeline_parallel_size}'
+        if self.pipeline_model_parallel_layout is not None:
+            # If input pipeline_model_parallel_layout is a str or a list, transfer it to
+            # PipelineParallelLayerLayout
+            if isinstance(self.pipeline_model_parallel_layout, str):
+                self.pipeline_model_parallel_layout = PipelineParallelLayerLayout.from_str(
+                    layout=self.pipeline_model_parallel_layout,
+                    pipeline_model_parallel_size=self.pipeline_model_parallel_size,
+                )
+            elif isinstance(self.pipeline_model_parallel_layout, list):
+                # Since list is not hashable, the initialization will not be cached.
+                self.pipeline_model_parallel_layout = PipelineParallelLayerLayout(
+                    layout=self.pipeline_model_parallel_layout,
+                    pipeline_model_parallel_size=self.pipeline_model_parallel_size,
                 )
 
+            # Check whether the input VPP size conflicts with the PP layout
+            detected_vpp_size = (
+                self.pipeline_model_parallel_layout.virtual_pipeline_model_parallel_size
+            )
             if self.virtual_pipeline_model_parallel_size is not None:
-                num_layers_per_middle_pipeline_rank = num_layers // pipeline_parallel_size
-                if (
-                    not num_layers_per_middle_pipeline_rank
-                    % self.virtual_pipeline_model_parallel_size
-                    == 0
-                ):
-                    raise ValueError(
-                        f'number of layers on each middle pipeline rank:'
-                        f'{num_layers_per_middle_pipeline_rank} must be divisible by virtual'
-                        f'pipeline parallel degree {self.virtual_pipeline_model_parallel_size}'
-                    )
+                assert self.virtual_pipeline_model_parallel_size == detected_vpp_size, (
+                    f"virtual_pipeline_model_parallel_size conflicts with"
+                    f" pipeline_model_parallel_layout,"
+                    f" ({self.virtual_pipeline_model_parallel_size=}, "
+                    f" {detected_vpp_size=})"
+                )
+            elif detected_vpp_size > 1:
+                self.virtual_pipeline_model_parallel_size = detected_vpp_size
 
-        if self.account_for_embedding_in_pipeline_split or self.account_for_loss_in_pipeline_split:
-            if self.virtual_pipeline_model_parallel_size is None:
+            # Check whether the layout is valid.
+            self.pipeline_model_parallel_layout.validate_layer_layout(num_layers=self.num_layers)
+        else:
+            if (
+                self.num_layers_in_first_pipeline_stage is not None
+                or self.num_layers_in_last_pipeline_stage is not None
+            ):
+                pipeline_parallel_size = self.pipeline_model_parallel_size
                 num_layers = self.num_layers
 
-                if self.account_for_embedding_in_pipeline_split:
-                    num_layers += 1
+                if self.num_layers_in_first_pipeline_stage is not None:
+                    if self.num_layers_in_first_pipeline_stage <= 0:
+                        raise ValueError('num_layers_in_first_pipeline_stage must be larger than 0')
 
-                if self.account_for_loss_in_pipeline_split:
-                    num_layers += 1
+                    if self.virtual_pipeline_model_parallel_size is not None:
+                        if (
+                            self.num_layers_in_first_pipeline_stage
+                            % self.virtual_pipeline_model_parallel_size
+                            != 0
+                        ):
+                            raise ValueError(
+                                f'number of layers at first stage: '
+                                f'{self.num_layers_in_first_pipeline_stage}'
+                                f'must be divisible by virtual pipeline'
+                                f'parallel degree {self.virtual_pipeline_model_parallel_size}'
+                            )
+                    num_layers -= self.num_layers_in_first_pipeline_stage
+                    pipeline_parallel_size -= 1
 
-                if not num_layers % self.pipeline_model_parallel_size == 0:
+                if self.num_layers_in_last_pipeline_stage is not None:
+                    if self.num_layers_in_last_pipeline_stage <= 0:
+                        raise ValueError('num_layers_in_last_pipeline_stage must be larger than 0')
+
+                    if self.virtual_pipeline_model_parallel_size is not None:
+                        if (
+                            self.num_layers_in_last_pipeline_stage
+                            % self.virtual_pipeline_model_parallel_size
+                            != 0
+                        ):
+                            raise ValueError(
+                                f'number of layers at last stage: '
+                                f'{self.num_layers_in_last_pipeline_stage}'
+                                f'must be divisible by virtual pipeline'
+                                f'parallel degree {self.virtual_pipeline_model_parallel_size}'
+                            )
+                    num_layers -= self.num_layers_in_last_pipeline_stage
+                    pipeline_parallel_size -= 1
+
+                if pipeline_parallel_size and not num_layers % pipeline_parallel_size == 0:
                     raise ValueError(
-                        f'number of middle layers: {num_layers} must be divisible by '
-                        f'middle pipeline_model_parallel_size {self.pipeline_model_parallel_size}'
-                    )
-            else:
-                num_layers = self.num_layers
-                if self.account_for_embedding_in_pipeline_split:
-                    num_layers += 1
-
-                if self.account_for_loss_in_pipeline_split:
-                    num_layers += 1
-
-                if not num_layers % self.pipeline_model_parallel_size == 0:
-                    raise ValueError(
-                        f'num_layers: {num_layers} after enable'
-                        f'account_for_embedding_in_pipeline_split or '
-                        f'account_for_loss_in_pipeline_split must be divisible'
-                        f'by pipeline_model_parallel_size '
-                        f'{self.pipeline_model_parallel_size}'
+                        f'number of layers at middle stage: {num_layers} must be divisible by'
+                        f'the middle pipeline model parallel size {pipeline_parallel_size}'
                     )
 
-                num_layers_per_pipeline_rank = num_layers // self.pipeline_model_parallel_size
-                if (
-                    not num_layers_per_pipeline_rank % self.virtual_pipeline_model_parallel_size
-                    == 0
-                ):
-                    raise ValueError(
-                        f'number of layers on each pipeline rank: {num_layers_per_pipeline_rank}'
-                        f'(after enable account_for_embedding_in_pipeline_split or '
-                        f'account_for_loss_in_pipeline_split) must be divisible by'
-                        f'virtual_pipeline_model_parallel_size'
-                        f'{self.virtual_pipeline_model_parallel_size}'
-                    )
+                if self.virtual_pipeline_model_parallel_size is not None and pipeline_parallel_size:
+                    num_layers_per_middle_pipeline_rank = num_layers // pipeline_parallel_size
+                    if (
+                        not num_layers_per_middle_pipeline_rank
+                        % self.virtual_pipeline_model_parallel_size
+                        == 0
+                    ):
+                        raise ValueError(
+                            f'number of layers on each middle pipeline rank:'
+                            f'{num_layers_per_middle_pipeline_rank} must be divisible by virtual'
+                            f'pipeline parallel degree {self.virtual_pipeline_model_parallel_size}'
+                        )
+
+            if (
+                self.account_for_embedding_in_pipeline_split
+                or self.account_for_loss_in_pipeline_split
+            ):
+                if self.virtual_pipeline_model_parallel_size is None:
+                    num_layers = self.num_layers
+
+                    if self.account_for_embedding_in_pipeline_split:
+                        num_layers += 1
+
+                    if self.account_for_loss_in_pipeline_split:
+                        num_layers += 1
+
+                    if not num_layers % self.pipeline_model_parallel_size == 0:
+                        raise ValueError(
+                            f'number of middle layers: {num_layers} must be divisible by '
+                            f'middle pipeline_model_parallel_size \
+                                {self.pipeline_model_parallel_size}'
+                        )
+                else:
+                    num_layers = self.num_layers
+                    if self.account_for_embedding_in_pipeline_split:
+                        num_layers += 1
+
+                    if self.account_for_loss_in_pipeline_split:
+                        num_layers += 1
+
+                    if not num_layers % self.pipeline_model_parallel_size == 0:
+                        raise ValueError(
+                            f'num_layers: {num_layers} after enable'
+                            f'account_for_embedding_in_pipeline_split or '
+                            f'account_for_loss_in_pipeline_split must be divisible'
+                            f'by pipeline_model_parallel_size '
+                            f'{self.pipeline_model_parallel_size}'
+                        )
+
+                    num_layers_per_pipeline_rank = num_layers // self.pipeline_model_parallel_size
+                    if (
+                        not num_layers_per_pipeline_rank % self.virtual_pipeline_model_parallel_size
+                        == 0
+                    ):
+                        raise ValueError(
+                            f'number of layers on each pipeline rank:{num_layers_per_pipeline_rank}'
+                            f'(after enable account_for_embedding_in_pipeline_split or '
+                            f'account_for_loss_in_pipeline_split) must be divisible by'
+                            f'virtual_pipeline_model_parallel_size'
+                            f'{self.virtual_pipeline_model_parallel_size}'
+                        )
 
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True

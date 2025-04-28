@@ -1320,7 +1320,6 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         }
         load_kwargs["sharded_state_dict"] = sharded_state_dict
 
-
     state_dict, checkpoint_name, release, ckpt_type = _load_base_checkpoint(
         load_dir, args, rank0=False, checkpointing_context=checkpointing_context,
         **load_kwargs
@@ -1388,6 +1387,10 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         else:
             for i in range(len(ddp_model)):
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
+                # If there is no corresponding model in the state_dict, it will be ignored.
+                # It means that this is an empty stage.
+                if 'model%d' % i not in state_dict:
+                    continue
                 load_model_state_dict(ddp_model[i], state_dict['model%d' % i], strict)
 
     # Fix up query/key/value matrix ordering if needed.

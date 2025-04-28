@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import types
 import warnings
+import ast
 
 import torch
 import torch.nn.functional as F
@@ -26,6 +27,7 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
     HeterogeneousTransformerConfig,
     MLPConfig,
 )
+from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.utils import (
     get_torch_version,
     is_torch_min_version,
@@ -307,6 +309,37 @@ def moe_freq_type(x):
         # it's a single int but in str
         return int(x)
 
+def pipeline_layout_type(x):
+    """Pipeline model parallel layout.
+
+    Accepts:
+    - A string containing a Python list expression that defines a custom pipeline model
+      parallel layout.
+      This argument accepts both 1D and 2D representation. For a 2D layout representation,
+      layout[pp_rank][vpp_rank] gives a list of the layers in the vpp_rank-th virtual pipeline
+      rank of the pp_rank-th pipeline rank. For a 1D layout representation, layout[i] gives
+      a list of the layers in the i-th pipeline stage (considering vpp).  
+      In both 1D and 2D layout representations, 'embedding' denotes the embedding layer,
+      'loss' denotes the loss function, and 'decoder' denotes the decoder layer.
+      Examples:
+        "[['embedding','decoder'],['decoder']*3+['loss']]":
+          pp = 2, vp = 1, 1D layout
+          pp rank 0 holds: embedding, decoder
+          pp rank 0 holds: decoder*3, loss
+        "[['embedding']]+[['decoder']*2]*2+[['decoder']]*4+[['loss']]":
+          pp = 2, vp = 4, 1D layout
+          vpp rank 0 pp rank 0 holds: embedding
+          vpp rank 0 pp rank 1~2 holds: decoder*2
+          vpp rank 0 pp rank 3 holds: decoder
+          vpp rank 1 pp rank 0~2 holds: decoder
+          vpp rank 1 pp rank 3 holds: loss
+        pp stage 1 holds
+        "[[['embedding'],['decoder']]]+[[['decoder']*2,['decoder']]]*2+[[['decoder'],['loss']]]":
+          pp = 4, vp = 2, 2D layout
+          This layout representation is equivalent to the previous 1D representation.
+    """
+    # Do not parse it here since we do not have the pipeline model parallel size yet.
+    return x
 
 def validate_args(args, defaults={}):
 
@@ -460,60 +493,50 @@ def validate_args(args, defaults={}):
                 args.global_batch_size), flush=True)
     assert args.global_batch_size > 0
 
-    # Uneven virtual pipeline parallelism
-    assert args.num_layers_per_virtual_pipeline_stage is None or args.num_virtual_stages_per_pipeline_rank is None, \
-        '--num-layers-per-virtual-pipeline-stage and --num-virtual-stages-per-pipeline-rank cannot be set at the same time'
-
-    if args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
-        if args.overlap_p2p_comm:
-            assert args.pipeline_model_parallel_size > 1, \
-                'When interleaved schedule is used, pipeline-model-parallel size '\
-                'should be greater than 1'
+    # Validate the pipeline layout argument
+    if args.pipeline_model_parallel_layout is not None:
+        any_conflict = (
+            args.num_layers_per_virtual_pipeline_stage is not None or 
+            args.decoder_first_pipeline_num_layers is not None or
+            args.decoder_last_pipeline_num_layers is not None or
+            args.account_for_embedding_in_pipeline_split is not None or
+            args.account_for_loss_in_pipeline_split is not None
+        )
+        
+        if any_conflict:
+            print("WARNING: --pipeline-model-parallel-layout is set, but other pipeline layout arguments are also set. \
+                  The layout argument will take precedence.")
+        
+        # Parse the layout to a list and get the vpp size.
+        # We will validate the layout in the TransformerConfig.__post_init__ method.
+        try:
+            layout_list = eval(args.pipeline_model_parallel_layout)
+        except Exception as e:
+            raise ValueError(f"Invalid pipeline model parallel layout: {args.pipeline_model_parallel_layout}, exception: {e}")
+        if not isinstance(layout_list[0][0], list): # 1D PP layout
+            vpp_size = len(layout_list) // args.pipeline_model_parallel_size
         else:
-            assert args.pipeline_model_parallel_size > 2, \
-                'When interleaved schedule is used and p2p communication overlap is disabled, '\
-                'pipeline-model-parallel size should be greater than 2 to avoid having multiple '\
-                'p2p sends and recvs between same 2 ranks per communication batch'
+            vpp_size = len(layout_list[0])
 
-        if args.num_virtual_stages_per_pipeline_rank is None:
-            assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, \
-                'please use --num-virtual-stages-per-pipeline-rank to specify virtual pipeline parallel degree when enable uneven pipeline parallelism'
-            if args.num_layers is not None:
-                num_layers = args.num_layers
-            else:
-                num_layers = args.decoder_num_layers
-
-            if args.account_for_embedding_in_pipeline_split:
-                num_layers += 1
-
-            if args.account_for_loss_in_pipeline_split:
-                num_layers += 1
-
-            assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
-                'number of layers of the model must be divisible pipeline model parallel size'
-            num_layers_per_pipeline_stage = num_layers // args.transformer_pipeline_model_parallel_size
-
-            assert num_layers_per_pipeline_stage % args.num_layers_per_virtual_pipeline_stage == 0, \
-                'number of layers per pipeline stage must be divisible number of layers per virtual pipeline stage'
-            args.virtual_pipeline_model_parallel_size = num_layers_per_pipeline_stage // \
-                args.num_layers_per_virtual_pipeline_stage
+        if args.num_virtual_stages_per_pipeline_rank is not None:
+            assert args.num_virtual_stages_per_pipeline_rank == vpp_size, (
+                "num-virtual-stages-per-pipeline-rank conflicts with the shape of pipeline model parallel layout,"
+                f" {args.num_virtual_stages_per_pipeline_rank=}, {vpp_size=}"
+            )
+        
+        if vpp_size > 1:
+            args.virtual_pipeline_model_parallel_size = vpp_size
         else:
-            args.virtual_pipeline_model_parallel_size = args.num_virtual_stages_per_pipeline_rank
+            args.virtual_pipeline_model_parallel_size = None
     else:
-        args.virtual_pipeline_model_parallel_size = None
-        # Overlap P2P communication is disabled if not using the interleaved schedule.
-        args.overlap_p2p_comm = False
-        args.align_param_gather = False
-        # Only print warning if PP size > 1.
-        if args.rank == 0 and args.pipeline_model_parallel_size > 1:
-            print('WARNING: Setting args.overlap_p2p_comm and args.align_param_gather to False '
-                  'since non-interleaved schedule does not support overlapping p2p communication '
-                  'and aligned param AG')
+        # Uneven virtual pipeline parallelism
+        assert args.num_layers_per_virtual_pipeline_stage is None or args.num_virtual_stages_per_pipeline_rank is None, \
+            '--num-layers-per-virtual-pipeline-stage and --num-virtual-stages-per-pipeline-rank cannot be set at the same time'
 
-        if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:
-            # Divisibility check not applicable for T5 models which specify encoder_num_layers
-            # and decoder_num_layers.
-            if args.num_layers is not None:
+        if args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
+            if args.num_virtual_stages_per_pipeline_rank is None:
+                assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, \
+                    'please use --num-virtual-stages-per-pipeline-rank to specify virtual pipeline parallel degree when enable uneven pipeline parallelism'
                 num_layers = args.num_layers
 
                 if args.account_for_embedding_in_pipeline_split:
@@ -523,7 +546,53 @@ def validate_args(args, defaults={}):
                     num_layers += 1
 
                 assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
-                    'Number of layers should be divisible by the pipeline-model-parallel size'
+                    'number of layers of the model must be divisible pipeline model parallel size'
+                num_layers_per_pipeline_stage = num_layers // args.transformer_pipeline_model_parallel_size
+
+                assert num_layers_per_pipeline_stage % args.num_layers_per_virtual_pipeline_stage == 0, \
+                    'number of layers per pipeline stage must be divisible number of layers per virtual pipeline stage'
+                args.virtual_pipeline_model_parallel_size = num_layers_per_pipeline_stage // \
+                    args.num_layers_per_virtual_pipeline_stage
+            else:
+                args.virtual_pipeline_model_parallel_size = args.num_virtual_stages_per_pipeline_rank
+        else:
+            args.virtual_pipeline_model_parallel_size = None
+
+            if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:
+                # Divisibility check not applicable for T5 models which specify encoder_num_layers
+                # and decoder_num_layers.
+                if args.num_layers is not None:
+                    num_layers = args.num_layers
+
+                    if args.account_for_embedding_in_pipeline_split:
+                        num_layers += 1
+
+                    if args.account_for_loss_in_pipeline_split:
+                        num_layers += 1
+
+                    assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
+                        'Number of layers should be divisible by the pipeline-model-parallel size'
+    
+    if args.virtual_pipeline_model_parallel_size is not None:
+        if args.overlap_p2p_comm:
+            assert args.pipeline_model_parallel_size > 1, \
+                'When interleaved schedule is used, pipeline-model-parallel size '\
+                'should be greater than 1'
+        else:
+            assert args.pipeline_model_parallel_size > 2, \
+                'When interleaved schedule is used and p2p communication overlap is disabled, '\
+                'pipeline-model-parallel size should be greater than 2 to avoid having multiple '\
+                'p2p sends and recvs between same 2 ranks per communication batch'
+    else:
+        # Overlap P2P communication is disabled if not using the interleaved schedule.
+        args.overlap_p2p_comm = False
+        args.align_param_gather = False
+        # Only print warning if PP size > 1.
+        if args.rank == 0 and args.pipeline_model_parallel_size > 1:
+            print('WARNING: Setting args.overlap_p2p_comm and args.align_param_gather to False '
+                'since non-interleaved schedule does not support overlapping p2p communication '
+                'and aligned param AG')
+
     if args.rank == 0:
         print(f"Number of virtual stages per pipeline stage: {args.virtual_pipeline_model_parallel_size}")
 
@@ -2111,6 +2180,10 @@ def _add_distributed_args(parser):
                        type=int, default=None,
                        help=('The number of transformer layers on the last pipeline stage of the decoder. '
                        'Default None is even split of transformer layers across all pipeline stages'))
+    group.add_argument('--pipeline-model-parallel-layout',
+                       type=pipeline_layout_type, default=None,
+                       help=('The layout of the pipeline model parallel groups. '
+                       'Default None is not using this argument to set the layout.'))
     group.add_argument('--model-parallel-size', type=int, default=None,
                        help='Old model parallel argument, do not use. Use '
                        '--tensor-model-parallel-size instead.')
