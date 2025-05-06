@@ -1853,6 +1853,11 @@ def post_training_step_callbacks(
     ):
         if args.use_pytorch_profiler:
             assert prof is not None
+            # Export Chrome trace after profiling ends
+            rank = torch.distributed.get_rank()
+            chrome_trace_path = os.path.join(args.tensorboard_dir, f"chrome_trace_rank_{rank}.json")
+            prof.export_chrome_trace(chrome_trace_path)
+            print(f"Chrome trace exported to {chrome_trace_path}")
             prof.stop()
         else:
             torch.cuda.cudart().cudaProfilerStop()
@@ -2122,7 +2127,7 @@ def train(
                 active=args.profile_step_end - args.profile_step_start,
                 repeat=1,
             ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
+            # on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
             record_shapes=True,
             with_stack=True,
         )
