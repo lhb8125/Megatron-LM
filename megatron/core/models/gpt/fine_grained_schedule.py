@@ -655,10 +655,22 @@ def schedule_chunk_1f1b(
     b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
     overlaped_layers = min(f_num_layers, b_num_layers)
 
+    head_forward_layers = f_num_layers - overlaped_layers
+
+    # head forward
+    with f_context:
+        for i in range(head_forward_layers):
+            torch.cuda.nvtx.range_push(f"layer_{i}f")
+            f_layer = f_schedule_plan.get_layer(i)
+            f_input, _, _ = schedule_layer_1f1b(f_layer, None, pre_forward=layer_pre_forward)
+            layer_pre_forward = lambda : f_input
+            torch.cuda.nvtx.range_pop()
+
+    # interleaved 1f1b
     for i in range(overlaped_layers):
-        f_layer = f_schedule_plan.get_layer(i)
+        f_layer = f_schedule_plan.get_layer(i+head_forward_layers)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-        torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
+        torch.cuda.nvtx.range_push(f"layer_{i+head_forward_layers}f-layer_{b_num_layers - 1 - i}b")
         layer_pre_forward, layer_pre_backward, layer_pre_backward_dw = schedule_layer_1f1b(
             f_layer,
             b_layer,
@@ -673,6 +685,15 @@ def schedule_chunk_1f1b(
     # tail forward
     f_input = layer_pre_forward()
     del layer_pre_forward
+    # pp output send receive
+    if f_schedule_plan is not None and post_forward is not None:
+        with f_context:
+            # The last submodule(layer_pre_forward) is running in the communication stream,
+            # so the p2p comm could be overlapped with the attn backward
+            with torch.cuda.stream(get_com_stream()):
+                f_schedule_plan.wait_current_stream()
+                post_forward(f_input)
+
     # tail backward
     grad = layer_pre_backward()
     del layer_pre_backward
@@ -682,26 +703,6 @@ def schedule_chunk_1f1b(
             torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
             tmp, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
             torch.cuda.nvtx.range_pop()
-
-    with f_context:
-        for i in range(overlaped_layers, f_num_layers):
-            f_layer = f_schedule_plan.get_layer(i)
-            torch.cuda.nvtx.range_push(f"layer_{i}f")
-            f_input, tmp, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
-            torch.cuda.nvtx.range_pop()
-
-    if f_schedule_plan is not None and post_forward is not None:
-        with f_context:
-            if overlaped_layers < f_num_layers:
-                # The last submodule is running in the current stream
-                f_schedule_plan.wait_current_stream()
-                post_forward(f_input)
-            else:
-                # The last submodule is running in the communication stream,
-                # so the p2p comm could be overlapped with the attn backward
-                with torch.cuda.stream(get_com_stream()):
-                    f_schedule_plan.wait_current_stream()
-                    post_forward(f_input)
 
     # pp grad send / receive, overlapped with attn dw of cur micro-batch
     # and forward attn of next micro-batch
