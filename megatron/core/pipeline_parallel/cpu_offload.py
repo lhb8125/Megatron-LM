@@ -344,12 +344,12 @@ class GroupCommitFunction(torch.autograd.Function):
         return grad_output, None, None
 
 
-def group_prefetch_offload_commit_func(tensor, offloaded_call_back=None):
+def group_prefetch_offload_commit_func(tensor, callback=None):
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupCommitFunction.apply(tensor, cur_forward_chunk, offloaded_call_back)
+    return GroupCommitFunction.apply(tensor, cur_forward_chunk, callback)
 
 
-def noop_func(tensor, offloaded_call_back=None):
+def noop_func(tensor, callback=None):
     return tensor
 
 
