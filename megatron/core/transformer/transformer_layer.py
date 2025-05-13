@@ -719,20 +719,18 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             permuted_probs,
             state.pre_mlp_layernorm_output,
         ]
-        if self.mlp.moe_layer_recompute:
-            from megatron.core.pipeline_parallel.cpu_offload import (
-                get_offload_context,
-                set_offload_tag,
-            )
+        from megatron.core.pipeline_parallel.cpu_offload import get_offload_context, set_offload_tag
 
-            set_offload_tag(dispatched_tokens)
-            set_offload_tag(permuted_probs)
-            with get_offload_context(self.config):
+        # offload to cpu if configured
+        set_offload_tag(dispatched_tokens)
+        set_offload_tag(permuted_probs)
+        with get_offload_context(self.config):
+            if self.mlp.moe_layer_recompute:
                 expert_output, shared_expert_output = tensor_parallel.checkpoint(
                     custom_forward, False, *args
                 )
-        else:
-            expert_output, shared_expert_output = custom_forward(*args)
+            else:
+                expert_output, shared_expert_output = custom_forward(*args)
         del args
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         return expert_output, shared_expert_output, None

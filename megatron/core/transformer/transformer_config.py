@@ -830,12 +830,12 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 not self.cpu_offloading
             ), "offload_moe_mlp_input can not be used with cpu_offloading"
-            moe_layer_recompute = (
-                self.recompute_granularity == 'selective' and "moe" in self.recompute_modules
+            moe_recompute = self.recompute_granularity == 'selective' and (
+                "moe" in self.recompute_modules or "moe_act" in self.recompute_modules
             )
             assert (
-                moe_layer_recompute
-            ), "offload_moe_mlp_input must be used with moe_layer_recompute"
+                moe_recompute
+            ), "offload_moe_mlp_input must be used with moe_recompute, 'moe' or 'moe_act' "
             assert (
                 self.combined_1f1b and self.combined_1f1b_recipe == "ep_a2a"
             ), "offload_moe_mlp_input  must be used with combined_1f1b"
