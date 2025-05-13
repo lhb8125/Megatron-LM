@@ -484,7 +484,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_apply_probs_on_input: bool = False
     """Apply probs on input of experts instead of applying after activation and glu."""
-    
+
     moe_track_imbalance_rate: bool = False
     """Track the imbalance rate of routing across expert parallel ranks. The imbalance rate measures
     load balancing efficiency by calculating the ratio of maximum tokens per expert parallel rank to 
@@ -827,10 +827,18 @@ class TransformerConfig(ModelParallelConfig):
                 self.recompute_modules.append("moe")
 
         if self.offload_moe_mlp_input:
-            assert not self.cpu_offloading, "offload_moe_mlp_input can not be used with cpu_offloading"
-            moe_layer_recompute = (self.recompute_granularity == 'selective' and "moe" in self.recompute_modules)
-            assert moe_layer_recompute, "offload_moe_mlp_input must be used with moe_layer_recompute"
-            assert self.combined_1f1b and self.combined_1f1b_recipe == "ep_a2a", "offload_moe_mlp_input  must be used with combined_1f1b"
+            assert (
+                not self.cpu_offloading
+            ), "offload_moe_mlp_input can not be used with cpu_offloading"
+            moe_layer_recompute = (
+                self.recompute_granularity == 'selective' and "moe" in self.recompute_modules
+            )
+            assert (
+                moe_layer_recompute
+            ), "offload_moe_mlp_input must be used with moe_layer_recompute"
+            assert (
+                self.combined_1f1b and self.combined_1f1b_recipe == "ep_a2a"
+            ), "offload_moe_mlp_input  must be used with combined_1f1b"
 
         if (
             self.num_layers_in_first_pipeline_stage is not None

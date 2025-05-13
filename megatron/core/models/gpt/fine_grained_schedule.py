@@ -20,9 +20,9 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
     get_comp_stream,
     make_viewless,
 )
+from megatron.core.pipeline_parallel.cpu_offload import reset_chunk as cpu_offload_reset_chunk
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
-from megatron.core.pipeline_parallel.cpu_offload import reset_chunk as cpu_offload_reset_chunk
 
 
 def weak_method(method):
@@ -729,6 +729,7 @@ def schedule_chunk_1f1b(
         b_schedule_plan.wait_current_stream()
 
     return f_input
+
 
 def build_model_chunk_schedule_plan(
     model,

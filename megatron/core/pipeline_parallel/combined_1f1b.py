@@ -17,7 +17,9 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
+
 from .cpu_offload import reset_batch as cpu_offload_reset
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -570,6 +572,7 @@ def wrap_forward_func(config, forward_step_func):
     The wrapped function will return forward_schedule_plan and the loss_function.
     """
     cpu_offload_reset(config)
+
     def wrapped_func(data_iterator, model):
         # Model is unwrapped to get GPTModel instance.
         # GPTModel.build_schedule_plan(model_forward_inputs) is called in the forward_step.

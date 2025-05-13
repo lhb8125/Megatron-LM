@@ -579,6 +579,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             if self.config.fp8:
                 # import here to avoid circular import
                 from megatron.core.extensions.transformer_engine import te_checkpoint
+
                 mlp_output_with_bias = te_checkpoint(
                     self.mlp,
                     False,
@@ -698,23 +699,38 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             tokens_per_expert = token_dispatcher.tokens_per_expert
             token_dispatcher.tokens_per_expert = None
 
-        def custom_forward(dispatched_tokens, tokens_per_expert, permuted_probs, pre_mlp_layernorm_output):
+        def custom_forward(
+            dispatched_tokens, tokens_per_expert, permuted_probs, pre_mlp_layernorm_output
+        ):
             expert_output, mlp_bias = self.mlp.experts(
                 dispatched_tokens, tokens_per_expert, permuted_probs
             )
-            assert mlp_bias is None, f"Bias is not supported in {token_dispatcher.__class__.__name__}"
+            assert (
+                mlp_bias is None
+            ), f"Bias is not supported in {token_dispatcher.__class__.__name__}"
             shared_expert_output = None
             if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
                 shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
             return expert_output, shared_expert_output
 
-        args = [dispatched_tokens, tokens_per_expert, permuted_probs, state.pre_mlp_layernorm_output]
+        args = [
+            dispatched_tokens,
+            tokens_per_expert,
+            permuted_probs,
+            state.pre_mlp_layernorm_output,
+        ]
         if self.mlp.moe_layer_recompute:
-            from megatron.core.pipeline_parallel.cpu_offload import get_offload_context, set_offload_tag
+            from megatron.core.pipeline_parallel.cpu_offload import (
+                get_offload_context,
+                set_offload_tag,
+            )
+
             set_offload_tag(dispatched_tokens)
             set_offload_tag(permuted_probs)
             with get_offload_context(self.config):
-                expert_output, shared_expert_output = tensor_parallel.checkpoint(custom_forward, False, *args)
+                expert_output, shared_expert_output = tensor_parallel.checkpoint(
+                    custom_forward, False, *args
+                )
         else:
             expert_output, shared_expert_output = custom_forward(*args)
         del args
@@ -762,11 +778,13 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             return dispatched_tokens, probs
 
     def cpu_offload_commit(self, tensor, callback=None):
-        from megatron.core.pipeline_parallel.cpu_offload import get_group_prefetch_offload_commit_func
+        from megatron.core.pipeline_parallel.cpu_offload import (
+            get_group_prefetch_offload_commit_func,
+        )
+
         group_prefetch_offload_commit = get_group_prefetch_offload_commit_func(self.config)
         tensor = group_prefetch_offload_commit(tensor, callback=callback)
         return tensor
-
 
     def _submodule_mlp_postprocess(self, node, expert_output, shared_expert_output, mlp_bias):
         assert mlp_bias is None
