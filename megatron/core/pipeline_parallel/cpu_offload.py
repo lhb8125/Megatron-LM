@@ -5,6 +5,7 @@ import torch
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
 from megatron.core import parallel_state
+from contextlib import nullcontext
 
 # cpu offload for pipeline
 
@@ -343,6 +344,43 @@ class GroupCommitFunction(torch.autograd.Function):
         return grad_output, None, None
 
 
-def group_prefetch_offload_commit(tensor, offloaded_call_back=None):
+def group_prefetch_offload_commit_func(tensor, offloaded_call_back=None):
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
     return GroupCommitFunction.apply(tensor, cur_forward_chunk, offloaded_call_back)
+
+
+
+def noop_func(tensor, offloaded_call_back=None):
+    return tensor
+
+
+def get_group_prefetch_offload_commit_func(config):
+    if config.offload_moe_mlp_input:
+        return group_prefetch_offload_commit_func
+    else:
+        return noop_func
+def get_offload_context(config):
+    if config.offload_moe_mlp_input:
+        return PipelineOffloadManager.get_instance()
+    else:
+        return nullcontext()
+
+OFFLOAD_TAG = "offloading_mlp_input"
+def offloading_checker(tensor):
+    global OFFLOAD_TAG
+    return hasattr(tensor, OFFLOAD_TAG) and getattr(tensor, OFFLOAD_TAG)
+
+def set_offload_tag(tensor):
+    global OFFLOAD_TAG
+    setattr(tensor, OFFLOAD_TAG, True)
+
+def reset_chunk(config, layer_num):
+    if config.offload_moe_mlp_input:
+        # start a new forward chunk
+        PipelineOffloadManager.get_instance().reset_chunk_handler(layer_num)
+        PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
+
+def reset_batch(config):
+    if config.offload_moe_mlp_input:
+        PipelineOffloadManager.get_instance().reset()
+

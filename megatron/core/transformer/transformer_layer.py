@@ -697,14 +697,27 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             )
             tokens_per_expert = token_dispatcher.tokens_per_expert
             token_dispatcher.tokens_per_expert = None
-        expert_output, mlp_bias = self.mlp.experts(
-            dispatched_tokens, tokens_per_expert, permuted_probs
-        )
-        assert mlp_bias is None, f"Bias is not supported in {token_dispatcher.__class__.__name__}"
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(state.pre_mlp_layernorm_output)
+
+        def custom_forward(dispatched_tokens, tokens_per_expert, permuted_probs, pre_mlp_layernorm_output):
+            expert_output, mlp_bias = self.mlp.experts(
+                dispatched_tokens, tokens_per_expert, permuted_probs
+            )
+            assert mlp_bias is None, f"Bias is not supported in {token_dispatcher.__class__.__name__}"
+            shared_expert_output = None
+            if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
+                shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
+            return expert_output, shared_expert_output
+
+        args = [dispatched_tokens, tokens_per_expert, permuted_probs, state.pre_mlp_layernorm_output]
+        if self.mlp.moe_layer_recompute:
+            from megatron.core.pipeline_parallel.cpu_offload import get_offload_context
+            with get_offload_context(self.config):
+                expert_output, shared_expert_output = tensor_parallel.checkpoint(custom_forward, False, *args)
+        else:
+            expert_output, shared_expert_output = custom_forward(*args)
+        del args
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
-        return expert_output, shared_expert_output, mlp_bias
+        return expert_output, shared_expert_output, None
 
     def _submodule_combine_forward(self, output, shared_expert_output=None, state=None):
         residual = state.residual
@@ -746,9 +759,17 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         else:
             return dispatched_tokens, probs
 
+    def cpu_offload_commit(self, tensor, callback=None):
+        from megatron.core.pipeline_parallel.cpu_offload import get_group_prefetch_offload_commit_func
+        group_prefetch_offload_commit = get_group_prefetch_offload_commit_func(self.config)
+        tensor = group_prefetch_offload_commit(tensor, callback=callback)
+        return tensor
+
+
     def _submodule_mlp_postprocess(self, node, expert_output, shared_expert_output, mlp_bias):
         assert mlp_bias is None
         node.common_state.pre_mlp_layernorm_output = None
+        expert_output = self.cpu_offload_commit(expert_output)
         if shared_expert_output is None:
             return expert_output
         return expert_output, shared_expert_output
@@ -763,6 +784,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         return hidden_states
 
     def _submodule_dense_postprocess(self, node, hidden_states):
+        hidden_states = self.cpu_offload_commit(hidden_states)
         return hidden_states
 
     def _submodule_not_implemented(self, *args):

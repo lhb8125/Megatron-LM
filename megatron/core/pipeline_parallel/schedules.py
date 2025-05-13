@@ -729,7 +729,7 @@ def forward_backward_pipelining_with_interleaving(
     if config.combined_1f1b and not forward_only:
         # in combined_1f1b, we need to wrap the forward_step_func
         # to return a schedule plan instead of the forward output tensor
-        forward_step_func = wrap_forward_func(forward_step_func)
+        forward_step_func = wrap_forward_func(config, forward_step_func)
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
 

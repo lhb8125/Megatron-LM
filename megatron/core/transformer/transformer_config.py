@@ -270,6 +270,11 @@ class TransformerConfig(ModelParallelConfig):
     "core_attn", "mlp", and "moe" uses normal checkpointing.
     """
 
+    offload_moe_mlp_input: bool = False
+    """
+    offload moe mlp input, must be used with mlp recompute and combined 1f1b
+    """
+
     ####################
     # fp8 related
     ####################
@@ -820,6 +825,12 @@ class TransformerConfig(ModelParallelConfig):
             self.recompute_granularity = 'selective'
             if "moe" not in self.recompute_modules:
                 self.recompute_modules.append("moe")
+
+        if self.offload_moe_mlp_input:
+            assert not self.cpu_offloading, "offload_moe_mlp_input can not be used with cpu_offloading"
+            moe_layer_recompute = (self.recompute_granularity == 'selective' and "moe" in self.recompute_modules)
+            assert moe_layer_recompute, "offload_moe_mlp_input must be used with moe_layer_recompute"
+            assert self.combined_1f1b and self.combined_1f1b_recipe == "ep_a2a", "offload_moe_mlp_input  must be used with combined_1f1b"
 
         if (
             self.num_layers_in_first_pipeline_stage is not None

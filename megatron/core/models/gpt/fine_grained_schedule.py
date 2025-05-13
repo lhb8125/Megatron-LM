@@ -22,6 +22,7 @@ from megatron.core.pipeline_parallel.combined_1f1b import (
 )
 from megatron.core.transformer import transformer_layer
 from megatron.core.transformer.module import float16_to_fp32
+from megatron.core.pipeline_parallel.cpu_offload import reset_chunk as cpu_offload_reset_chunk
 
 
 def weak_method(method):
@@ -729,7 +730,6 @@ def schedule_chunk_1f1b(
 
     return f_input
 
-
 def build_model_chunk_schedule_plan(
     model,
     input_ids: Tensor,
@@ -762,6 +762,7 @@ def build_model_chunk_schedule_plan(
     Returns:
         The model chunk schedule plan.
     """
+    cpu_offload_reset_chunk(model.config, model.decoder.num_layers_per_pipeline_rank)
     comp_stream = get_comp_stream()
     com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
