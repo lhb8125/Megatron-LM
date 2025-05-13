@@ -809,6 +809,9 @@ class TransformerConfig(ModelParallelConfig):
                     "Please check that the core_attn recompute is really needed."
                 )
 
+            if "moe_act" in self.recompute_modules and "moe" in self.recompute_modules:
+                raise ValueError(" 'moe_act' and 'moe' can not be used togather")
+
             if self.fp8:
                 if "moe_act" in self.recompute_modules or "layernorm" in self.recompute_modules:
                     raise ValueError("moe_act and layernorm recompute cannot work with fp8.")

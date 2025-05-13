@@ -263,10 +263,16 @@ class GroupedMLP(MegatronModule):
             # Reshape the weights for the grouped GEMMs.
             w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
-
-            fc1_output = gg.ops.gmm(
-                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+            from megatron.core.pipeline_parallel.cpu_offload import (
+                get_offload_context,
+                set_offload_tag,
             )
+
+            set_offload_tag(permuted_local_hidden_states)
+            with get_offload_context(self.config):
+                fc1_output = gg.ops.gmm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+                )
             if self.activation_recompute:
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)

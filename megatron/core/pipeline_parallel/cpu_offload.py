@@ -354,14 +354,14 @@ def noop_func(tensor, callback=None):
 
 
 def get_group_prefetch_offload_commit_func(config):
-    if config.offload_moe_mlp_input:
+    if config.offload_moe_mlp_input and config.combined_1f1b:
         return group_prefetch_offload_commit_func
     else:
         return noop_func
 
 
 def get_offload_context(config):
-    if config.offload_moe_mlp_input:
+    if config.offload_moe_mlp_input and config.combined_1f1b:
         return PipelineOffloadManager.get_instance()
     else:
         return nullcontext()
@@ -381,7 +381,7 @@ def set_offload_tag(tensor):
 
 
 def reset_chunk(config, layer_num):
-    if config.offload_moe_mlp_input:
+    if config.offload_moe_mlp_input and config.combined_1f1b:
         # start a new forward chunk
         PipelineOffloadManager.get_instance().reset_chunk_handler(layer_num)
         PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(
@@ -390,5 +390,5 @@ def reset_chunk(config, layer_num):
 
 
 def reset_batch(config):
-    if config.offload_moe_mlp_input:
+    if config.offload_moe_mlp_input and config.combined_1f1b:
         PipelineOffloadManager.get_instance().reset()
