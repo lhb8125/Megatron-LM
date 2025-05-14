@@ -267,12 +267,17 @@ class GroupedMLP(MegatronModule):
                 get_offload_context,
                 set_offload_tag,
             )
-
-            set_offload_tag(permuted_local_hidden_states)
-            with get_offload_context(self.config):
+            if self.activation_recompute:
+                set_offload_tag(permuted_local_hidden_states)
+                with get_offload_context(self.config):
+                    fc1_output = gg.ops.gmm(
+                        permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+                    )
+            else:
                 fc1_output = gg.ops.gmm(
                     permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
                 )
+
             if self.activation_recompute:
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
