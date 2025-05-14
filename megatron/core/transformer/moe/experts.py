@@ -267,6 +267,7 @@ class GroupedMLP(MegatronModule):
                 get_offload_context,
                 set_offload_tag,
             )
+
             if self.activation_recompute:
                 set_offload_tag(permuted_local_hidden_states)
                 with get_offload_context(self.config):

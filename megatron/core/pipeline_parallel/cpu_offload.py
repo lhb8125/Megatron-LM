@@ -100,11 +100,11 @@ class PipelineOffloadManager:
         cur_chunk.vpp_rank = cur_vpp_rank
 
     def cur_forward_chunk(self):
-        """ state for current forward  micro batch or vpp chunk """
+        """state for current forward  micro batch or vpp chunk"""
         return self._cur_forward_chunk
 
     def cur_backward_chunk(self):
-        """ state for current backward  micro batch or vpp chunk """
+        """state for current backward  micro batch or vpp chunk"""
         return self._cur_backward_chunk
 
     def __enter__(self):
@@ -120,12 +120,12 @@ class PipelineOffloadManager:
         torch._C._autograd._pop_saved_tensors_default_hooks()
 
     def on_save_for_backward(self, tensor: torch.Tensor, **kwargs) -> Any:
-        """ save hook """
+        """save hook"""
         assert self.inside_context
         return self.cur_forward_chunk().tensor_push(tensor)
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
-        """ get hook """
+        """get hook"""
         return self.cur_backward_chunk().tensor_pop(saved_state)
 
 
@@ -179,11 +179,11 @@ class ChunkOffloadHandler:
         self.do_offload = offload
 
     def is_first_last_layer(self):
-        """ whether is the last layer of first last vpp chunk ever meet for this batch"""
+        """whether is the last layer of first last vpp chunk ever meet for this batch"""
         return self._is_first_last_vpp_chunk and self.is_last_layer()
 
     def is_last_layer(self):
-        """ is the last layer for this chunk """
+        """is the last layer for this chunk"""
         return self._layer_index == self._num_layers - 1
 
     def tensor_push(self, tensor):
@@ -260,7 +260,7 @@ class ChunkOffloadHandler:
         self._b_event.record(self.h2d_stream)
 
     def pre_reload_last_layer(self):
-        """ pre reload activation for the next layer in the backward order """
+        """pre reload activation for the next layer in the backward order"""
         if not self.do_offload:
             return
         assert not self._is_first_last_vpp_chunk
