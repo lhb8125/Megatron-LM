@@ -81,12 +81,13 @@ class PipelineOffloadManager:
         return len(self._queue)
 
     def reset_chunk_handler(self, num_layer, offload_mlp_input=True):
+        """
+        reset state for a new micro batch, or another vpp chunk of the same micro batch
+        """
         cur_vpp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
 
         first_last_vpp_rank = self._first_last_vpp_rank
-        # rewind
-        if cur_vpp_rank == self._vpp - 1:
-            self.flush()
+        # we do not offload last layer of the first last vpp rank chunk we ever meet, cause it comes first in backward
         first_last_vpp_rank = first_last_vpp_rank and (cur_vpp_rank == self._vpp - 1)
         cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, offload_mlp_input)
         # save for latter push
@@ -99,9 +100,11 @@ class PipelineOffloadManager:
         cur_chunk.vpp_rank = cur_vpp_rank
 
     def cur_forward_chunk(self):
+        """ state for current forward  micro batch or vpp chunk """
         return self._cur_forward_chunk
 
     def cur_backward_chunk(self):
+        """ state for current backward  micro batch or vpp chunk """
         return self._cur_backward_chunk
 
     def __enter__(self):
@@ -117,10 +120,12 @@ class PipelineOffloadManager:
         torch._C._autograd._pop_saved_tensors_default_hooks()
 
     def on_save_for_backward(self, tensor: torch.Tensor, **kwargs) -> Any:
+        """ save hook """
         assert self.inside_context
         return self.cur_forward_chunk().tensor_push(tensor)
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
+        """ get hook """
         return self.cur_backward_chunk().tensor_pop(saved_state)
 
 
@@ -174,9 +179,11 @@ class ChunkOffloadHandler:
         self.do_offload = offload
 
     def is_first_last_layer(self):
+        """ whether is the last layer of first last vpp chunk ever meet for this batch"""
         return self._is_first_last_vpp_chunk and self.is_last_layer()
 
     def is_last_layer(self):
+        """ is the last layer for this chunk """
         return self._layer_index == self._num_layers - 1
 
     def tensor_push(self, tensor):
@@ -209,6 +216,7 @@ class ChunkOffloadHandler:
         return tensor
 
     def set_offloading_checker(self, check_func):
+        """check_func is a func with signature f(tensor) -> bool, check whether the tensor need offload"""
         self.tensor_need_offloading_checker = check_func
 
     def bulk_offload_group(self, group_to_offload):
@@ -252,6 +260,7 @@ class ChunkOffloadHandler:
         self._b_event.record(self.h2d_stream)
 
     def pre_reload_last_layer(self):
+        """ pre reload activation for the next layer in the backward order """
         if not self.do_offload:
             return
         assert not self._is_first_last_vpp_chunk

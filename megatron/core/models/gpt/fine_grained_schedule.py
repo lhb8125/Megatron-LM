@@ -667,7 +667,7 @@ def schedule_chunk_1f1b(
             layer_pre_forward = lambda: f_input
             torch.cuda.nvtx.range_pop()
 
-    # interleaved 1f1b
+    # layer level 1f1b
     for i in range(overlaped_layers):
         f_layer = f_schedule_plan.get_layer(i + head_forward_layers)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
