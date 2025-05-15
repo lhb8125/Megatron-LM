@@ -1,5 +1,5 @@
 from collections import deque
-from contextlib import nullcontext, contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -129,7 +129,6 @@ class PipelineOffloadManager:
         return self.cur_backward_chunk().tensor_pop(saved_state)
 
 
-
 OFFLOAD_TAG = "offloading_mlp_input"
 
 
@@ -141,6 +140,7 @@ def offloading_checker(tensor):
 def set_offload_tag(tensor):
     global OFFLOAD_TAG
     setattr(tensor, OFFLOAD_TAG, True)
+
 
 class ChunkOffloadHandler:
 
@@ -212,7 +212,10 @@ class ChunkOffloadHandler:
         )
 
         if not torch_stray_tensor:
-            if self.tensor_need_offloading_checker is not None and self.tensor_need_offloading_checker(tensor):
+            if (
+                self.tensor_need_offloading_checker is not None
+                and self.tensor_need_offloading_checker(tensor)
+            ):
                 set_offload_tag(tensor)
             # obtain a unique tensor tag
             tensor_tag = (self._layer_index, self._tensor_count_current_layer)
@@ -230,8 +233,12 @@ class ChunkOffloadHandler:
         assert (
             tensor_tag in self._tensor_tag_to_state
         ), f"{tensor_tag}, {self._tensor_tag_to_state.keys()}"
-        assert tensor_tag in self._tensor_tag_to_access_count,  f"{tensor_tag}, {self._tensor_tag_to_access_count.keys()}"
-        self._tensor_tag_to_access_count[tensor_tag] = self._tensor_tag_to_access_count[tensor_tag] - 1
+        assert (
+            tensor_tag in self._tensor_tag_to_access_count
+        ), f"{tensor_tag}, {self._tensor_tag_to_access_count.keys()}"
+        self._tensor_tag_to_access_count[tensor_tag] = (
+            self._tensor_tag_to_access_count[tensor_tag] - 1
+        )
         tensor = self._tensor_tag_to_state[tensor_tag]
         if self._tensor_tag_to_access_count[tensor_tag] <= 0:
             self._tensor_tag_to_state.pop(tensor_tag)
@@ -260,8 +267,6 @@ class ChunkOffloadHandler:
             yield
         finally:
             self._access_count = origin_count
-
-
 
     def bulk_offload_group(self, group_to_offload):
         """Bulk offload group."""
@@ -433,11 +438,17 @@ def reset_batch(config):
 
 def access_count_ctx(config, access_count):
     if config.offload_moe_mlp_input and config.combined_1f1b:
-        return PipelineOffloadManager.get_instance().cur_forward_chunk().access_count_ctx(access_count)
+        return (
+            PipelineOffloadManager.get_instance().cur_forward_chunk().access_count_ctx(access_count)
+        )
     return nullcontext()
 
 
 def offload_checker_ctx(config, offload_checker_func):
     if config.offload_moe_mlp_input and config.combined_1f1b:
-        return PipelineOffloadManager.get_instance().cur_forward_chunk().offload_checker_ctx(offload_checker_func)
+        return (
+            PipelineOffloadManager.get_instance()
+            .cur_forward_chunk()
+            .offload_checker_ctx(offload_checker_func)
+        )
     return nullcontext()
