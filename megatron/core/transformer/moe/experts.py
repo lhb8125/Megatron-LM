@@ -266,6 +266,8 @@ class GroupedMLP(MegatronModule):
             from megatron.core.pipeline_parallel.cpu_offload import (
                 get_offload_context,
                 set_offload_tag,
+                access_count_ctx,
+                offload_checker_ctx,
             )
 
             if self.activation_recompute:
@@ -280,9 +282,10 @@ class GroupedMLP(MegatronModule):
                 )
 
             if self.activation_recompute:
-                intermediate_parallel = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
-                )
+                with get_offload_context(self.config) and access_count_ctx(self.config, 2) and offload_checker_ctx(self.config, lambda t: True):
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
@@ -785,9 +788,22 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        intermediate_parallel, bias_parallel = self.linear_fc1(
-            permuted_local_hidden_states, tokens_per_expert
+        from megatron.core.pipeline_parallel.cpu_offload import (
+            get_offload_context,
+            set_offload_tag,
+            access_count_ctx,
+            offload_checker_ctx,
         )
+        if self.activation_recompute:
+            set_offload_tag(permuted_local_hidden_states)
+            with get_offload_context(self.config):
+                intermediate_parallel, bias_parallel = self.linear_fc1(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+        else:
+            intermediate_parallel, bias_parallel = self.linear_fc1(
+                permuted_local_hidden_states, tokens_per_expert
+            )
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.bias_activation_fusion:
@@ -831,9 +847,10 @@ class TEGroupedMLP(MegatronModule):
 
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            intermediate_parallel = self.activation_checkpoint.checkpoint(
-                bias_act_func, intermediate_parallel, bias_parallel, permuted_probs
-            )
+            with get_offload_context(self.config) and access_count_ctx(self.config, 2) and offload_checker_ctx(self.config, lambda t: True):
+                intermediate_parallel = self.activation_checkpoint.checkpoint(
+                    bias_act_func, intermediate_parallel, bias_parallel, permuted_probs
+                )
             output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         else:
