@@ -229,6 +229,7 @@ class TransformerLayerSubmodules:
 
     pre_mlp_layernorm: Union[ModuleSpec, type] = IdentityOp
     mlp: Union[ModuleSpec, type] = IdentityOp
+    moe_mlp: Optional[Union[ModuleSpec, type]] = None
     mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
 
     # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
@@ -358,32 +359,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             eps=self.config.layernorm_epsilon,
         )
         # [Module 8: MLP block]
-        additional_mlp_kwargs = {}
-        # import here to avoid circular import
-        from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
-        from megatron.core.transformer.moe.moe_layer import MoELayer
-
-        # MLP expects tp_group but MoELayer expects model_comm_pgs to be passed in.
-        # We can change MLP to accept model_comm_pgs but it makes the logic implicit
-        # The conditional below is to make the logic explicit
-        # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
-        if isinstance(submodules.mlp, ModuleSpec):
-            if submodules.mlp.module in (MoELayer, GroupedMLP, TEGroupedMLP, SequentialMLP):
-                additional_mlp_kwargs["model_comm_pgs"] = model_comm_pgs
-            elif submodules.mlp.module == MLP:
-                assert hasattr(
-                    model_comm_pgs, 'tp'
-                ), 'TP process group is required for MLP in TransformerLayer'
-                additional_mlp_kwargs["tp_group"] = model_comm_pgs.tp
-            else:
-                log_single_rank(
-                    logger,
-                    logging.WARNING,
-                    f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
-                )
-        self.mlp = build_module(submodules.mlp, config=self.config, **additional_mlp_kwargs)
-        if hasattr(self.mlp, 'set_layer_number'):
-            self.mlp.set_layer_number(self.layer_number)
+        self.mlp = self.build_mlp_module(submodules, self.config, model_comm_pgs)
 
         # [Module 9: BiasDropoutFusion]
         self.mlp_bda = build_module(submodules.mlp_bda)
@@ -423,6 +399,57 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             "Please use get_transformer_layer_offset instead."
         )
         return get_transformer_layer_offset(config)
+
+    def is_moe_layer(self):
+        config = self.config
+        if (
+            config.num_moe_experts is not None
+            and config.num_moe_experts > 0
+            and self.layer_number >= config.first_k_dense_replace
+            and self.layer_number % config.moe_layer_freq == 0
+        ):
+            return True
+        return False
+
+    def build_mlp_module(self, submodules, model_comm_pgs):
+
+        if submodules.moe_mlp is not None:
+            if self.is_moe_layer():
+                return self.build_mlp_module_common(submodules.moe_mlp, self.config, model_comm_pgs)
+
+        return self.build_mlp_module_common(submodules.mlp, self.config, model_comm_pgs)
+
+    @staticmethod
+    def build_mlp_module_common(
+        mlp_spec, config: TransformerConfig, model_comm_pgs: Optional[ModelCommProcessGroups] = None
+    ):
+        additional_mlp_kwargs = {}
+        # import here to avoid circular import
+        from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
+        from megatron.core.transformer.moe.moe_layer import MoELayer
+
+        # MLP expects tp_group but MoELayer expects model_comm_pgs to be passed in.
+        # We can change MLP to accept model_comm_pgs but it makes the logic implicit
+        # The conditional below is to make the logic explicit
+        # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
+        if isinstance(mlp_spec, ModuleSpec):
+            if mlp_spec.module in (MoELayer, GroupedMLP, TEGroupedMLP, SequentialMLP):
+                additional_mlp_kwargs["model_comm_pgs"] = model_comm_pgs
+            elif mlp_spec.module == MLP:
+                assert hasattr(
+                    model_comm_pgs, 'tp'
+                ), 'TP process group is required for MLP in TransformerLayer'
+                additional_mlp_kwargs["tp_group"] = model_comm_pgs.tp
+            else:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
+                )
+        mlp = build_module(mlp_spec, config=config, **additional_mlp_kwargs)
+        if hasattr(self.mlp, 'set_layer_number'):
+            mlp.set_layer_number(self.layer_number)
+        return mlp
 
     def forward(self, *args, **kwargs):
         """

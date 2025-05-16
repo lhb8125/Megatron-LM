@@ -75,6 +75,7 @@ def get_gpt_layer_with_transformer_engine_spec(
     fp8: Optional[str] = None,  # pylint: disable=unused-arguments
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
     qk_l2_norm: Optional[bool] = False,
+    mixed_dense_and_moe: Optional[bool] = False,
 ) -> ModuleSpec:
     """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
 
@@ -96,13 +97,22 @@ def get_gpt_layer_with_transformer_engine_spec(
             'The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated'
             ' and will be removed soon. Please update your code accordingly.'
         )
-
+    moe_mlp = None
     mlp = get_mlp_module_spec(
         use_te=True,
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
         moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
     )
+
+    if num_experts is not None and mixed_dense_and_moe:
+        moe_mlp, mlp = mlp, moe_mlp
+        mlp = get_mlp_module_spec(
+            use_te=True,
+            num_experts=None,
+            moe_grouped_gemm=moe_grouped_gemm,
+            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        )
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
@@ -136,6 +146,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
                 mlp=mlp,
+                moe_mlp=moe_mlp,
                 mlp_bda=get_bias_dropout_add,
             ),
         )
@@ -166,6 +177,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                 self_attn_bda=get_bias_dropout_add,
                 pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
                 mlp=mlp,
+                moe_mlp=moe_mlp,
                 mlp_bda=get_bias_dropout_add,
             ),
         )
