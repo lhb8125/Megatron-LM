@@ -360,6 +360,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         )
         # [Module 8: MLP block]
         self.mlp = self.build_mlp_module(submodules, self.config, model_comm_pgs)
+        if hasattr(self.mlp, 'set_layer_number'):
+            self.mlp.set_layer_number(self.layer_number)
 
         # [Module 9: BiasDropoutFusion]
         self.mlp_bda = build_module(submodules.mlp_bda)
@@ -444,11 +446,9 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 log_single_rank(
                     logger,
                     logging.WARNING,
-                    f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
+                    f"Unknown MLP type: {type(mlp_spec.mlp)}. Using default kwargs.",
                 )
         mlp = build_module(mlp_spec, config=config, **additional_mlp_kwargs)
-        if hasattr(self.mlp, 'set_layer_number'):
-            mlp.set_layer_number(self.layer_number)
         return mlp
 
     def forward(self, *args, **kwargs):

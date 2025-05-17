@@ -1755,6 +1755,10 @@ def _add_training_args(parser):
                        '"core_attn", "mlp", and "moe" uses normal checkpointing.')
     group.add_argument('--offload-moe-mlp-input', action='store_true',
                        help='Enable moe mlp input offload, must be used with combined 1f1b and with moe or moe_act recompute.')
+
+    group.add_argument('--first-k-dense-replace', type=int, default=0,
+                       help='num of dense layers before moe.')
+
     group.add_argument('--no-clone-scatter-output-in-embedding', action='store_false',
                        help='If not set, clone the output of the scatter in embedding layer to GC original tensor.',
                        dest='clone_scatter_output_in_embedding')
