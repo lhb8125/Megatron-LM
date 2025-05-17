@@ -134,7 +134,11 @@ OFFLOAD_TAG = "offloading_mlp_input"
 
 def offloading_checker(tensor):
     global OFFLOAD_TAG
-    return hasattr(tensor, OFFLOAD_TAG) and getattr(tensor, OFFLOAD_TAG)
+    return (
+        hasattr(tensor, OFFLOAD_TAG)
+        and getattr(tensor, OFFLOAD_TAG)
+        and not isinstance(tensor, torch.nn.Parameter)
+    )
 
 
 def set_offload_tag(tensor):
