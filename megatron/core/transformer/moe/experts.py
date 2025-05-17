@@ -269,7 +269,9 @@ class GroupedMLP(MegatronModule):
             )
 
             if self.activation_recompute:
-                with get_offload_context(self.config), offload_checker_ctx(self.config,lambda x : True):
+                with get_offload_context(self.config), offload_checker_ctx(
+                    self.config, lambda x: True
+                ):
                     fc1_output = gg.ops.gmm(
                         permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
                     )
@@ -279,7 +281,9 @@ class GroupedMLP(MegatronModule):
                 )
 
             if self.activation_recompute:
-                with get_offload_context(self.config), offload_checker_ctx(self.config, lambda x: True):
+                with get_offload_context(self.config), offload_checker_ctx(
+                    self.config, lambda x: True
+                ):
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                     )
