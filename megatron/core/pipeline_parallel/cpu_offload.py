@@ -176,9 +176,6 @@ class ChunkOffloadHandler:
         self._num_layers = num_layer
         # Data Structure to maintain reference to activation tensors
         self._tensor_tag_to_state = {}
-        self._tensor_tag_to_access_count = {}
-        # CheckpointWithoutOutputFunction may save for backward once, and get twice
-        self._access_count = 1
         # Tracking the number of layers offloaded
         self._offloaded_group_count = 0
         self._is_first_last_vpp_chunk = is_first_last_vpp_chunk
@@ -226,23 +223,14 @@ class ChunkOffloadHandler:
             tensor_tag = (-1, self.torch_tensor_count)
             self.torch_tensor_count += 1
             self._tensor_tag_to_state[tensor_tag] = tensor
-        self._tensor_tag_to_access_count[tensor_tag] = self._access_count
         return tensor_tag
 
     def tensor_pop(self, tensor_tag):
         assert (
             tensor_tag in self._tensor_tag_to_state
         ), f"{tensor_tag}, {self._tensor_tag_to_state.keys()}"
-        assert (
-            tensor_tag in self._tensor_tag_to_access_count
-        ), f"{tensor_tag}, {self._tensor_tag_to_access_count.keys()}"
-        self._tensor_tag_to_access_count[tensor_tag] = (
-            self._tensor_tag_to_access_count[tensor_tag] - 1
-        )
-        tensor = self._tensor_tag_to_state[tensor_tag]
-        if self._tensor_tag_to_access_count[tensor_tag] <= 0:
-            self._tensor_tag_to_state.pop(tensor_tag)
-            self._tensor_tag_to_access_count.pop(tensor_tag)
+
+        tensor = self._tensor_tag_to_state.pop(tensor_tag)
         assert not isinstance(tensor, tuple)
         return tensor
 
@@ -258,15 +246,6 @@ class ChunkOffloadHandler:
             yield
         finally:
             self.tensor_need_offloading_checker = origin_checker_func
-
-    @contextmanager
-    def access_count_ctx(self, count=1):
-        origin_count = self._access_count
-        try:
-            self._access_count = count
-            yield
-        finally:
-            self._access_count = origin_count
 
     def bulk_offload_group(self, group_to_offload):
         """Bulk offload group."""
@@ -434,14 +413,6 @@ def reset_chunk(config, layer_num):
 def reset_batch(config):
     if config.offload_moe_mlp_input and config.combined_1f1b:
         PipelineOffloadManager.get_instance().reset()
-
-
-def access_count_ctx(config, access_count):
-    if config.offload_moe_mlp_input and config.combined_1f1b:
-        return (
-            PipelineOffloadManager.get_instance().cur_forward_chunk().access_count_ctx(access_count)
-        )
-    return nullcontext()
 
 
 def offload_checker_ctx(config, offload_checker_func):
