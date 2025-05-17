@@ -405,7 +405,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         if (
             config.num_moe_experts is not None
             and config.num_moe_experts > 0
-            and self.layer_number >= config.first_k_dense_replace
+            and self.layer_number > config.first_k_dense_replace
             and self.layer_number % config.moe_layer_freq == 0
         ):
             return True
