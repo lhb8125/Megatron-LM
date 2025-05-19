@@ -359,7 +359,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             eps=self.config.layernorm_epsilon,
         )
         # [Module 8: MLP block]
-        self.mlp = self.build_mlp_module(submodules, self.config, model_comm_pgs)
+        self.mlp = self.build_mlp_module(submodules, model_comm_pgs)
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
 
@@ -376,7 +376,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                     self.recompute_pre_mlp_layernorm = True
             if "mlp" in self.config.recompute_modules:
-
+                from megatron.core.transformer.moe.moe_layer import MoELayer
                 if not isinstance(self.mlp, MoELayer):
                     self.recompute_mlp = True
 
