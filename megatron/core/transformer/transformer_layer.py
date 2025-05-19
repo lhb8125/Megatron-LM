@@ -446,7 +446,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 log_single_rank(
                     logger,
                     logging.WARNING,
-                    f"Unknown MLP type: {type(mlp_spec.mlp)}. Using default kwargs.",
+                    f"Unknown MLP type: {type(mlp_spec.module)}. Using default kwargs.",
                 )
         mlp = build_module(mlp_spec, config=config, **additional_mlp_kwargs)
         return mlp
