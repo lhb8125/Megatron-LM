@@ -832,6 +832,21 @@ def pretrain(
     one_logger = get_one_logger()
     one_logger and one_logger.log_metrics(app_metrics)
 
+    # Set ideal affinity for the current GPU
+    def set_ideal_affinity_for_current_gpu():
+        import cuda.cuda
+        import cuda.cudart
+        import pynvml
+        import uuid
+        err, device_id = cuda.cudart.cudaGetDevice()
+        assert err == cuda.cudart.cudaError_t.cudaSuccess
+        err, device_uuid = cuda.cuda.cuDeviceGetUuid(device_id)
+        assert err == cuda.cuda.CUresult.CUDA_SUCCESS
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + str(uuid.UUID(bytes=device_uuid.bytes)))
+        pynvml.nvmlDeviceSetCpuAffinity(handle)
+    set_ideal_affinity_for_current_gpu()
+
     if not args.skip_train:
         print_rank_0('training ...')
 
