@@ -147,9 +147,7 @@ class TELinear(te.pytorch.Linear):
         if self.config.delay_wgrad_compute:
             # TODO: Remove this once we have a stable release of TE
             if (
-                get_te_version() == PkgVersion("2.3.0.dev0+5f16c79")
-                or get_te_version() == PkgVersion("2.3.0.dev0+7164025")
-                or get_te_version() == PkgVersion("2.3.0.dev0+2a7087e")
+                is_te_min_version("2.3.0")
             ):
                 extra_kwargs["delay_wgrad_compute"] = self.config.delay_wgrad_compute
             else:
@@ -351,9 +349,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         if self.config.delay_wgrad_compute:
             # TODO: Remove this once we have a stable release of TE
             if (
-                get_te_version() == PkgVersion("2.3.0.dev0+5f16c79")
-                or get_te_version() == PkgVersion("2.3.0.dev0+7164025")
-                or get_te_version() == PkgVersion("2.3.0.dev0+2a7087e")
+                is_te_min_version("2.3.0")
             ):
                 extra_kwargs["delay_wgrad_compute"] = self.config.delay_wgrad_compute
             else:
@@ -945,9 +941,7 @@ if is_te_min_version("1.9.0.dev0"):
             if self.config.delay_wgrad_compute:
                 # TODO: Remove this once we have a stable release of TE
                 if (
-                    get_te_version() == PkgVersion("2.3.0.dev0+5f16c79")
-                    or get_te_version() == PkgVersion("2.3.0.dev0+7164025")
-                    or get_te_version() == PkgVersion("2.3.0.dev0+2a7087e")
+                    is_te_min_version("2.3.0")
                 ):
                     extra_kwargs["delay_wgrad_compute"] = self.config.delay_wgrad_compute
                 else:
