@@ -178,6 +178,9 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         print_rank("offload")
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
+        if not src_tensor.is_contiguous():
+            src_tensor = src_tensor.contiguous()
+
         cpu_backup = torch.empty(
             src_tensor.size(),
             dtype=torch.uint8 if fp8_offload else src_tensor.dtype,
@@ -188,9 +191,6 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
         if fp8_offload:
             cpu_backup = Float8Tensor.make_like(src_tensor, data=cpu_backup)
-
-        if not src_tensor.is_contiguous():
-            src_tensor = src_tensor.contiguous()
 
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)

@@ -20,7 +20,6 @@ from megatron.core.transformer.cpu_offload import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
-    mark_layer_start,
 )
 
 
@@ -337,8 +336,6 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         Performs same attnention forward logic as GPT Model.
         """
-        if layer.config.fine_grained_activation_offloading:
-            hidden_states = mark_layer_start(hidden_states)
         hidden_states, _ = layer._forward_attention(
             hidden_states=hidden_states,
             attention_mask=node.chunk_state.attention_mask,
