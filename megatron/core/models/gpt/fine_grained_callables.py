@@ -16,10 +16,10 @@ from megatron.core.transformer.multi_token_prediction import (
     get_mtp_layer_offset,
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
-from megatron.core.transformer.cpu_offload import (
-    PipelineOffloadManager,
+from megatron.core.pipeline_parallel.cpu_offload import (
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
+    get_fine_grained_offloading_context
 )
 
 
@@ -352,20 +352,17 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         Run forward pass for computations between attention and dispatch:
             pre mlp layernorm->router->dispatch preprocess
         """
-        offload_context = nullcontext()
         if layer.offload_mlp_norm:
             hidden_states = group_prefetch_offload_start(hidden_states, name="mlp_norm")
-            offload_context = PipelineOffloadManager.get_instance()
         if layer.recompute_pre_mlp_layernorm:
             layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with offload_context:
+            with get_fine_grained_offloading_context(layer.offload_mlp_norm):
                 pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
                     layer.pre_mlp_layernorm, hidden_states
                 )
         else:
-            with offload_context:
+            with get_fine_grained_offloading_context(layer.offload_mlp_norm):
                 pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
-        offload_context = nullcontext()
 
         local_tokens, probs, _ = layer.mlp.router_and_preprocess(pre_mlp_layernorm_output)
 

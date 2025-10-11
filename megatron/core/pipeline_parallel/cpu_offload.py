@@ -3,6 +3,7 @@ import torch
 from typing import Any
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
+from contextlib import nullcontext
 
 # CPU offload implementation for pipeline parallelism
 DEBUG = False
@@ -545,3 +546,7 @@ def group_prefetch_offload_start(tensor, name=None):
     """Mark the start of a layer group and prepare for offload/reload."""
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
     return GroupStartFunction.apply(tensor, cur_forward_chunk, name)
+
+def get_fine_grained_offloading_context(flag):
+    """Get the fine-grained offload context"""
+    return PipelineOffloadManager.get_instance() if flag else nullcontext()

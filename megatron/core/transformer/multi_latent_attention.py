@@ -37,12 +37,11 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.core.utils import deprecate_inference_params, is_te_min_version
-from megatron.core.transformer.cpu_offload import (
-    PipelineOffloadManager,
+from megatron.core.pipeline_parallel.cpu_offload import (
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
+    get_fine_grained_offloading_context
 )
-import contextlib
 
 try:
     from megatron.core.fusions.fused_mla_yarn_rope_apply import (
@@ -270,13 +269,11 @@ class MultiLatentAttention(Attention):
                 query, key, value, attention_mask, packed_seq_params=packed_seq_params
             )
         else:
-            offload_context = contextlib.nullcontext()
             if self.offload_core_attention and self.training:
                 query = group_prefetch_offload_start(query, name="core_attn")
-                offload_context = PipelineOffloadManager.get_instance()
 
             if inference_context is None or inference_context.is_static_batching():
-                with offload_context:
+                with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
                     query,
                     key,
@@ -307,7 +304,6 @@ class MultiLatentAttention(Attention):
                     core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
             if self.offload_core_attention and self.training:
                 core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
-                offload_context = contextlib.nullcontext()
 
         # We are doing absorption with cache mla latents and decode mode.
         if self.cache_mla_latents and inference_context.is_decode_only():
@@ -333,15 +329,12 @@ class MultiLatentAttention(Attention):
         # =================
         # Output. [sq, b, h]
         # =================
-        offload_context = contextlib.nullcontext()
         if self.offload_attn_proj:
             core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
+        with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj:
             output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
-            offload_context = contextlib.nullcontext()
 
         return output, bias
 

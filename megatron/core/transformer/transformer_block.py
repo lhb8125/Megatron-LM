@@ -33,7 +33,7 @@ from megatron.core.utils import (
     get_pg_rank,
     make_viewless_tensor,
 )
-from megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 
 try:
     import transformer_engine.pytorch as te  # pylint: disable=unused-import
@@ -325,11 +325,6 @@ class TransformerBlock(MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
-        self.num_dense_layer = 0
-        from megatron.core.transformer.moe.moe_layer import MoELayer
-        for layer in self.layers:
-            if not isinstance(layer.mlp, MoELayer):
-                self.num_dense_layer += 1
 
     def _build_layers(self):
         # Transformer layers.

@@ -30,7 +30,7 @@ from megatron.core.utils import (
     make_viewless_tensor,
 )
 
-from megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 
 if is_torch_min_version("1.13.0"):
     dist_all_gather_func = torch.distributed.all_gather_into_tensor

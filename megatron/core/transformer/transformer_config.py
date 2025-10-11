@@ -717,8 +717,6 @@ class TransformerConfig(ModelParallelConfig):
     "expert_fc1": offload the input of the expert fc1 part.
     "moe_act": offload the input of the moe act part.
     """
-    last_vp_stage_is_loss: bool = False
-    """If True, the last virtual pipeline stage is the loss stage."""
     min_offloaded_tensor_size: int = 1024*1024
     """The minimum size of the tensor to be offloaded."""
 
@@ -1221,12 +1219,6 @@ class TransformerConfig(ModelParallelConfig):
                         f"{self.virtual_pipeline_model_parallel_size}"
                     )
 
-        if len(self.offload_modules) > 0:
-            if self.pipeline_model_parallel_layout is not None:
-                from megatron.core.transformer.pipeline_parallel_layer_layout import LayerType
-                if (len(self.pipeline_model_parallel_layout.layout[-1][-1]) == 1 and 
-                    self.pipeline_model_parallel_layout.layout[-1][-1][0] is LayerType.loss):
-                    self.last_vp_stage_is_loss = True
 
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True

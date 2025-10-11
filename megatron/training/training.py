@@ -91,7 +91,7 @@ from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.parallel_state import destroy_global_memory_buffer, destroy_model_parallel
-from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.num_microbatches_calculator import (
     destroy_num_microbatches_calculator,
     get_current_global_batch_size,

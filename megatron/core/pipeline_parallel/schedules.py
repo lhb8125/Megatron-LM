@@ -19,7 +19,7 @@ from megatron.core.pipeline_parallel.utils import (
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
-from megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 from megatron.core.utils import (
     drain_embedding_wgrad_compute,
     get_attr_wrapped_model,

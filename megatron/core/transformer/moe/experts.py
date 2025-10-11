@@ -10,7 +10,6 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
-import contextlib
 
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.activations import squared_relu
@@ -42,10 +41,10 @@ from megatron.core.transformer.utils import (
     make_sharded_object_for_checkpoint,
     sharded_state_dict_default,
 )
-from megatron.core.transformer.cpu_offload import (
-    PipelineOffloadManager,
+from megatron.core.pipeline_parallel.cpu_offload import (
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
+    get_fine_grained_offloading_context
 )
 
 try:
@@ -879,17 +878,14 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        offload_context = contextlib.nullcontext()
         if self.offload_expert_fc1:
             permuted_local_hidden_states = group_prefetch_offload_start(permuted_local_hidden_states, name="expert_fc1")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
+        with get_fine_grained_offloading_context(self.offload_expert_fc1):
             fc1_output, bias_parallel = self.linear_fc1(
                 permuted_local_hidden_states, tokens_per_expert
         )
         if self.offload_expert_fc1:
             fc1_output, bias_parallel = group_prefetch_offload_commit(fc1_output, bias_parallel, name="expert_fc1", release_tensors=[])
-            offload_context = contextlib.nullcontext()
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.use_te_activation_func:
@@ -962,16 +958,15 @@ class TEGroupedMLP(MegatronModule):
 
         if self.offload_moe_act:
             fc1_output = group_prefetch_offload_start(fc1_output, name="moe_act")
-            offload_context = PipelineOffloadManager.get_instance()
 
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with offload_context:
+            with get_fine_grained_offloading_context(self.offload_moe_act):
                 bias_act_output = self.activation_checkpoint.checkpoint(
                     bias_act_func, fc1_output, bias_parallel, permuted_probs
                 )
         else:
-            with offload_context:
+            with get_fine_grained_offloading_context(self.offload_moe_act):
                 bias_act_output = bias_act_func(
                     fc1_output, bias_parallel, permuted_probs
                 )
@@ -981,7 +976,6 @@ class TEGroupedMLP(MegatronModule):
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         if self.offload_moe_act:
             output, = group_prefetch_offload_commit(output, name="moe_act", release_tensors=[])
-            offload_context = contextlib.nullcontext()
 
 
         # upad and concat the output

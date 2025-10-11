@@ -33,7 +33,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
-from megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 
 
 class GPTModel(LanguageModule):
@@ -342,21 +342,6 @@ class GPTModel(LanguageModule):
 
         return decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset
 
-    def initialize_model_chunk_offload_handler(self):
-        num_layers = self.decoder.num_layers_per_pipeline_rank
-        if self.mtp_process:
-            num_layers = num_layers + self.config.mtp_num_layers
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        pp_size = parallel_state.get_pipeline_model_parallel_world_size()
-        last_stage_is_loss = (pp_rank == pp_size - 1) and self.config.last_vp_stage_is_loss
-        # TODO: will be an issue when dense layer is placed  across different pipeline stages
-        PipelineOffloadManager.get_instance().reset_chunk_handler(
-            num_layers,
-            self.vp_stage,
-            self.config.min_offloaded_tensor_size,
-            self.decoder.num_dense_layer,
-            last_stage_is_loss,
-        )
 
     def forward(
         self,
@@ -384,7 +369,10 @@ class GPTModel(LanguageModule):
                 `parallel_output` arg in the constructor will be used.
         """
         if self.config.fine_grained_activation_offloading:
-            self.initialize_model_chunk_offload_handler()
+            PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
+                self.vp_stage,
+                self.config.min_offloaded_tensor_size,
+            )
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
@@ -647,7 +635,10 @@ class GPTModel(LanguageModule):
         """
 
         if self.config.fine_grained_activation_offloading:
-            self.initialize_model_chunk_offload_handler()
+            PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
+                self.vp_stage,
+                self.config.min_offloaded_tensor_size,
+            )
         from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
 
         return TransformerModelChunkSchedulePlan(
