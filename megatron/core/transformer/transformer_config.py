@@ -1018,10 +1018,7 @@ class TransformerConfig(ModelParallelConfig):
             if "moe" not in self.recompute_modules:
                 self.recompute_modules.append("moe")
 
-        # if self.offload_modules is None:
-        #     self.offload_modules = ["core_attn"]
-
-        if len(self.offload_modules) > 0:
+        if self.offload_modules is not None and len(self.offload_modules) > 0:
             allowed_modules = {
                 "core_attn",
                 "attn_proj",
