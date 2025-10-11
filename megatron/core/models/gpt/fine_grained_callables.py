@@ -446,7 +446,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_output_with_bias, residual, layer.hidden_dropout
             )
         if layer.offload_mlp_norm:
-            hidden_states, = group_prefetch_offload_commit(hidden_states, release_tensors=[residual])
+            hidden_states, = group_prefetch_offload_commit(hidden_states, name="mlp_norm", release_tensors=[residual])
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )

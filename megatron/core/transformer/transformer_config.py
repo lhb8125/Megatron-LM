@@ -719,6 +719,8 @@ class TransformerConfig(ModelParallelConfig):
     """
     last_vp_stage_is_loss: bool = False
     """If True, the last virtual pipeline stage is the loss stage."""
+    min_offloaded_tensor_size: int = 1024*1024
+    """The minimum size of the tensor to be offloaded."""
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.

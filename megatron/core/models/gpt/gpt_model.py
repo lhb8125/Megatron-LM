@@ -353,7 +353,7 @@ class GPTModel(LanguageModule):
         PipelineOffloadManager.get_instance().reset_chunk_handler(
             num_layers,
             self.vp_stage,
-            self.config.fine_grained_activation_offloading,
+            self.config.min_offloaded_tensor_size,
             self.decoder.num_dense_layer,
             last_stage_is_loss,
         )

@@ -7,7 +7,6 @@ from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffload
 # cpu offload for pipeline
 DEBUG = False
 DEBUG_RANK = 0
-MIN_OFFLOADED_TENSOR_SIZE = 1024 * 1024
 
 def print_rank(message):
     assert torch.distributed.is_initialized()
@@ -100,7 +99,7 @@ class PipelineOffloadManager:
     def size(self):
         return len(self._queue)
 
-    def reset_chunk_handler(self, num_layer, vp_stage, offload=True, num_dense_layer=0, last_stage_is_loss=False):
+    def reset_chunk_handler(self, num_layer, vp_stage, min_offloaded_tensor_size=1024*1024, num_dense_layer=0, last_stage_is_loss=False):
         if vp_stage is None:
             cur_vpp_rank = 0
         else:
@@ -124,9 +123,9 @@ class PipelineOffloadManager:
         first_last_vpp_rank = first_last_vpp_rank and (cur_vpp_rank == self._vpp - 1)
         # If the model chunk contains only the dense layers, initialize a null chunk handler.
         if num_layer <= num_dense_layer:
-            cur_chunk = NullChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
+            cur_chunk = NullChunkOffloadHandler(num_layer, first_last_vpp_rank, min_offloaded_tensor_size)
         else:
-            cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
+            cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, min_offloaded_tensor_size)
         # save for latter push
         self._stages[cur_vpp_rank].append(cur_chunk)
         if cur_vpp_rank == self._vpp - 1:
@@ -205,7 +204,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
             non_blocking = cpu_backup.is_pinned()
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
-    def __init__(self, num_layer, is_first_last_vpp_chunk, offload=True):
+    def __init__(self, num_layer, is_first_last_vpp_chunk, min_offloaded_tensor_size):
         self._num_layers = num_layer
         # Data Structure to maintain reference to activation tensors
         self._tensor_tag_to_state = {}
@@ -226,7 +225,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.h2d_stream = PipelineOffloadManager.get_instance().h2d_stream
         self._offload_events = {}
         self._reload_events = {}
-        self.do_offload = offload
+        self.min_offloaded_tensor_size = min_offloaded_tensor_size
         self.is_last_layer = False
 
 
@@ -268,7 +267,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
     def tensor_need_offloading_checker(self, tensor):
         """Check if the tensor needs to be offloaded."""
-        if tensor.numel() < MIN_OFFLOADED_TENSOR_SIZE:
+        if tensor.numel() < self.min_offloaded_tensor_size:
             return False
         if hasattr(tensor, "offloading_activation") and not tensor.offloading_activation:
             return False
@@ -278,8 +277,6 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         """offload a group of tensors recorded in tensor_push().
         """
         print_rank("bulk_offload_group")
-        if not self.do_offload:
-            return
         assert not self.is_first_last_layer()
         group_id_to_offload, name = group_to_offload
         torch.cuda.nvtx.range_push(name)
@@ -319,8 +316,6 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
     def bulk_reload_group(self, group_to_reload):
         """Bulk reload group."""
         print_rank("bulk_reload_group")
-        if not self.do_offload:
-            return
         found_reload_group = False
         group_id_to_reload, name = group_to_reload
         torch.cuda.nvtx.range_push(name)
@@ -346,8 +341,6 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
     def pre_reload_last_layer(self):
         """Pre-reload the last layer of the next model chunk."""
         print_rank("pre_reload_last_layer")
-        if not self.do_offload:
-            return
         assert not self._is_first_last_vpp_chunk
         print_rank(f"len(self._groups_to_reload) {len(self._groups_to_reload)}")
         if len(self._groups_to_reload) > 0:
@@ -356,8 +349,6 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
     def should_bulk_offload(self):
         """Check if the chunk should be offloaded."""
-        if not self.do_offload:
-            return False
         # first backward chunk
         if self.is_first_last_layer():
             return False

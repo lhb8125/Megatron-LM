@@ -2193,6 +2193,8 @@ def _add_training_args(parser):
                        help='Offload the activation to the CPU.')
     group.add_argument('--offload-modules', nargs='*', type=str, default=[],
                        help='The submodules to offload. Choices: "attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act".')
+    group.add_argument('--min-offloaded-tensor-size', type=int, default=1024*1024,
+                       help='The minimum size of the tensor to be offloaded.')
     return parser
 
 
