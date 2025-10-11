@@ -279,7 +279,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         print_rank("bulk_offload_group")
         assert not self.is_first_last_layer()
         group_id_to_offload, name = group_to_offload
-        torch.cuda.nvtx.range_push(name)
+        torch.cuda.nvtx.range_push("activation offloading " + name)
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self._tensor_tag_to_state.items():
                 group_id, _ = tensor_tag
@@ -318,7 +318,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         print_rank("bulk_reload_group")
         found_reload_group = False
         group_id_to_reload, name = group_to_reload
-        torch.cuda.nvtx.range_push(name)
+        torch.cuda.nvtx.range_push("activation reloading " + name)
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self._tensor_tag_to_state.items():
@@ -485,7 +485,7 @@ class GroupStartFunction(torch.autograd.Function):
         print_rank("GroupStartFunction forward")
 
         if not isinstance(cpu_offload_handler, NullChunkOffloadHandler):
-            cpu_offload_handler.on_group_start_forward("activation offloading " + name)
+            cpu_offload_handler.on_group_start_forward(name)
         # return the identical tensor
         return tensor
 

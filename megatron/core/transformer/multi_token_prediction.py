@@ -30,6 +30,8 @@ from megatron.core.utils import (
     make_viewless_tensor,
 )
 
+from megatron.core.transformer.cpu_offload import PipelineOffloadManager
+
 if is_torch_min_version("1.13.0"):
     dist_all_gather_func = torch.distributed.all_gather_into_tensor
 else:
@@ -898,6 +900,11 @@ class MultiTokenPredictionBlock(MegatronModule):
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
         hidden_states = hidden_states_list[offset]
         for layer_number in range(len(self.layers)):
+            if self.config.fine_grained_activation_offloading:
+                if layer_number == len(self.layers) - 1:
+                    PipelineOffloadManager.get_instance().set_last_layer(True)
+                else:
+                    PipelineOffloadManager.get_instance().set_last_layer(False)
             (hidden_states, input_ids, position_ids) = self.layers[layer_number](
                 input_ids=input_ids,
                 position_ids=position_ids,
