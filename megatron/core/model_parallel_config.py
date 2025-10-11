@@ -5,7 +5,6 @@ from typing import Callable, ContextManager, Optional
 
 import torch
 
-import warnings
 
 @dataclass
 class ModelParallelConfig:
@@ -315,7 +314,7 @@ class ModelParallelConfig:
        rank 0 | 0 1 2 0 1 2 3 4 3 4 
        rank 1 |   0 1 2 0 1 2 3 4 3 4
     """
-    
+
     ###################
     # CPU Offloading
     ###################

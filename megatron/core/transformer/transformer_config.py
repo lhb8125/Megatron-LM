@@ -1036,14 +1036,6 @@ class TransformerConfig(ModelParallelConfig):
                     "because the input of attn_proj is the output of core_attn, "
                     "which is needed in core_attn.backward()."
                 )
-            
-            if isinstance(self.moe_layer_freq, int):
-                assert self.moe_layer_freq == 1, "moe_layer_freq cannot be an integer other than 1 when offload_modules is set."
-            elif isinstance(self.moe_layer_freq, list):
-                if 0 in self.moe_layer_freq:
-                    warnings.warn(
-                        "Activation of dense layer won't be offloaded at all for mixed dense and moe layer."
-                    )
 
 
         if (
@@ -1226,7 +1218,6 @@ class TransformerConfig(ModelParallelConfig):
                         f"virtual_pipeline_model_parallel_size"
                         f"{self.virtual_pipeline_model_parallel_size}"
                     )
-
 
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
