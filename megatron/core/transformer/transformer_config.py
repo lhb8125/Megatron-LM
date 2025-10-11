@@ -181,6 +181,11 @@ class TransformerConfig(ModelParallelConfig):
     """If not None, then will use sliding window attention. The size of the window is specified by
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
+    window_attn_skip_freq: Optional[Union[int, List[int]]] = None
+    """Frequency of full attention layers among sliding window attention layers. Accepts either:
+    - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
+    - A list that defines a custom pattern, e.g.: [1,1,1,1,0,0,0,0], where 1 represents SWA. """
+
     normalization: str = "LayerNorm"
     """Which norm to use for normalization layers, valid options are `LayerNorm` and `RMSNorm`."""
 
@@ -283,6 +288,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_fused_weighted_squared_relu: bool = False
     """If True, uses fused weighted squared relu kernel when using MoE."""
+
+    fused_single_qkv_rope: bool = False
+    """If set, avoid splitting QKV before ROPE forward and avoid concatenating ROPE dgrads."""
 
     ####################
     # activation recomputation
@@ -1322,8 +1330,10 @@ class TransformerConfig(ModelParallelConfig):
                 multiplier=2.0 if not self.is_hybrid_model else 1.0,
             )
 
-        if self.num_moe_experts is not None:
-            assert not self.add_bias_linear, "Bias is not supported for MoE"
+        if self.num_moe_experts is not None and self.add_bias_linear:
+            assert (
+                self.expert_tensor_parallel_size == 1
+            ), "Bias in Moe is only supported when ETP==1"
 
         if self.moe_router_enable_expert_bias and self.moe_router_score_function != "sigmoid":
             raise ValueError(
@@ -1567,9 +1577,6 @@ class MLATransformerConfig(TransformerConfig):
     rotary_scaling_factor: float = 40
     """Rotary scaling factor for the rotary embeddings, used by yarn."""
 
-    max_position_embeddings: int = 4096
-    """This arg is not used, will be deprecated."""
-
     original_max_position_embeddings: int = 4096
     """Original maximum position embeddings for the original model, used by yarn."""
 
@@ -1594,20 +1601,6 @@ class MLATransformerConfig(TransformerConfig):
         super().__post_init__()
         if self.multi_latent_attention and self.apply_rope_fusion and self.rope_type != "yarn":
             raise ValueError("apply_rope_fusion for MLA only works with YARN RoPE.")
-
-        # TODO(boxiangw): Deprecate this check
-        if self.max_position_embeddings != 4096:
-            if self.original_max_position_embeddings == 4096:
-                # only override the original_max_position_embeddings if it is not set
-                self.original_max_position_embeddings = self.max_position_embeddings
-            self.max_position_embeddings = 4096
-            warnings.warn(
-                "MLA config max_position_embeddings is overridden by customer input, "
-                "please use the original_max_position_embeddings instead for YaRN!"
-                "max_position_embeddings will be deprecated in the future."
-                "Assigned original_max_position_embeddings to max_position_embeddings if not set,"
-                "and assigned max_position_embeddings back to the original value."
-            )
 
         if self.cache_mla_latents:
             assert (

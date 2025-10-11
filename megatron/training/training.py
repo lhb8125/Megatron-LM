@@ -3,7 +3,7 @@
 """Pretrain utilities."""
 
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timedelta
 import functools
 import gc
 import inspect
@@ -75,6 +75,7 @@ except ImportError:
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
 from megatron.core.optimizer import get_megatron_optimizer, OptimizerConfig
+from megatron.core.optimizer.muon import get_megatron_muon_optimizer
 from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     destroy_rerun_state_machine,
@@ -90,7 +91,12 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-from megatron.core.parallel_state import destroy_global_memory_buffer, destroy_model_parallel
+from megatron.core.parallel_state import (
+    destroy_global_memory_buffer,
+    destroy_model_parallel,
+    update_pg_timeout
+)
+
 from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.num_microbatches_calculator import (
     destroy_num_microbatches_calculator,
@@ -925,8 +931,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         config = get_model_config(model[0])
         model = [Float16Module(config, model_module) for model_module in model]
 
-    # Materialize tensors on meta device (GPU allocation) if not using FSDP2.
-    if args.init_model_with_meta_device and not args.use_torch_fsdp2:
+    # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
+    if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
         #for model_module in model:
         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
 
@@ -1090,17 +1096,30 @@ def setup_model_and_optimizer(
             kwargs[f.name] = getattr(args, f.name)
     config = OptimizerConfig(**kwargs)
     config.timers = timers
-    optimizer = get_megatron_optimizer(
-        config,
-        model,
-        no_wd_decay_cond,
-        scale_lr_cond,
-        lr_mult,
-        use_gloo_process_groups=args.enable_gloo_process_groups,
-        # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
-        #  to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
-        default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
-    )
+
+    if 'muon' not in config.optimizer:
+        optimizer = get_megatron_optimizer(
+            config,
+            model,
+            no_wd_decay_cond,
+            scale_lr_cond,
+            lr_mult,
+            use_gloo_process_groups=args.enable_gloo_process_groups,
+            # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+            #  to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+            default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+        )
+    else:
+        optimizer = get_megatron_muon_optimizer(
+            config,
+            model,
+            no_wd_decay_cond,
+            scale_lr_cond,
+            lr_mult,
+            use_gloo_process_groups=args.enable_gloo_process_groups,
+            layer_wise_distributed_optimizer='dist' in config.optimizer,
+        )
+
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
     one_logger and one_logger.log_metrics({"app_build_optimzer_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -2164,7 +2183,7 @@ def train(
         torch.distributed.barrier()
         print_rank_0(f">>> Weight hashes match after {iteration} iterations...")
 
-    # Capture CUDA Graphs.
+    # Initialize CUDA Graphs helper.
     if args.external_cuda_graph:
         cuda_graph_helper = TECudaGraphHelper(
             model=model,
@@ -2173,7 +2192,6 @@ def train(
             micro_batch_size=args.micro_batch_size,
             optimizers=[optimizer],
         )
-        cuda_graph_helper.create_cudagraphs()
 
     # Run training iterations till done.
     buffered_rollouts = None
@@ -2197,7 +2215,16 @@ def train(
         ft_integration.on_checkpointing_start()
         maybe_finalize_async_save(blocking=False)
         ft_integration.on_checkpointing_end(is_async_finalization=True)
-
+        # Update the timeout for all process groups after initialization
+        # We update the timeout after the first successful iteration,
+        # which takes longer than others usually
+        if args.distributed_timeout_seconds_after_init is not None and iteration == start_iteration+1:
+            # TODO: some dynamic timeout setting is required
+            # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
+            # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
+            # this timeout is triggered when there's no collective communication
+            # for the duration of timeout
+            update_pg_timeout(timedelta(seconds=args.distributed_timeout_seconds_after_init))
         # Update number of microbatches first without consistency check to decide if a
         # checkpoint should be saved. If the number of microbatches is different
         # from the previous iteration, save a checkpoint. Then run consistency check
@@ -2221,10 +2248,21 @@ def train(
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
 
+        # Capture CUDA Graphs.
+        if args.external_cuda_graph and iteration == args.cuda_graph_warmup_steps:
+            if iteration > start_iteration and should_disable_forward_pre_hook(args):
+                disable_forward_pre_hook(model, param_sync=False)
+            cuda_graph_helper.create_cudagraphs()
+            if iteration > start_iteration and should_disable_forward_pre_hook(args):
+                enable_forward_pre_hook(model)
+                cuda_graph_helper.cuda_graph_set_manual_hooks()
+
         # Completely skip iteration if needed.
         if iteration in args.iterations_to_skip:
             # Dummy train_step to fast forward train_data_iterator.
             dummy_train_step(train_data_iterator)
+            if iteration == start_iteration:
+                start_iteration = iteration + 1
             iteration += 1
             batch_size = (
                 mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
@@ -2289,8 +2327,8 @@ def train(
                     enable_forward_pre_hook(model)
                     config.param_sync_func = param_sync_func
                     pre_hook_enabled = True
-                    # Set the manual hooks when CUDA Graphs are used.
-                    if args.external_cuda_graph:
+                    # Set the manual hooks here since it's not set right after the capturing.
+                    if args.external_cuda_graph and iteration == args.cuda_graph_warmup_steps:
                         cuda_graph_helper.cuda_graph_set_manual_hooks()
 
         iteration += 1
