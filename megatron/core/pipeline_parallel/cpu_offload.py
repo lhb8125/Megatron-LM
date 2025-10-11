@@ -221,6 +221,7 @@ class ChunkOffloadHandler:
         """Offload."""
         debug_rank("offload")
         from megatron.core.extensions.transformer_engine import Float8Tensor
+
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
         if not src_tensor.is_contiguous():

@@ -2132,6 +2132,7 @@ def set_save_original_input(module):
             "quantized tensors by default. It needs transformer-engine>=2.6.0dev0."
         )
 
+
 try:
     from transformer_engine.pytorch.float8_tensor import Float8Tensor
 except ImportError:

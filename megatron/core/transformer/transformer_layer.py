@@ -493,12 +493,12 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
-        if self.config.fine_grained_activation_offloading:
-            from megatron.core.pipeline_parallel.cpu_offload import (
-                get_fine_grained_offloading_context,
-                group_prefetch_offload_commit,
-                group_prefetch_offload_start,
-            )
+        from megatron.core.pipeline_parallel.cpu_offload import (
+            get_fine_grained_offloading_context,
+            group_prefetch_offload_commit,
+            group_prefetch_offload_start,
+        )
+
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # Residual connection.
@@ -602,12 +602,12 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
 
-        if self.config.fine_grained_activation_offloading:
-            from megatron.core.pipeline_parallel.cpu_offload import (
-                get_fine_grained_offloading_context,
-                group_prefetch_offload_commit,
-                group_prefetch_offload_start,
-            )
+        from megatron.core.pipeline_parallel.cpu_offload import (
+            get_fine_grained_offloading_context,
+            group_prefetch_offload_commit,
+            group_prefetch_offload_start,
+        )
+
         # Residual connection.
         residual = hidden_states
 
