@@ -14,6 +14,11 @@ from megatron.core import parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import apply_prefix_mapping
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.pipeline_parallel.cpu_offload import (
+    get_fine_grained_offloading_context,
+    group_prefetch_offload_commit,
+    group_prefetch_offload_start,
+)
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
@@ -29,11 +34,6 @@ from megatron.core.utils import (
     make_viewless_tensor,
     nvtx_range_pop,
     nvtx_range_push,
-)
-from megatron.core.pipeline_parallel.cpu_offload import (
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
-    get_fine_grained_offloading_context
 )
 
 logger = logging.getLogger(__name__)
@@ -520,22 +520,28 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # Self attention.
         nvtx_range_push(suffix="self_attention")
         if self.offload_self_attn:
-            input_layernorm_output = group_prefetch_offload_start(input_layernorm_output, name="self_attn")
+            input_layernorm_output = group_prefetch_offload_start(
+                input_layernorm_output, name="self_attn"
+            )
         with get_fine_grained_offloading_context(self.offload_self_attn):
             attention_output_with_bias = self.self_attention(
-            input_layernorm_output,
-            attention_mask=attention_mask,
-            inference_context=inference_context,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            rotary_pos_cos_sin=rotary_pos_cos_sin,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            sequence_len_offset=sequence_len_offset,
-        )
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                inference_context=inference_context,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                rotary_pos_cos_sin=rotary_pos_cos_sin,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                sequence_len_offset=sequence_len_offset,
+            )
         if self.offload_self_attn:
-            attention_output_with_bias, = group_prefetch_offload_commit(attention_output_with_bias, name="self_attn", release_tensors=[input_layernorm_output])
+            (attention_output_with_bias,) = group_prefetch_offload_commit(
+                attention_output_with_bias,
+                name="self_attn",
+                release_tensors=[input_layernorm_output],
+            )
         nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:
@@ -555,7 +561,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         nvtx_range_pop(suffix="self_attn_bda")
 
         if self.offload_attn_norm:
-            hidden_states, = group_prefetch_offload_commit(hidden_states, name="attn_norm", release_tensors=[residual])
+            (hidden_states,) = group_prefetch_offload_commit(
+                hidden_states, name="attn_norm", release_tensors=[residual]
+            )
 
         # Residual connection.
         residual = hidden_states
@@ -669,7 +677,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
         nvtx_range_pop(suffix="mlp_bda")
         if self.offload_mlp_norm:
-            hidden_states, = group_prefetch_offload_commit(hidden_states, name="mlp_norm", release_tensors=[residual])
+            (hidden_states,) = group_prefetch_offload_commit(
+                hidden_states, name="mlp_norm", release_tensors=[residual]
+            )
 
         # Jit compiled function creates 'view' tensor. This tensor
         # potentially gets saved in the MPU checkpoint function context,

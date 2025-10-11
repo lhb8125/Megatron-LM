@@ -575,6 +575,7 @@ class CheckpointWithoutOutput(object):
                 fp8_ctx = contextlib.nullcontext()
 
             inputs = self.ctx.saved_tensors
+
             # do not know why, if saved_tensors is handled by saved_tensor_hook, grad of inputs will be None (not nan)
             # detach it to bypass
             def detach(t):

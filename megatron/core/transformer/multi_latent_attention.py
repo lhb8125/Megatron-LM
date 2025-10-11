@@ -22,6 +22,11 @@ from megatron.core.models.common.embeddings import (
     _yarn_get_mscale,
     apply_rotary_pos_emb,
 )
+from megatron.core.pipeline_parallel.cpu_offload import (
+    get_fine_grained_offloading_context,
+    group_prefetch_offload_commit,
+    group_prefetch_offload_start,
+)
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.tensor_parallel.mappings import (
@@ -37,11 +42,6 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.core.utils import deprecate_inference_params, is_te_min_version
-from megatron.core.pipeline_parallel.cpu_offload import (
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
-    get_fine_grained_offloading_context
-)
 
 try:
     from megatron.core.fusions.fused_mla_yarn_rope_apply import (
@@ -277,13 +277,13 @@ class MultiLatentAttention(Attention):
             if inference_context is None or inference_context.is_static_batching():
                 with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
-                    query,
-                    key,
-                    value,
-                    attention_mask,
-                    packed_seq_params=packed_seq_params,
-                    attn_mask_type=attn_mask_type,
-                )
+                        query,
+                        key,
+                        value,
+                        attention_mask,
+                        packed_seq_params=packed_seq_params,
+                        attn_mask_type=attn_mask_type,
+                    )
             elif self.cache_mla_latents:
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
@@ -305,7 +305,9 @@ class MultiLatentAttention(Attention):
                 if not inference_context.is_decode_only():
                     core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
             if self.offload_core_attention and self.training:
-                core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
+                (core_attn_out,) = group_prefetch_offload_commit(
+                    core_attn_out, name="core_attn", release_tensors=[query, key, value]
+                )
 
         # We are doing absorption with cache mla latents and decode mode.
         if self.cache_mla_latents and inference_context.is_decode_only():
@@ -336,7 +338,9 @@ class MultiLatentAttention(Attention):
         with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj:
-            output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
+            output, bias = group_prefetch_offload_commit(
+                output, bias, name="attn_proj", release_tensors=[core_attn_out]
+            )
 
         return output, bias
 

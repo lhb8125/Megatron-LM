@@ -18,6 +18,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.quantization.utils import get_quant_config_or_none
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
@@ -34,7 +35,6 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
-from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
 
 
 class GPTModel(LanguageModule):
@@ -408,7 +408,6 @@ class GPTModel(LanguageModule):
 
         return preproc_output
 
-
     def forward(
         self,
         input_ids: Tensor,
@@ -436,8 +435,7 @@ class GPTModel(LanguageModule):
         """
         if self.config.fine_grained_activation_offloading:
             PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
-                self.vp_stage,
-                self.config.min_offloaded_tensor_size,
+                self.vp_stage, self.config.min_offloaded_tensor_size
             )
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -707,8 +705,7 @@ class GPTModel(LanguageModule):
 
         if self.config.fine_grained_activation_offloading:
             PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
-                self.vp_stage,
-                self.config.min_offloaded_tensor_size,
+                self.vp_stage, self.config.min_offloaded_tensor_size
             )
         from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
 

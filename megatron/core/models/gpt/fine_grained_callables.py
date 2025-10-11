@@ -8,6 +8,11 @@ from typing import Optional
 import torch
 
 from megatron.core import tensor_parallel
+from megatron.core.pipeline_parallel.cpu_offload import (
+    get_fine_grained_offloading_context,
+    group_prefetch_offload_commit,
+    group_prefetch_offload_start,
+)
 from megatron.core.pipeline_parallel.utils import ScheduleNode, make_viewless
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -16,11 +21,6 @@ from megatron.core.transformer.multi_token_prediction import (
     get_mtp_layer_offset,
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
-from megatron.core.pipeline_parallel.cpu_offload import (
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
-    get_fine_grained_offloading_context
-)
 
 
 def weak_method(method):
@@ -443,7 +443,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_output_with_bias, residual, layer.hidden_dropout
             )
         if layer.offload_mlp_norm:
-            hidden_states, = group_prefetch_offload_commit(hidden_states, name="mlp_norm", release_tensors=[residual])
+            (hidden_states,) = group_prefetch_offload_commit(
+                hidden_states, name="mlp_norm", release_tensors=[residual]
+            )
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )

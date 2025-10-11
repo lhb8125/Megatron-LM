@@ -725,7 +725,7 @@ class TransformerConfig(ModelParallelConfig):
     "expert_fc1": offload the input of the expert fc1 part.
     "moe_act": offload the input of the moe act part.
     """
-    min_offloaded_tensor_size: int = 1024*1024
+    min_offloaded_tensor_size: int = 1024 * 1024
     """The minimum size of the tensor to be offloaded."""
 
     def __post_init__(self):
@@ -1023,7 +1023,12 @@ class TransformerConfig(ModelParallelConfig):
 
         if len(self.offload_modules) > 0:
             allowed_modules = {
-                "core_attn", "attn_proj", "expert_fc1", "moe_act", "attn_norm", "mlp_norm"
+                "core_attn",
+                "attn_proj",
+                "expert_fc1",
+                "moe_act",
+                "attn_norm",
+                "mlp_norm",
             }
             invalid_modules = set(self.offload_modules) - allowed_modules
             assert not invalid_modules, (
@@ -1036,7 +1041,6 @@ class TransformerConfig(ModelParallelConfig):
                     "because the input of attn_proj is the output of core_attn, "
                     "which is needed in core_attn.backward()."
                 )
-
 
         if (
             self.num_layers_in_first_pipeline_stage is not None

@@ -22,6 +22,11 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from megatron.core.pipeline_parallel.cpu_offload import (
+    get_fine_grained_offloading_context,
+    group_prefetch_offload_commit,
+    group_prefetch_offload_start,
+)
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import MegatronModule
@@ -41,11 +46,6 @@ from ..models.common.embeddings.yarn_rotary_pos_embedding import (
 )
 from .enums import AttnMaskType
 from .transformer_config import TransformerConfig
-from megatron.core.pipeline_parallel.cpu_offload import (
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
-    get_fine_grained_offloading_context
-)
 
 try:
     from einops import rearrange
@@ -752,7 +752,9 @@ class Attention(MegatronModule, ABC):
                 hidden_states, key_value_states, split_qkv=split_qkv
             )
         if self.offload_qkv_linear:
-            qkv_output, _ = group_prefetch_offload_commit(qkv_output, name="qkv_linear", release_tensors=[hidden_states])
+            qkv_output, _ = group_prefetch_offload_commit(
+                qkv_output, name="qkv_linear", release_tensors=[hidden_states]
+            )
 
         attn_mask_type = self.attn_mask_type
         block_table = None
@@ -933,7 +935,9 @@ class Attention(MegatronModule, ABC):
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
         if self.offload_core_attention and self.training:
-            core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
+            (core_attn_out,) = group_prefetch_offload_commit(
+                core_attn_out, name="core_attn", release_tensors=[query, key, value]
+            )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
@@ -953,7 +957,9 @@ class Attention(MegatronModule, ABC):
         with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj:
-            output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
+            output, bias = group_prefetch_offload_commit(
+                output, bias, name="attn_proj", release_tensors=[core_attn_out]
+            )
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias

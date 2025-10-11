@@ -1,13 +1,15 @@
-from collections import deque, defaultdict
-import torch
-from typing import Any
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
+from collections import deque
 from contextlib import nullcontext
+from typing import Any
+
+import torch
+from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
 # CPU offload implementation for pipeline parallelism
 DEBUG = False
 DEBUG_RANK = 0
+
 
 def debug_rank(message):
     """Print debug message for a specific rank when DEBUG is enabled."""
@@ -15,12 +17,15 @@ def debug_rank(message):
     if DEBUG and torch.distributed.get_rank() == DEBUG_RANK:
         print(message, flush=True)
 
+
 def set_ideal_affinity_for_current_gpu():
     """Set CPU affinity for the current GPU to optimize host-device transfers."""
+    import uuid
+
     import cuda.cuda
     import cuda.cudart
     import pynvml
-    import uuid
+
     # Get current CUDA device ID
     err, device_id = cuda.cudart.cudaGetDevice()
     assert err == cuda.cudart.cudaError_t.cudaSuccess
@@ -32,13 +37,16 @@ def set_ideal_affinity_for_current_gpu():
     handle = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + str(uuid.UUID(bytes=device_uuid.bytes)))
     pynvml.nvmlDeviceSetCpuAffinity(handle)
 
+
 class PipelineOffloadManager:
     """
     Singleton manager for coordinating activation offloading across pipeline stages.
-    Manages chunk handlers, synchronizes GPU-CPU transfers, and handles virtual pipeline parallelism.
+    Manages chunk handlers, synchronizes GPU-CPU transfers,
+    and handles virtual pipeline parallelism.
     """
+
     OFFLOAD_MGR = None
-    
+
     @classmethod
     def get_instance(cls):
         """Get the singleton instance of PipelineOffloadManager."""
@@ -49,6 +57,7 @@ class PipelineOffloadManager:
     def __init__(self):
         """Initialize the manager with queues and dedicated CUDA streams."""
         from megatron.core import parallel_state
+
         # Queue to store chunk handlers for backward pass
         self._queue = deque()
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is None:
@@ -124,10 +133,10 @@ class PipelineOffloadManager:
         """Return the number of chunk handlers in the queue."""
         return len(self._queue)
 
-    def init_model_chunk_offload_handler(self, vp_stage, min_offloaded_tensor_size=1024*1024):
+    def init_model_chunk_offload_handler(self, vp_stage, min_offloaded_tensor_size=1024 * 1024):
         """
         Initialize a chunk offload handler for a model chunk (microbatch).
-        
+
         Args:
             vp_stage: Virtual pipeline stage index (None means stage 0)
             min_offloaded_tensor_size: Minimum tensor size (in elements) to offload
@@ -205,7 +214,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
     Handles activation offloading and reloading for a single pipeline chunk (microbatch).
     Manages tensor groups, coordinates asynchronous GPU-CPU transfers, and handles synchronization.
     """
-    
+
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
@@ -273,6 +282,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         return self._is_first_last_vpp_chunk and self.is_last_layer
 
     def tensor_push(self, tensor):
+        """Push tensor to the offload handler."""
         debug_rank("tensor_push")
         torch_stray_tensor = isinstance(
             tensor,
@@ -297,6 +307,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         return tensor_tag
 
     def tensor_pop(self, tensor_tag):
+        """Pop tensor from the offload handler."""
         debug_rank(f"tensor_pop {tensor_tag}")
         assert tensor_tag in self._tensor_tag_to_state, f"Tag {tensor_tag} not found"
         tensor = self._tensor_tag_to_state.pop(tensor_tag)
@@ -316,8 +327,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         return True
 
     def bulk_offload_group(self, group_to_offload):
-        """offload a group of tensors recorded in tensor_push().
-        """
+        """offload a group of tensors recorded in tensor_push()."""
         debug_rank("bulk_offload_group")
         assert not self.is_first_last_layer(), "Should not offload first-last layer"
         group_id_to_offload, name = group_to_offload
@@ -343,7 +353,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
     def get_offload_event(self, name):
         """Get the CUDA event for a named offload operation."""
         return self._offload_events.get(name, None)
-    
+
     def get_reload_event(self, name):
         """Get the CUDA event for a named reload operation."""
         return self._reload_events.get(name, None)
@@ -474,6 +484,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.h2d_stream.wait_stream(torch.cuda.current_stream())
         self.bulk_reload()
 
+
 class GroupCommitFunction(torch.autograd.Function):
     """
     Identity operation that marks the end of a layer group for offload synchronization.
@@ -546,6 +557,7 @@ def group_prefetch_offload_start(tensor, name=None):
     """Mark the start of a layer group and prepare for offload/reload."""
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
     return GroupStartFunction.apply(tensor, cur_forward_chunk, name)
+
 
 def get_fine_grained_offloading_context(flag):
     """Get the fine-grained offload context"""
