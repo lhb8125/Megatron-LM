@@ -7,13 +7,6 @@ from typing import Any
 
 import torch
 
-try:
-    from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
-    from transformer_engine.pytorch.float8_tensor import Float8Tensor
-except ImportError:
-    AsyncDoubleBufferGroupOffloadHandler = None
-    Float8Tensor = None
-
 # CPU offload implementation for pipeline parallelism
 DEBUG = False
 DEBUG_RANK = 0
@@ -217,7 +210,7 @@ class PipelineOffloadManager:
         return self.cur_backward_chunk().tensor_pop(saved_state)
 
 
-class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
+class ChunkOffloadHandler:
     """
     Handles activation offloading and reloading for a single pipeline chunk (microbatch).
     Manages tensor groups, coordinates asynchronous GPU-CPU transfers, and handles synchronization.
@@ -227,6 +220,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
     def offload(src_tensor, pin_memory=True):
         """Offload."""
         debug_rank("offload")
+        from megatron.core.extensions.transformer_engine import Float8Tensor
         fp8_offload = isinstance(src_tensor, Float8Tensor)
 
         if not src_tensor.is_contiguous():
