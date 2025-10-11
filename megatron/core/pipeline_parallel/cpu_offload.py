@@ -1,10 +1,18 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+
+import logging
 from collections import deque
 from contextlib import nullcontext
 from typing import Any
 
 import torch
-from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+
+try:
+    from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffloadHandler
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+except ImportError:
+    AsyncDoubleBufferGroupOffloadHandler = None
+    Float8Tensor = None
 
 # CPU offload implementation for pipeline parallelism
 DEBUG = False
@@ -15,7 +23,7 @@ def debug_rank(message):
     """Print debug message for a specific rank when DEBUG is enabled."""
     assert torch.distributed.is_initialized()
     if DEBUG and torch.distributed.get_rank() == DEBUG_RANK:
-        print(message, flush=True)
+        logging.info(message)
 
 
 def set_ideal_affinity_for_current_gpu():

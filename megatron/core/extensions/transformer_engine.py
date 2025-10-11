@@ -306,7 +306,8 @@ class TELinear(te.pytorch.Linear):
         )
         # else:
         #     raise ValueError(
-        #         f"Transformer Engine v{te_version} does not support fine_grained_activation_offloading."
+        #         f"Transformer Engine v{te_version} does not support "
+        #         "fine_grained_activation_offloading."
         #     )
         if (
             self.config.tp_comm_overlap
@@ -527,7 +528,8 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         )
         # else:
         #     raise ValueError(
-        #         f"Transformer Engine v{te_version} does not support fine_grained_activation_offloading."
+        #         f"Transformer Engine v{te_version} does not support "
+        #         "fine_grained_activation_offloading."
         #     )
 
         # Only Transformer-Engine version >= 0.11.0 supports `RMSNorm`
@@ -1140,7 +1142,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             )
             # else:
             #     raise ValueError(
-            #         f"Transformer Engine v{te_version} does not support fine_grained_activation_offloading."
+            #         f"Transformer Engine v{te_version} does not support "
+            #         "fine_grained_activation_offloading."
             #     )
 
             extra_kwargs["ub_name"] = tp_comm_buffer_name
