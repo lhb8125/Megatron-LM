@@ -205,6 +205,33 @@ Enable A2A overlap across different batches inspired by the DSv3 DualPipe implme
 --delay-wgrad-compute
 ```
 
+### Fine-grained Activation Offloading
+Offload the input activation at the granularity of modules
+**Features**
+* Support PP=1/PP/Interleaved PP
+* Compatible with fine-grained recomputation
+* Support FP8
+* Support MTP
+* Support mixed dense & moe layer
+* Support A2A Overlap
+* Support CUDA Graph
+  * (Temporary) cuda graph scope cannot contains the offloading modules
+
+**Usage**
+```bash
+# Enable fine-grained activation offloading
+--fine-grained-activation-offloading
+
+# Specify which modules are going to offload its input
+# Choices: "attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act".
+--offload-modules expert_fc1
+```
+
+#### Compatiable with Fine-grained Recomputation
+- For modules with minor perf overhead like layernorm or moe_act, use recomputing to reduce memory footprint;
+- For other modules, use offloading to reduce memory footprint;
+- Make sure the offloading/reloading could be overlapped with computing;
+
 ### MoE Related Arguments
 | Item | Description |
 | --- | --- |

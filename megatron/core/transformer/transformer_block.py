@@ -695,10 +695,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         inner_quantization_context = nullcontext()
 
                     if self.config.fine_grained_activation_offloading:
-                        if l_no == self.num_layers_per_pipeline_rank - 1:
-                            fine_grained_offloading_set_last_layer(True)
-                        else:
-                            fine_grained_offloading_set_last_layer(False)
+                        fine_grained_offloading_set_last_layer(l_no == self.num_layers_per_pipeline_rank - 1)
 
                     with self.offload_context, inner_quantization_context:
                         hidden_states, context = layer(

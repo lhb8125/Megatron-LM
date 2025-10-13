@@ -903,10 +903,7 @@ class MultiTokenPredictionBlock(MegatronModule):
         hidden_states = hidden_states_list[offset]
         for layer_number in range(len(self.layers)):
             if self.config.fine_grained_activation_offloading:
-                if layer_number == len(self.layers) - 1:
-                    fine_grained_offloading_set_last_layer(True)
-                else:
-                    fine_grained_offloading_set_last_layer(False)
+                fine_grained_offloading_set_last_layer(layer_number == len(self.layers) - 1)
             (hidden_states, input_ids, position_ids) = self.layers[layer_number](
                 input_ids=input_ids,
                 position_ids=position_ids,

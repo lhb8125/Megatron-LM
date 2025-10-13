@@ -712,10 +712,10 @@ class TransformerConfig(ModelParallelConfig):
     # Fine-grained Activation Offloading
     #####################################
     fine_grained_activation_offloading: bool = False
-    """If True, offload the activation to the CPU."""
+    """If True, offload the input of the specified modules to the CPU."""
 
     offload_modules: Optional[list[str]] = None
-    """The submodules to offload.
+    """The submodules to offload its input.
     choices: "attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act".
     "attn_norm": offload the input of the normalization in the attention part.
     "core_attn": offload the input of the core attention part.
