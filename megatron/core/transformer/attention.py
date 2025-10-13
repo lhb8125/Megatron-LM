@@ -454,7 +454,9 @@ class Attention(MegatronModule, ABC):
         return query, key, value, rotary_pos_emb, attn_mask_type, block_table
 
     @abstractmethod
-    def get_query_key_value_tensors(self, hidden_states, key_value_states, output_gate, split_qkv=True):
+    def get_query_key_value_tensors(
+        self, hidden_states, key_value_states, output_gate, split_qkv=True
+    ):
         """
         This method needs to be implemented based on whether the derived class
         is "self-attn" or "cross-attn".
@@ -1125,10 +1127,7 @@ class SelfAttention(Attention):
             )
 
     def get_query_key_value_tensors(
-        self, hidden_states,
-        key_value_states=None,
-        output_gate=False,
-        split_qkv=True
+        self, hidden_states, key_value_states=None, output_gate=False, split_qkv=True
     ):
         """
         Derives `query`, `key`, `value` tensors from `hidden_states`.
@@ -1268,7 +1267,9 @@ class CrossAttention(Attention):
             is_expert=False,
         )
 
-    def get_query_key_value_tensors(self, hidden_states, key_value_states, output_gate=False, split_qkv=True):
+    def get_query_key_value_tensors(
+        self, hidden_states, key_value_states, output_gate=False, split_qkv=True
+    ):
         """
         Derives `query` tensor from `hidden_states`, and `key`/`value` tensors
         from `key_value_states`.

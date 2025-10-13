@@ -1,4 +1,5 @@
 import gc
+
 import pytest
 import torch
 from utils import is_te_min_version
@@ -20,7 +21,9 @@ class ToyModel(torch.nn.Module):
         super().__init__()
         layers = []
         for _ in range(num_layers):
-            layers.append(torch.nn.Linear(hidden_size, hidden_size, bias=True, dtype=dtype, device="cuda"))
+            layers.append(
+                torch.nn.Linear(hidden_size, hidden_size, bias=True, dtype=dtype, device="cuda")
+            )
         self.net = torch.nn.Sequential(*layers).to(device="cuda", dtype=dtype)
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -40,17 +43,25 @@ class ToyModel(torch.nn.Module):
         if use_offload:
             # Initialize a new chunk (microbatch) and enable offload context.
             with off.get_fine_grained_offloading_context(True):
-                off.fine_grained_offloading_init_chunk_handler(vp_stage=None, min_offloaded_tensor_size=1)
+                off.fine_grained_offloading_init_chunk_handler(
+                    vp_stage=None, min_offloaded_tensor_size=1
+                )
                 for i, layer in enumerate(self.net):
                     # Group by module; with this linear-only model, each group corresponds to a layer.
                     off.fine_grained_offloading_set_last_layer(i == len(self.net) - 1)
                     x = off.fine_grained_offloading_group_start(x, name=f"layer_{i}")
                     x = layer(x)
                     # Commit the group; returns a tuple of tensors
-                    (x,) = off.fine_grained_offloading_group_commit(x, name=f"layer_{i}", release_tensors=[])
+                    (x,) = off.fine_grained_offloading_group_commit(
+                        x, name=f"layer_{i}", release_tensors=[]
+                    )
                 return x
         # Baseline path (no offload hooks)
-        with torch.autocast(device_type="cuda", dtype=self.dtype) if self.dtype in (torch.float16, torch.bfloat16) else torch.cuda.amp.autocast(enabled=False):
+        with (
+            torch.autocast(device_type="cuda", dtype=self.dtype)
+            if self.dtype in (torch.float16, torch.bfloat16)
+            else torch.cuda.amp.autocast(enabled=False)
+        ):
             for layer in self.net:
                 x = layer(x)
             return x
@@ -76,7 +87,9 @@ def test_cpu_offload_memory_reduction():
     model = ToyModel(hidden_size=2048, num_layers=8, dtype=torch.bfloat16).eval()
 
     # Create input
-    inp = torch.randn((2048, model.hidden_size), device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    inp = torch.randn(
+        (2048, model.hidden_size), device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
 
     # Warmup to stabilize allocator behavior
     _reset_cuda_memory()
@@ -88,42 +101,45 @@ def test_cpu_offload_memory_reduction():
     # Baseline memory measurement (no offload)
     _reset_cuda_memory()
     inp_baseline = inp.detach().clone().requires_grad_(True)
-    baseline_mem_before = torch.cuda.memory_allocated() / (1024 ** 2)
+    baseline_mem_before = torch.cuda.memory_allocated() / (1024**2)
     out_base = model(inp_baseline, use_offload=False)
-    baseline_mem_after = (torch.cuda.memory_allocated() - out_base.nbytes) / (1024 ** 2)
+    baseline_mem_after = (torch.cuda.memory_allocated() - out_base.nbytes) / (1024**2)
     (out_base.sum()).backward()
     torch.cuda.synchronize()
     baseline_delta = baseline_mem_after - baseline_mem_before
 
     # Offload memory measurement
     from megatron.core.pipeline_parallel import cpu_offload as off
+
     off.fine_grained_offloading_reset()
     _reset_cuda_memory()
     inp_off = inp.detach().clone().requires_grad_(True)
-    offload_mem_before = torch.cuda.memory_allocated() / (1024 ** 2)
+    offload_mem_before = torch.cuda.memory_allocated() / (1024**2)
     out_off = model(inp_off, use_offload=True)
-    offload_mem_after = (torch.cuda.memory_allocated() - out_off.nbytes) / (1024 ** 2)
+    offload_mem_after = (torch.cuda.memory_allocated() - out_off.nbytes) / (1024**2)
     (out_off.sum()).backward()
     torch.cuda.synchronize()
     offload_delta = offload_mem_after - offload_mem_before
 
     # Offload should reduce peak cached memory usage after forward
-    assert offload_delta < baseline_delta, f"offload did not reduce memory: off={offload_delta:.2f}MiB base={baseline_delta:.2f}MiB"
+    assert (
+        offload_delta < baseline_delta
+    ), f"offload did not reduce memory: off={offload_delta:.2f}MiB base={baseline_delta:.2f}MiB"
 
     # Theoretical savings: storing per-layer input x (same shape each layer).
     bytes_per_elem = inp.element_size()  # 2 for bfloat16
     input_bytes = inp.numel() * bytes_per_elem
     # -2 because the first and last activations are not offloaded
-    expected_saved_mib = (model.num_layers - 2) * (input_bytes / (1024 ** 2))
+    expected_saved_mib = (model.num_layers - 2) * (input_bytes / (1024**2))
 
     # Actual savings ≈ baseline_delta - offload_delta (both exclude output tensor memory).
     actual_saved_mib = baseline_delta - offload_delta
 
     # Allow slack for allocator jitter and extra intermediates; magnitudes should match.
     rel_err = abs(actual_saved_mib - expected_saved_mib) / max(expected_saved_mib, 1e-6)
-    assert rel_err <= EPSILON, (
-        f"saved mismatch: actual={actual_saved_mib:.2f}MiB expected~={expected_saved_mib:.2f}MiB (rel_err={rel_err:.2f})"
-    )
+    assert (
+        rel_err <= EPSILON
+    ), f"saved mismatch: actual={actual_saved_mib:.2f}MiB expected~={expected_saved_mib:.2f}MiB (rel_err={rel_err:.2f})"
 
 
 @pytest.mark.skipif(not is_te_min_version("2.9.0"), reason="Requires TE >= 2.9.0")
@@ -146,15 +162,20 @@ def test_cpu_offload_output_and_grad_consistency():
     out_base = model_base(inp, use_offload=False)
     loss_base = torch.nn.functional.mse_loss(out_base, target)
     loss_base.backward()
-    grads_base = [p.grad.detach().clone() if p.grad is not None else None for p in model_base.parameters()]
+    grads_base = [
+        p.grad.detach().clone() if p.grad is not None else None for p in model_base.parameters()
+    ]
 
     # Offload forward/backward
     from megatron.core.pipeline_parallel import cpu_offload as off
+
     off.fine_grained_offloading_reset()
     out_off = model_off(inp.detach().clone().requires_grad_(True), use_offload=True)
     loss_off = torch.nn.functional.mse_loss(out_off, target)
     loss_off.backward()
-    grads_off = [p.grad.detach().clone() if p.grad is not None else None for p in model_off.parameters()]
+    grads_off = [
+        p.grad.detach().clone() if p.grad is not None else None for p in model_off.parameters()
+    ]
 
     # Compare outputs
     assert torch.allclose(out_off.float(), out_base.float(), rtol=1e-3, atol=1e-3)
@@ -165,5 +186,3 @@ def test_cpu_offload_output_and_grad_consistency():
             continue
         assert gb is not None and go is not None
         assert torch.allclose(go.float(), gb.float(), rtol=1e-3, atol=1e-3)
-
-
