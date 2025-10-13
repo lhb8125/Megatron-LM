@@ -397,10 +397,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             if "mlp" in self.config.recompute_modules:
                 if not isinstance(self.mlp, MoELayer):
                     self.recompute_mlp = True
-        self.offload_self_attn = (
-            self.config.fine_grained_activation_offloading
-            and "self_attn" in self.config.offload_modules
-        )
         self.offload_attn_norm = (
             self.config.fine_grained_activation_offloading
             and "attn_norm" in self.config.offload_modules
@@ -519,29 +515,18 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
-        if self.offload_self_attn:
-            input_layernorm_output = group_prefetch_offload_start(
-                input_layernorm_output, name="self_attn"
-            )
-        with get_fine_grained_offloading_context(self.offload_self_attn):
-            attention_output_with_bias = self.self_attention(
-                input_layernorm_output,
-                attention_mask=attention_mask,
-                inference_context=inference_context,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                rotary_pos_cos_sin=rotary_pos_cos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-            )
-        if self.offload_self_attn:
-            (attention_output_with_bias,) = group_prefetch_offload_commit(
-                attention_output_with_bias,
-                name="self_attn",
-                release_tensors=[input_layernorm_output],
-            )
+        attention_output_with_bias = self.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_context=inference_context,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            rotary_pos_cos_sin=rotary_pos_cos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+        )
         nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:

@@ -717,7 +717,6 @@ class TransformerConfig(ModelParallelConfig):
     offload_modules: Optional[list[str]] = None
     """The submodules to offload.
     choices: "attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act".
-    default: ["core_attn"].
     "attn_norm": offload the input of the normalization in the attention part.
     "core_attn": offload the input of the core attention part.
     "mlp_norm": offload the input of the normalization in the mlp part.

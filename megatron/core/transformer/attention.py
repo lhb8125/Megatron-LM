@@ -934,10 +934,10 @@ class Attention(MegatronModule, ABC):
                     block_table,
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
-        if self.offload_core_attention and self.training:
-            (core_attn_out,) = group_prefetch_offload_commit(
-                core_attn_out, name="core_attn", release_tensors=[query, key, value]
-            )
+            if self.offload_core_attention and self.training:
+                (core_attn_out,) = group_prefetch_offload_commit(
+                    core_attn_out, name="core_attn", release_tensors=[query, key, value]
+                )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
