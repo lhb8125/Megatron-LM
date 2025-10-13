@@ -1187,6 +1187,12 @@ def validate_args(args, defaults={}):
                 "when enabling delay_wgrad_compute"
             )
 
+    if args.fine_grained_activation_offloading:
+        assert args.transformer_impl == 'transformer_engine', \
+            "Fine-grained activation offloading is only supported with transformer_engine implementation"
+        assert is_te_min_version("2.8.0"), \
+            "Fine-grained activation offloading is only supported with TE >= 2.8.0"
+
     if args.mtp_num_layers:
         assert not args.use_legacy_models, "The legacy Megatron models does not support Multi-Token Prediction (MTP)."
         assert args.position_embedding_type == "rope" or args.position_embedding_type == "none", (
