@@ -1,6 +1,7 @@
 import gc
 import pytest
 import torch
+from utils import is_te_min_version
 
 EPSILON = 0.1
 
@@ -68,6 +69,7 @@ def _monkeypatch_offload_deps(monkeypatch):
     off.fine_grained_offloading_reset()
 
 
+@pytest.mark.skipif(not is_te_min_version("2.9.0"), reason="Requires TE >= 2.9.0")
 def test_cpu_offload_memory_reduction():
     torch.manual_seed(1234)
     # Use a linear-only stack so theoretical saved memory equals sum of per-layer input x bytes.
@@ -124,6 +126,7 @@ def test_cpu_offload_memory_reduction():
     )
 
 
+@pytest.mark.skipif(not is_te_min_version("2.9.0"), reason="Requires TE >= 2.9.0")
 def test_cpu_offload_output_and_grad_consistency():
     torch.manual_seed(2025)
     hidden = 1024
