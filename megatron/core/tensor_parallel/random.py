@@ -575,17 +575,6 @@ class CheckpointWithoutOutput(object):
                 fp8_ctx = contextlib.nullcontext()
 
             inputs = self.ctx.saved_tensors
-
-            # do not know why, if saved_tensors is handled by saved_tensor_hook,
-            # grad of inputs will be None (not nan), detach it to bypass
-            def detach(t):
-                if isinstance(t, torch.Tensor):
-                    requires_grad = t.requires_grad
-                    t = t.detach()
-                    t.requires_grad_(requires_grad)
-                return t
-
-            inputs = tuple(detach(t) for t in inputs)
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 outputs = self.run_function(*inputs)
 
