@@ -9,7 +9,7 @@ from torch.autograd.variable import Variable
 
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
-from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import fine_grained_offloading_reset
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.utils import (
     is_pp_first_stage,
@@ -560,7 +560,7 @@ def forward_backward_no_pipelining(
     ), "adjust_tensor_shapes_fn is not supported for non-pipeline-parallel schedule"
 
     if not forward_only:
-        PipelineOffloadManager.get_instance().reset()
+        fine_grained_offloading_reset()
 
     config = get_model_config(model)
     if config.timers is not None:
@@ -903,7 +903,7 @@ def forward_backward_pipelining_with_interleaving(
     ), "adjust_tensor_shapes_fn is not supported for interleaved pipeline parallelism"
 
     if not forward_only:
-        PipelineOffloadManager.get_instance().reset()
+        fine_grained_offloading_reset()
 
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
@@ -2051,7 +2051,7 @@ def forward_backward_pipelining_without_interleaving(
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
     if not forward_only:
-        PipelineOffloadManager.get_instance().reset()
+        fine_grained_offloading_reset()
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func

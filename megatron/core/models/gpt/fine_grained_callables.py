@@ -10,8 +10,8 @@ import torch
 from megatron.core import tensor_parallel
 from megatron.core.pipeline_parallel.cpu_offload import (
     get_fine_grained_offloading_context,
-    group_prefetch_offload_commit,
-    group_prefetch_offload_start,
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
 )
 from megatron.core.pipeline_parallel.utils import ScheduleNode, make_viewless
 from megatron.core.transformer.module import float16_to_fp32
@@ -353,7 +353,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             pre mlp layernorm->router->dispatch preprocess
         """
         if layer.offload_mlp_norm:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="mlp_norm")
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="mlp_norm")
         if layer.recompute_pre_mlp_layernorm:
             layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with get_fine_grained_offloading_context(layer.offload_mlp_norm):
@@ -443,7 +443,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_output_with_bias, residual, layer.hidden_dropout
             )
         if layer.offload_mlp_norm:
-            (hidden_states,) = group_prefetch_offload_commit(
+            (hidden_states,) = fine_grained_offloading_group_commit(
                 hidden_states, name="mlp_norm", release_tensors=[residual]
             )
         output = make_viewless_tensor(

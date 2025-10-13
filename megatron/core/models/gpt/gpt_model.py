@@ -18,7 +18,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import fine_grained_offloading_init_chunk_handler
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.quantization.utils import get_quant_config_or_none
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
@@ -434,7 +434,7 @@ class GPTModel(LanguageModule):
                 `parallel_output` arg in the constructor will be used.
         """
         if self.config.fine_grained_activation_offloading:
-            PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
+            fine_grained_offloading_init_chunk_handler(
                 self.vp_stage, self.config.min_offloaded_tensor_size
             )
 
@@ -704,7 +704,7 @@ class GPTModel(LanguageModule):
         """
 
         if self.config.fine_grained_activation_offloading:
-            PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
+            fine_grained_offloading_init_chunk_handler(
                 self.vp_stage, self.config.min_offloaded_tensor_size
             )
         from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan

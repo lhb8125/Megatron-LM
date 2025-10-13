@@ -28,8 +28,8 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.jit import jit_fuser
 from megatron.core.pipeline_parallel.cpu_offload import (
     get_fine_grained_offloading_context,
-    group_prefetch_offload_commit,
-    group_prefetch_offload_start,
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
 )
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -900,7 +900,7 @@ class TEGroupedMLP(MegatronModule):
             permuted_probs = torch.ones_like(permuted_probs)
 
         if self.offload_expert_fc1:
-            permuted_local_hidden_states = group_prefetch_offload_start(
+            permuted_local_hidden_states = fine_grained_offloading_group_start(
                 permuted_local_hidden_states, name="expert_fc1"
             )
         with get_fine_grained_offloading_context(self.offload_expert_fc1):
@@ -908,7 +908,7 @@ class TEGroupedMLP(MegatronModule):
                 permuted_local_hidden_states, tokens_per_expert
             )
         if self.offload_expert_fc1:
-            fc1_output, bias_parallel = group_prefetch_offload_commit(
+            fc1_output, bias_parallel = fine_grained_offloading_group_commit(
                 fc1_output, bias_parallel, name="expert_fc1", release_tensors=[]
             )
 
@@ -971,7 +971,7 @@ class TEGroupedMLP(MegatronModule):
             return intermediate_parallel
 
         if self.offload_moe_act:
-            fc1_output = group_prefetch_offload_start(fc1_output, name="moe_act")
+            fc1_output = fine_grained_offloading_group_start(fc1_output, name="moe_act")
 
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
@@ -987,7 +987,7 @@ class TEGroupedMLP(MegatronModule):
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         if self.offload_moe_act:
-            (output,) = group_prefetch_offload_commit(output, name="moe_act", release_tensors=[])
+            (output,) = fine_grained_offloading_group_commit(output, name="moe_act", release_tensors=[])
 
         # upad and concat the output
         if self.config.fp8:

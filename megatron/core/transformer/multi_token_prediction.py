@@ -13,7 +13,7 @@ from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.models.backends import BackendSpecProvider, LocalSpecProvider
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import fine_grained_offloading_set_last_layer
 from megatron.core.pipeline_parallel.utils import is_vp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import (
@@ -904,9 +904,9 @@ class MultiTokenPredictionBlock(MegatronModule):
         for layer_number in range(len(self.layers)):
             if self.config.fine_grained_activation_offloading:
                 if layer_number == len(self.layers) - 1:
-                    PipelineOffloadManager.get_instance().set_last_layer(True)
+                    fine_grained_offloading_set_last_layer(True)
                 else:
-                    PipelineOffloadManager.get_instance().set_last_layer(False)
+                    fine_grained_offloading_set_last_layer(False)
             (hidden_states, input_ids, position_ids) = self.layers[layer_number](
                 input_ids=input_ids,
                 position_ids=position_ids,

@@ -488,7 +488,7 @@ class ChunkOffloadHandler:
         self.bulk_reload()
 
 
-class GroupCommitFunction(torch.autograd.Function):
+class FineGrainedOffloadingGroupCommitFunction(torch.autograd.Function):
     """
     Identity operation that marks the end of a layer group for offload synchronization.
     Triggers offload during forward and synchronizes reload during backward.
@@ -497,7 +497,7 @@ class GroupCommitFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
         # pylint: disable=missing-function-docstring
-        debug_rank("GroupCommitFunction forward")
+        debug_rank("FineGrainedOffloadingGroupCommitFunction forward")
 
         release_tensors = args[-1]
         name = args[-2]
@@ -513,14 +513,14 @@ class GroupCommitFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, *grad_output):
         # pylint: disable=missing-function-docstring
-        debug_rank("GroupCommitFunction backward")
+        debug_rank("FineGrainedOffloadingGroupCommitFunction backward")
 
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_commit_backward(ctx.name)
         return grad_output + (None, None, None)
 
 
-def group_prefetch_offload_commit(*tensor, name, release_tensors=[]):
+def fine_grained_offloading_group_commit(*tensor, name, release_tensors=[]):
     """
     Specify the tensors to be released after offloading.
     release_tensors is a list of tensors to be released after offloading.
@@ -528,10 +528,10 @@ def group_prefetch_offload_commit(*tensor, name, release_tensors=[]):
     Note: specify the tensors only when they are not automatically released by torch gc.
     """
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupCommitFunction.apply(*tensor, cur_forward_chunk, name, release_tensors)
+    return FineGrainedOffloadingGroupCommitFunction.apply(*tensor, cur_forward_chunk, name, release_tensors)
 
 
-class GroupStartFunction(torch.autograd.Function):
+class FineGrainedOffloadingGroupStartFunction(torch.autograd.Function):
     """
     Identity operation that marks the start of a layer group for offload/reload.
     Prepares for offload during forward and triggers reload during backward.
@@ -541,7 +541,7 @@ class GroupStartFunction(torch.autograd.Function):
     def forward(ctx, tensor, cpu_offload_handler, name):
         # pylint: disable=missing-function-docstring
         ctx.cpu_offload_handler = cpu_offload_handler
-        debug_rank("GroupStartFunction forward")
+        debug_rank("FineGrainedOffloadingGroupStartFunction forward")
 
         cpu_offload_handler.on_group_start_forward(name)
         # return the identical tensor
@@ -550,18 +550,30 @@ class GroupStartFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         # pylint: disable=missing-function-docstring
-        debug_rank("GroupStartFunction backward")
+        debug_rank("FineGrainedOffloadingGroupStartFunction backward")
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_start_backward()
         return grad_output, None, None
 
 
-def group_prefetch_offload_start(tensor, name=None):
+def fine_grained_offloading_group_start(tensor, name=None):
     """Mark the start of a layer group and prepare for offload/reload."""
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupStartFunction.apply(tensor, cur_forward_chunk, name)
-
+    return FineGrainedOffloadingGroupStartFunction.apply(tensor, cur_forward_chunk, name)
 
 def get_fine_grained_offloading_context(flag):
     """Get the fine-grained offload context"""
     return PipelineOffloadManager.get_instance() if flag else nullcontext()
+
+def fine_grained_offloading_set_last_layer(is_last_layer):
+    """Set the last layer flag."""
+    PipelineOffloadManager.get_instance().set_last_layer(is_last_layer)
+
+def fine_grained_offloading_init_chunk_handler(vp_stage, min_offloaded_tensor_size):
+    """Initialize the chunk handler, called at the start of a microbatch forward pass."""
+    PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(vp_stage,
+        min_offloaded_tensor_size)
+
+def fine_grained_offloading_reset():
+    """Reset the chunk handler, called at the start of a training iteration."""
+    PipelineOffloadManager.get_instance().reset()

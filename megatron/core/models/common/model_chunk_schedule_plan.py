@@ -8,7 +8,7 @@ from torch import Tensor
 
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
-from megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from megatron.core.pipeline_parallel.cpu_offload import fine_grained_offloading_set_last_layer
 from megatron.core.pipeline_parallel.utils import (
     AbstractSchedulePlan,
     NoopScheduleNode,
@@ -449,9 +449,9 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
             if f_layer.layer.config.fine_grained_activation_offloading:
                 if i == f_num_layers - 1:
-                    PipelineOffloadManager.get_instance().set_last_layer(True)
+                    fine_grained_offloading_set_last_layer(True)
                 else:
-                    PipelineOffloadManager.get_instance().set_last_layer(False)
+                    fine_grained_offloading_set_last_layer(False)
             f_input, b_grad = TransformerLayerSchedulePlan.run(
                 f_layer,
                 b_layer,
@@ -476,9 +476,9 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             torch.cuda.nvtx.range_push(f"layer_{i}f")
             if f_layer.layer.config.fine_grained_activation_offloading:
                 if i == f_num_layers - 1:
-                    PipelineOffloadManager.get_instance().set_last_layer(True)
+                    fine_grained_offloading_set_last_layer(True)
                 else:
-                    PipelineOffloadManager.get_instance().set_last_layer(False)
+                    fine_grained_offloading_set_last_layer(False)
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()
 

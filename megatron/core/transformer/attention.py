@@ -24,8 +24,8 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.pipeline_parallel.cpu_offload import (
     get_fine_grained_offloading_context,
-    group_prefetch_offload_commit,
-    group_prefetch_offload_start,
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
@@ -746,13 +746,13 @@ class Attention(MegatronModule, ABC):
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
         if self.offload_qkv_linear:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="qkv_linear")
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
         with get_fine_grained_offloading_context(self.offload_qkv_linear):
             qkv_output = self.get_query_key_value_tensors(
                 hidden_states, key_value_states, split_qkv=split_qkv
             )
         if self.offload_qkv_linear:
-            qkv_output, _ = group_prefetch_offload_commit(
+            qkv_output, _ = fine_grained_offloading_group_commit(
                 qkv_output, name="qkv_linear", release_tensors=[hidden_states]
             )
 
@@ -902,7 +902,7 @@ class Attention(MegatronModule, ABC):
             )
         else:
             if self.offload_core_attention and self.training:
-                query = group_prefetch_offload_start(query, name="core_attn")
+                query = fine_grained_offloading_group_start(query, name="core_attn")
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
                 with get_fine_grained_offloading_context(self.offload_core_attention):
@@ -935,7 +935,7 @@ class Attention(MegatronModule, ABC):
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
             if self.offload_core_attention and self.training:
-                (core_attn_out,) = group_prefetch_offload_commit(
+                (core_attn_out,) = fine_grained_offloading_group_commit(
                     core_attn_out, name="core_attn", release_tensors=[query, key, value]
                 )
 
@@ -953,11 +953,11 @@ class Attention(MegatronModule, ABC):
 
         nvtx_range_push(suffix="linear_proj")
         if self.offload_attn_proj:
-            core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
+            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
         with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj:
-            output, bias = group_prefetch_offload_commit(
+            output, bias = fine_grained_offloading_group_commit(
                 output, bias, name="attn_proj", release_tensors=[core_attn_out]
             )
         nvtx_range_pop(suffix="linear_proj")

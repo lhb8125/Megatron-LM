@@ -491,8 +491,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         """
         from megatron.core.pipeline_parallel.cpu_offload import (
             get_fine_grained_offloading_context,
-            group_prefetch_offload_commit,
-            group_prefetch_offload_start,
+            fine_grained_offloading_group_commit,
+            fine_grained_offloading_group_start,
         )
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -501,7 +501,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         residual = hidden_states
 
         if self.offload_attn_norm:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="attn_norm")
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="attn_norm")
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
             self.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
@@ -546,7 +546,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         nvtx_range_pop(suffix="self_attn_bda")
 
         if self.offload_attn_norm:
-            (hidden_states,) = group_prefetch_offload_commit(
+            (hidden_states,) = fine_grained_offloading_group_commit(
                 hidden_states, name="attn_norm", release_tensors=[residual]
             )
 
@@ -589,15 +589,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         from megatron.core.pipeline_parallel.cpu_offload import (
             get_fine_grained_offloading_context,
-            group_prefetch_offload_commit,
-            group_prefetch_offload_start,
+            fine_grained_offloading_group_commit,
+            fine_grained_offloading_group_start,
         )
 
         # Residual connection.
         residual = hidden_states
 
         if self.offload_mlp_norm:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="mlp_norm")
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="mlp_norm")
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
             self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
@@ -668,7 +668,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
         nvtx_range_pop(suffix="mlp_bda")
         if self.offload_mlp_norm:
-            (hidden_states,) = group_prefetch_offload_commit(
+            (hidden_states,) = fine_grained_offloading_group_commit(
                 hidden_states, name="mlp_norm", release_tensors=[residual]
             )
 
