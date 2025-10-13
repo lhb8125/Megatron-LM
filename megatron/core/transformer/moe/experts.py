@@ -27,9 +27,9 @@ from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
 from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_relu_impl
 from megatron.core.jit import jit_fuser
 from megatron.core.pipeline_parallel.cpu_offload import (
-    get_fine_grained_offloading_context,
     fine_grained_offloading_group_commit,
     fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
@@ -987,7 +987,9 @@ class TEGroupedMLP(MegatronModule):
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         if self.offload_moe_act:
-            (output,) = fine_grained_offloading_group_commit(output, name="moe_act", release_tensors=[])
+            (output,) = fine_grained_offloading_group_commit(
+                output, name="moe_act", release_tensors=[]
+            )
 
         # upad and concat the output
         if self.config.fp8:

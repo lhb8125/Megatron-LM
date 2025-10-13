@@ -9,9 +9,9 @@ import torch
 
 from megatron.core import tensor_parallel
 from megatron.core.pipeline_parallel.cpu_offload import (
-    get_fine_grained_offloading_context,
     fine_grained_offloading_group_commit,
     fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from megatron.core.pipeline_parallel.utils import ScheduleNode, make_viewless
 from megatron.core.transformer.module import float16_to_fp32

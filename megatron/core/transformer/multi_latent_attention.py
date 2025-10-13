@@ -23,9 +23,9 @@ from megatron.core.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
 from megatron.core.pipeline_parallel.cpu_offload import (
-    get_fine_grained_offloading_context,
     fine_grained_offloading_group_commit,
     fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear

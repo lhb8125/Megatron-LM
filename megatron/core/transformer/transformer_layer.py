@@ -490,9 +490,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 otherwise None.
         """
         from megatron.core.pipeline_parallel.cpu_offload import (
-            get_fine_grained_offloading_context,
             fine_grained_offloading_group_commit,
             fine_grained_offloading_group_start,
+            get_fine_grained_offloading_context,
         )
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -588,9 +588,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         """
 
         from megatron.core.pipeline_parallel.cpu_offload import (
-            get_fine_grained_offloading_context,
             fine_grained_offloading_group_commit,
             fine_grained_offloading_group_start,
+            get_fine_grained_offloading_context,
         )
 
         # Residual connection.

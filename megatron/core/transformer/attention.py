@@ -23,9 +23,9 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from megatron.core.pipeline_parallel.cpu_offload import (
-    get_fine_grained_offloading_context,
     fine_grained_offloading_group_commit,
     fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
