@@ -205,7 +205,7 @@ Enable A2A overlap across different batches inspired by the DSv3 DualPipe implme
 --delay-wgrad-compute
 ```
 
-### Fine-grained Activation Offloading
+### Fine-grained Activation Offloading (collaborated with rednote)
 Offload the input activation at the granularity of modules
 **Features**
 * Support PP=1/PP/Interleaved PP
@@ -231,6 +231,11 @@ Offload the input activation at the granularity of modules
 - For modules with minor perf overhead like layernorm or moe_act, use recomputing to reduce memory footprint;
 - For other modules, use offloading to reduce memory footprint;
 - Make sure the offloading/reloading could be overlapped with computing;
+
+![Fine-grained Activation Offloading and Fine-grained Recomputation](../../../../images/offloading_and_recomputing.png)
+
+**Acknowledgement**
+This work is inspired by the previous work from Kuaishou: https://www.usenix.org/conference/atc24/presentation/yuan
 
 ### MoE Related Arguments
 | Item | Description |
