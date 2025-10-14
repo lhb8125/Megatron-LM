@@ -559,7 +559,7 @@ def forward_backward_no_pipelining(
         adjust_tensor_shapes_fn is None
     ), "adjust_tensor_shapes_fn is not supported for non-pipeline-parallel schedule"
 
-    if not forward_only:
+    if not forward_only and config.fine_grained_activation_offloading:
         fine_grained_offloading_reset()
 
     config = get_model_config(model)
@@ -902,7 +902,7 @@ def forward_backward_pipelining_with_interleaving(
         adjust_tensor_shapes_fn is None
     ), "adjust_tensor_shapes_fn is not supported for interleaved pipeline parallelism"
 
-    if not forward_only:
+    if not forward_only and config.fine_grained_activation_offloading:
         fine_grained_offloading_reset()
 
     if config.overlap_p2p_comm and config.batch_p2p_comm:
@@ -2050,7 +2050,7 @@ def forward_backward_pipelining_without_interleaving(
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
-    if not forward_only:
+    if not forward_only and config.fine_grained_activation_offloading:
         fine_grained_offloading_reset()
 
     # Disable async grad reductions

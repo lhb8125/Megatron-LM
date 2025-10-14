@@ -299,7 +299,7 @@ class TELinear(te.pytorch.Linear):
             else:
                 raise RuntimeError("Only TE with version >=2.3.0 supports delay_wgrad_compute now.")
         if self.config.fine_grained_activation_offloading:
-            if is_te_min_version("2.8.0"):
+            if is_te_min_version("2.9.0"):
                 extra_kwargs["fine_grained_activation_offloading"] = (
                     self.config.fine_grained_activation_offloading
                 )
@@ -520,7 +520,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
                 raise RuntimeError("Only TE with version >=2.3.0 supports delay_wgrad_compute now.")
 
         if self.config.fine_grained_activation_offloading:
-            if is_te_min_version("2.8.0"):
+            if is_te_min_version("2.9.0"):
                 extra_kwargs["fine_grained_activation_offloading"] = (
                     self.config.fine_grained_activation_offloading
                 )
@@ -1133,7 +1133,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         "Only TE with version >=2.3.0 supports delay_wgrad_compute now."
                     )
             if self.config.fine_grained_activation_offloading:
-                if is_te_min_version("2.8.0"):
+                if is_te_min_version("2.9.0"):
                     extra_kwargs["fine_grained_activation_offloading"] = (
                         self.config.fine_grained_activation_offloading
                     )
