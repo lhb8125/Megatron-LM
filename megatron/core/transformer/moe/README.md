@@ -207,15 +207,6 @@ Enable A2A overlap across different batches inspired by the DSv3 DualPipe implme
 
 ### Fine-grained Activation Offloading (collaborated with rednote)
 Offload the input activation at the granularity of modules
-**Features**
-* Support PP=1/PP/Interleaved PP
-* Compatible with fine-grained recomputation
-* Support FP8
-* Support MTP
-* Support mixed dense & moe layer
-* Support A2A Overlap
-* Support CUDA Graph
-  * (Temporary) cuda graph scope cannot contains the offloading modules
 
 **Usage**
 ```bash
@@ -226,16 +217,7 @@ Offload the input activation at the granularity of modules
 # Choices: "attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act".
 --offload-modules expert_fc1
 ```
-
-#### Compatiable with Fine-grained Recomputation
-- For modules with minor perf overhead like layernorm or moe_act, use recomputing to reduce memory footprint;
-- For other modules, use offloading to reduce memory footprint;
-- Make sure the offloading/reloading could be overlapped with computing;
-
-![Fine-grained Activation Offloading and Fine-grained Recomputation](../../../../images/offloading_and_recomputing.png)
-
-**Acknowledgement**
-This work is inspired by the previous work from Kuaishou: https://www.usenix.org/conference/atc24/presentation/yuan
+For more details, please refer to the ```docs/source/api-guide/fine_grained_activation_offloading.md```
 
 ### MoE Related Arguments
 | Item | Description |
