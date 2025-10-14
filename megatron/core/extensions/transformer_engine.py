@@ -2134,6 +2134,8 @@ def set_save_original_input(module):
 
 
 try:
-    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+    from transformer_engine.pytorch.float8_tensor import (  # pylint: disable=unused-import
+        Float8Tensor,
+    )
 except ImportError:
     Float8Tensor = None
