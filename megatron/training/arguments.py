@@ -1190,9 +1190,10 @@ def validate_args(args, defaults={}):
     if args.fine_grained_activation_offloading:
         assert args.transformer_impl == 'transformer_engine', \
             "Fine-grained activation offloading is only supported with transformer_engine implementation"
-        assert is_te_min_version("2.9.0"), \
-            "Fine-grained activation offloading is only supported with TE >= 2.9.0." \
-            "For EA test, please checkout to TE PR #2267 and comment out this assert"
+        if args.overlap_grad_reduce:
+            assert is_te_min_version("2.9.0"), \
+                "overlap_grad_reduce is only supported with TE >= 2.9.0 when enabling fine-grained activation offloading" \
+                "For EA test, please checkout to TE PR #2267 and comment out this assert"
 
     if args.mtp_num_layers:
         assert not args.use_legacy_models, "The legacy Megatron models does not support Multi-Token Prediction (MTP)."
