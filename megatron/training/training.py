@@ -2315,11 +2315,11 @@ def train(
     # Run training iterations till done.
     buffered_rollouts = None
     while iteration < args.train_iters:
-        if args.profile and torch.distributed.get_rank() in args.profile_ranks and iteration == 5:
+        if args.profile and torch.distributed.get_rank() in args.profile_ranks and iteration == 3:
             try:
-                comment = os.getenv("COMMENT")
-                model_name = os.getenv("MODEL")
-                memory_snapshot_path = f"/lustre/fsw/coreai_devtech_all/hongbinl/cpu_offloading/megatron-moe-scripts/pyt_profile/{model_name}_{comment}"
+                comment = os.getenv("COMMENT", "baseline")
+                model_name = os.getenv("MODEL", "DeepSeek-V3")
+                memory_snapshot_path = f"/lustre/fsw/portfolios/coreai/users/hongbinl/pp_offload/pyt_profile/{model_name}_{comment}"
                 torch.cuda.memory._dump_snapshot(f"{memory_snapshot_path}.pickle")
                 print_rank_0(f"Captured memory snapshot at {memory_snapshot_path}.pickle")
             except Exception as e:
