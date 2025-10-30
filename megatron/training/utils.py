@@ -84,7 +84,18 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
                 # TODO: Implement memory optimization for MoE parameters.
                 assert param_is_not_shared(param)
                 param = to_local_if_dtensor(param)
-                moe_params_data.append(param.data.float() if args.bf16 else param.data)
+                # moe_params_data.append(param.data.float() if args.bf16 else param.data)
+                if args.bf16:
+                    if not force_create_fp32_copy and hasattr(param, 'main_param'):
+                        if getattr(param, 'main_param_sharded', False):
+                            if param.main_param is not None:
+                                sharded_params_data.append(param.main_param)
+                        else:
+                            moe_params_data.append(param.main_param)
+                    else:
+                        moe_params_data.append(param.data.float())
+                else:
+                    moe_params_data.append(param.data)
             else:
                 if param_is_not_shared(param):
                     param = to_local_if_dtensor(param)
