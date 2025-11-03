@@ -850,7 +850,7 @@ class TEGroupedMLP(MegatronModule):
             set_save_original_input(self.linear_fc2)
 
         # This is to avoid the CPU overhead of multiple d2h copies
-        if self.offload_expert_fc1 and not (self.config.fp8 or self.config.fp4):
+        if self.offload_expert_fc1:
             from megatron.core.extensions.transformer_engine import set_save_original_input
 
             set_save_original_input(self.linear_fc1)
@@ -923,7 +923,8 @@ class TEGroupedMLP(MegatronModule):
             permuted_local_hidden_states = fine_grained_offloading_group_start(
                 permuted_local_hidden_states, name="expert_fc1"
             )
-        with get_fine_grained_offloading_context(self.offload_expert_fc1):
+        from transformer_engine.pytorch.fp8 import fp8_autocast
+        with get_fine_grained_offloading_context(self.offload_expert_fc1) and fp8_autocast(enabled=False):
             fc1_output, bias_parallel = self.linear_fc1(
                 permuted_local_hidden_states, tokens_per_expert
             )
@@ -1006,7 +1007,8 @@ class TEGroupedMLP(MegatronModule):
             with get_fine_grained_offloading_context(self.offload_moe_act):
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-        output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert)
+        with fp8_autocast(enabled=False):
+            output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         if self.offload_moe_act:

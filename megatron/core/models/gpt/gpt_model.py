@@ -416,7 +416,12 @@ class GPTModel(LanguageModule):
 
     def preprocess_for_fine_grained_offloading(self):
         """Preprocess for fine-grained activation offloading."""
+        from megatron.core import parallel_state
+        pipeline_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
+        pipeline_parallel_rank = parallel_state.get_pipeline_model_parallel_rank()
         fine_grained_offloading_init_chunk_handler(
+            pp_size=pipeline_parallel_size,
+            pp_rank=pipeline_parallel_rank,
             vp_size=self.config.virtual_pipeline_model_parallel_size,
             vp_stage=self.vp_stage,
             min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,

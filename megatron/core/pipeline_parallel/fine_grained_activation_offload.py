@@ -94,7 +94,7 @@ class PipelineOffloadManager:
 
     def reset(self):
         """Reset manager state for a new training iteration."""
-        set_ideal_affinity_for_current_gpu()
+        #set_ideal_affinity_for_current_gpu()
         self._inside_context = False
         self._cur_forward_chunk = None
         self._cur_backward_chunk = None
@@ -144,7 +144,7 @@ class PipelineOffloadManager:
         return len(self._queue)
 
     def init_model_chunk_offload_handler(
-        self, vp_size, vp_stage, min_offloaded_tensor_size=1024 * 1024
+        self, pp_size, pp_rank, vp_size, vp_stage, min_offloaded_tensor_size=1024 * 1024
     ):
         """
         Initialize a chunk offload handler for a model chunk (microbatch).
@@ -164,6 +164,10 @@ class PipelineOffloadManager:
         else:
             cur_vpp_rank = vp_stage
 
+        no_offloading_last_layer = False
+        if pp_rank == pp_size - 1:
+            no_offloading_last_layer = True
+
         is_first_last_vpp_chunk = self._is_first_last_vpp_chunk
         # Flush staged chunks when reaching the last virtual pipeline stage
         if cur_vpp_rank == self._vpp - 1:
@@ -171,7 +175,7 @@ class PipelineOffloadManager:
         # Determine if this is the first microbatch of the last virtual pipeline stage
         is_first_last_vpp_chunk = is_first_last_vpp_chunk and (cur_vpp_rank == self._vpp - 1)
 
-        cur_chunk = ChunkOffloadHandler(is_first_last_vpp_chunk, min_offloaded_tensor_size)
+        cur_chunk = ChunkOffloadHandler(no_offloading_last_layer, is_first_last_vpp_chunk, min_offloaded_tensor_size)
         self._stages[cur_vpp_rank].append(cur_chunk)
         # For the last stage, push immediately and flush
         if cur_vpp_rank == self._vpp - 1:
@@ -275,11 +279,12 @@ class ChunkOffloadHandler:
             non_blocking = cpu_backup.is_pinned()
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
-    def __init__(self, is_first_last_vpp_chunk, min_offloaded_tensor_size):
+    def __init__(self, no_offloading_last_layer, is_first_last_vpp_chunk, min_offloaded_tensor_size):
         # Data Structure to maintain reference to activation tensors
         self._tensor_tag_to_state = {}
         # Mark the first microbatch of the last virtual pipeline stage
         self._is_first_last_vpp_chunk = is_first_last_vpp_chunk
+        self._no_offloading_last_layer = no_offloading_last_layer
 
         # Group management for batching offload/reload operations
         self._offloaded_group_index = 0
@@ -308,7 +313,7 @@ class ChunkOffloadHandler:
         debug_rank(
             f"------is_first_last_layer {self._is_first_last_vpp_chunk} {self.is_last_layer}"
         )
-        return self._is_first_last_vpp_chunk and self.is_last_layer
+        return (self._is_first_last_vpp_chunk or self._no_offloading_last_layer) and self.is_last_layer
 
     def tensor_push(self, tensor):
         """Push tensor to the offload handler."""
@@ -597,10 +602,10 @@ def fine_grained_offloading_set_last_layer(is_last_layer):
     PipelineOffloadManager.get_instance().set_last_layer(is_last_layer)
 
 
-def fine_grained_offloading_init_chunk_handler(vp_size, vp_stage, min_offloaded_tensor_size):
+def fine_grained_offloading_init_chunk_handler(pp_size, pp_rank, vp_size, vp_stage, min_offloaded_tensor_size):
     """Initialize the chunk handler, called at the start of a microbatch forward pass."""
     PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
-        vp_size, vp_stage, min_offloaded_tensor_size
+        pp_size, pp_rank, vp_size, vp_stage, min_offloaded_tensor_size
     )
 
 
