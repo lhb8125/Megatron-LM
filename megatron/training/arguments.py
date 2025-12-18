@@ -1403,6 +1403,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['deallocate_pipeline_outputs'] = True
     kw_args['pipeline_dtype'] = args.params_dtype
     kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
+    kw_args['use_separate_send_recv_groups'] = args.use_separate_send_recv_groups
     kw_args['num_moe_experts'] = args.num_experts
     kw_args['rotary_interleaved'] = args.rotary_interleaved
     kw_args['num_layers_in_first_pipeline_stage']= args.decoder_first_pipeline_num_layers
@@ -2775,6 +2776,10 @@ def _add_distributed_args(parser):
     group.add_argument('--overlap-p2p-communication-warmup-flush', action='store_true',
                        default=False, help='if set, overlap pipeline parallel communication in warmup and flush',
                        dest='overlap_p2p_comm_warmup_flush')
+    group.add_argument('--use-separate-send-recv-groups', action='store_true',
+                       default=False, help='if set, use separate ProcessGroups for send and recv operations '
+                       'in pipeline parallelism. Each group will use its own NCCL internal stream.',
+                       dest='use_separate_send_recv_groups')
     group.add_argument('--distributed-backend', default='nccl',
                        choices=['nccl', 'gloo'],
                        help='Which backend to use for distributed training.')

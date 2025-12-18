@@ -550,4 +550,6 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             # Release reference as early as possible, this helps avoid memory leak.
             b_schedule_plan.release_state()
 
+        print(f"[rank {torch.distributed.get_rank()}] ModelChunkSchedulePlan.run finished")
+
         return f_input

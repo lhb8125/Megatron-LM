@@ -983,7 +983,9 @@ def forward_backward_pipelining_with_interleaving(
     config = get_model_config(model[0])
     if p2p_communicator is None and pg_collection is None:
         p2p_communicator = P2PCommunicator(
-            pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
+            pp_group=parallel_state.get_pipeline_model_parallel_group(),
+            config=config,
+            use_separate_send_recv_groups=config.use_separate_send_recv_groups,
         )
         tp_group = parallel_state.get_tensor_model_parallel_group()
         cp_group = parallel_state.get_context_parallel_group()
@@ -1549,7 +1551,9 @@ def forward_backward_pipelining_with_interleaving(
                 recv_prev_wait_handle.wait()
 
         # Determine if tensor should be received from previous stage.
+        print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} recv_tensor_from_previous_stage is running")
         recv_prev, next_forward_model_chunk_id = recv_tensor_from_previous_stage(k, forward=True)
+        print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} recv_tensor_from_previous_stage done")
 
         # No receive in last iteration when recv iteration k+1.
         if k == (total_num_microbatches - 1):
@@ -1580,10 +1584,12 @@ def forward_backward_pipelining_with_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
+        print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} forward_backward_helper_wrapper is running")
         output_tensor, _ = forward_backward_helper_wrapper(
             f_virtual_microbatch_id=k,
             checkpoint_activations_microbatch=checkpoint_activations_microbatch,
         )
+        print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} forward_backward_helper_wrapper done")
 
         # Don't send tensor downstream if on last stage.
         if _is_vp_last_stage(vp_stage=cur_model_chunk_id) and is_pp_last_stage(pp_group):
@@ -1613,9 +1619,11 @@ def forward_backward_pipelining_with_interleaving(
                 )
                 output_tensor_grads[num_model_chunks - 1].append(output_tensor_grad)
             else:
+                print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} send_forward_recv_forward is running")
                 input_tensor = p2p_communicator.send_forward_recv_forward(
                     output_tensor, recv_prev=recv_prev, tensor_shape=tensor_shape
                 )
+                print(f"[rank {torch.distributed.get_rank()}] warmup microbatch {k} send_forward_recv_forward done")
             if recv_prev:
                 input_tensors[next_forward_model_chunk_id].append(input_tensor)
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
@@ -1706,6 +1714,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Sync forward recv
             def pp_pre_forward(vp_stage=None):
+                print(f"[rank {torch.distributed.get_rank()}] pp_pre_forward is running")
                 if vp_stage is None:
                     vp_stage = get_model_chunk_id(forward_k, forward=True)
                 if not (_is_vp_first_stage(vp_stage=vp_stage) and is_pp_first_stage(pp_group)):
@@ -1725,6 +1734,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Async forward send / receive
             def pp_post_forward(output_tensor, vp_stage=None):
+                print(f"[rank {torch.distributed.get_rank()}] pp_post_forward is running")
                 nonlocal send_next_wait_handle
                 nonlocal fwd_recv_buffer
                 nonlocal fwd_wait_handles
@@ -1778,6 +1788,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Sync backward recv
             def pp_pre_backward(vp_stage=None):
+                print(f"[rank {torch.distributed.get_rank()}] pp_pre_backward is running")
                 nonlocal recv_next_wait_handles
                 if vp_stage is None:
                     vp_stage = get_model_chunk_id(backward_k, forward=False)
@@ -1796,6 +1807,7 @@ def forward_backward_pipelining_with_interleaving(
 
             # Async backward send / receive
             def pp_post_backward(input_tensor_grad, vp_stage=None):
+                print(f"[rank {torch.distributed.get_rank()}] pp_post_backward is running")
                 nonlocal send_prev_wait_handle
                 nonlocal bwd_wait_handles
                 nonlocal recv_next_wait_handles
@@ -1847,6 +1859,7 @@ def forward_backward_pipelining_with_interleaving(
                 post_backward=pp_post_backward,
                 checkpoint_activations_microbatch=checkpoint_activations_microbatch,
             )
+            print(f"[rank {torch.distributed.get_rank()}] microbatch [{forward_k}, {backward_k}] forward_backward_helper_wrapper finished")
 
         else:  # No p2p overlap.
             backward_k = k
@@ -2130,7 +2143,9 @@ def forward_backward_pipelining_without_interleaving(
 
     if p2p_communicator is None and pg_collection is None:
         p2p_communicator = P2PCommunicator(
-            pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
+            pp_group=parallel_state.get_pipeline_model_parallel_group(),
+            config=config,
+            use_separate_send_recv_groups=config.use_separate_send_recv_groups,
         )
         tp_group = parallel_state.get_tensor_model_parallel_group()
         cp_group = parallel_state.get_context_parallel_group()

@@ -310,6 +310,12 @@ class ModelParallelConfig:
        custom built torch with torch.distributed.ring_exchange.
     """
 
+    use_separate_send_recv_groups: bool = False
+    """If True, creates separate ProcessGroups for send and recv operations in pipeline parallelism.
+       Each ProcessGroup will have its own NCCL internal stream, allowing send and recv to execute
+       on different CUDA streams. Only effective when batch_p2p_comm is False (using _p2p_ops).
+    """
+
     deallocate_pipeline_outputs: bool = False
     """If True, output data is deallocated after the tensor is sent to the next pipeline stage.
        Helps with saving memory, does nothing when pipeline parallel is not used.
