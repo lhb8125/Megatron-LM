@@ -65,7 +65,7 @@ def _p2p_ops(
 ):
     reqs = {}
     print(f"[rank {torch.distributed.get_rank()}] _p2p_ops is running")
-    
+
     # If separate send/recv groups are provided, use them; otherwise fall back to original logic
     if even_send_odd_recv_group is None or even_recv_odd_send_group is None:
         # Original logic: use different groups for even/odd ranks
