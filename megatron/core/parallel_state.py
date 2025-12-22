@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
+# Separate pipeline P2P communication groups for send/recv operations
+# These allow isend and irecv to use different NCCL internal streams
+_PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP = None
+_PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP = None
+_PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP = None
+_PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP = None
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
 _MODEL_PARALLEL_GROUP = None
 # Model parallel group (both intra-, pipeline, and expert) that the current rank belongs to.
@@ -1125,6 +1131,63 @@ def initialize_model_parallel(
             _POSITION_EMBEDDING_GROUP = group
             _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
 
+        # Create four separate process groups for P2P pipeline communications
+        # These allow send and recv operations to use different NCCL internal streams
+        # All ranks must participate in new_group() call, even if they're not in this PP group
+        global _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP
+        global _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP
+        global _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP
+        global _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP
+        
+        # Only create these groups for NCCL backend (not UCC)
+        if pipeline_model_parallel_comm_backend != "ucc":
+            fwd_even_send_odd_recv_group = create_group(
+                ranks,
+                timeout=timeout,
+                backend="nccl",
+                pg_options=get_nccl_options("pp_p2p_fwd_send", nccl_comm_cfgs),
+                group_desc="PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP",
+            )
+            fwd_even_recv_odd_send_group = create_group(
+                ranks,
+                timeout=timeout,
+                backend="nccl",
+                pg_options=get_nccl_options("pp_p2p_fwd_recv", nccl_comm_cfgs),
+                group_desc="PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP",
+            )
+            bwd_even_send_odd_recv_group = create_group(
+                ranks,
+                timeout=timeout,
+                backend="nccl",
+                pg_options=get_nccl_options("pp_p2p_bwd_send", nccl_comm_cfgs),
+                group_desc="PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP",
+            )
+            bwd_even_recv_odd_send_group = create_group(
+                ranks,
+                timeout=timeout,
+                backend="nccl",
+                pg_options=get_nccl_options("pp_p2p_bwd_recv", nccl_comm_cfgs),
+                group_desc="PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP",
+            )
+            
+            # Store these groups if current rank is in this PP group
+            if rank in ranks:
+                if _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP is None:
+                    _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP = fwd_even_send_odd_recv_group
+                    _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP = fwd_even_recv_odd_send_group
+                    _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP = bwd_even_send_odd_recv_group
+                    _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP = bwd_even_recv_odd_send_group
+                elif isinstance(_PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP, list):
+                    _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP.append(fwd_even_send_odd_recv_group)
+                    _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP.append(fwd_even_recv_odd_send_group)
+                    _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP.append(bwd_even_send_odd_recv_group)
+                    _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP.append(bwd_even_recv_odd_send_group)
+                else:
+                    _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP = [_PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP, fwd_even_send_odd_recv_group]
+                    _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP = [_PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP, fwd_even_recv_odd_send_group]
+                    _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP = [_PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP, bwd_even_send_odd_recv_group]
+                    _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP = [_PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP, bwd_even_recv_odd_send_group]
+
     # Build the tensor + data parallel groups.
     global _TENSOR_AND_DATA_PARALLEL_GROUP
     global _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
@@ -1385,6 +1448,42 @@ def get_pipeline_model_parallel_group(check_initialized=True):
             _PIPELINE_MODEL_PARALLEL_GROUP is not None
         ), "pipeline_model parallel group is not initialized"
     return _PIPELINE_MODEL_PARALLEL_GROUP
+
+
+def get_pp_p2p_fwd_even_send_odd_recv_group(check_initialized=True):
+    """Get the pipeline P2P forward even-send odd-recv group."""
+    if check_initialized:
+        assert (
+            _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP is not None
+        ), "PP P2P forward even-send odd-recv group is not initialized"
+    return _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP
+
+
+def get_pp_p2p_fwd_even_recv_odd_send_group(check_initialized=True):
+    """Get the pipeline P2P forward even-recv odd-send group."""
+    if check_initialized:
+        assert (
+            _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP is not None
+        ), "PP P2P forward even-recv odd-send group is not initialized"
+    return _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP
+
+
+def get_pp_p2p_bwd_even_send_odd_recv_group(check_initialized=True):
+    """Get the pipeline P2P backward even-send odd-recv group."""
+    if check_initialized:
+        assert (
+            _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP is not None
+        ), "PP P2P backward even-send odd-recv group is not initialized"
+    return _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP
+
+
+def get_pp_p2p_bwd_even_recv_odd_send_group(check_initialized=True):
+    """Get the pipeline P2P backward even-recv odd-send group."""
+    if check_initialized:
+        assert (
+            _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP is not None
+        ), "PP P2P backward even-recv odd-send group is not initialized"
+    return _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP
 
 
 def get_data_parallel_group(with_context_parallel=False, partial_data_parallel=False):
@@ -2058,6 +2157,18 @@ def destroy_model_parallel():
 
     global _PIPELINE_MODEL_PARALLEL_GROUP
     _PIPELINE_MODEL_PARALLEL_GROUP = None
+
+    global _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP
+    _PP_P2P_FWD_EVEN_SEND_ODD_RECV_GROUP = None
+
+    global _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP
+    _PP_P2P_FWD_EVEN_RECV_ODD_SEND_GROUP = None
+
+    global _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP
+    _PP_P2P_BWD_EVEN_SEND_ODD_RECV_GROUP = None
+
+    global _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP
+    _PP_P2P_BWD_EVEN_RECV_ODD_SEND_GROUP = None
 
     global _DATA_PARALLEL_GROUP
     _DATA_PARALLEL_GROUP = None

@@ -9,6 +9,14 @@ import torch.distributed as dist
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.utils import nvtx_decorator
 
+global_group_dict = {}
+nccl_dict = {
+    'fwd_even_send_odd_recv_group': None,
+    'fwd_even_recv_odd_send_group': None,
+    'bwd_even_send_odd_recv_group': None,
+    'bwd_even_recv_odd_send_group': None,
+}
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -60,16 +68,21 @@ def _p2p_ops(
     group: torch.distributed.ProcessGroup,
     prev_pipeline_rank: int,
     next_pipeline_rank: int,
-    even_send_odd_recv_group: Optional[torch.distributed.ProcessGroup] = None,
-    even_recv_odd_send_group: Optional[torch.distributed.ProcessGroup] = None,
 ):
     reqs = {}
-    print(f"[rank {torch.distributed.get_rank()}] _p2p_ops is running")
+    # print(f"[rank {torch.distributed.get_rank()}] _p2p_ops is running")
 
     # If separate send/recv groups are provided, use them; otherwise fall back to original logic
-    if even_send_odd_recv_group is None or even_recv_odd_send_group is None:
+    # if even_send_odd_recv_group is None or even_recv_odd_send_group is None:
+    if (
+        nccl_dict['fwd_even_send_odd_recv_group'] is None or
+        nccl_dict['fwd_even_recv_odd_send_group'] is None or
+        nccl_dict['bwd_even_send_odd_recv_group'] is None or
+        nccl_dict['bwd_even_recv_odd_send_group'] is None
+    ):
         # Original logic: use different groups for even/odd ranks
-        even_send_odd_recv_group = group
+        nccl_dict['fwd_even_send_odd_recv_group'] = group
+        nccl_dict['bwd_even_send_odd_recv_group'] = group
         if group.size() == 2 and torch.distributed.get_backend(group) != 'ucc':
             # Use the global process group for one of the two p2p communications
             # to allow the overlap of the independent communications.
@@ -78,71 +91,93 @@ def _p2p_ops(
             # The only exception occurs when using the 'ucc' backend.
             # Because the global communicator always uses the 'nccl' backend,
             # we must ensure the else path is followed for the 'ucc' backend.
-            even_recv_odd_send_group = torch.distributed.group.WORLD
+            nccl_dict['fwd_even_recv_odd_send_group'] = torch.distributed.group.WORLD
+            nccl_dict['bwd_even_recv_odd_send_group'] = torch.distributed.group.WORLD
+            global_group_dict[torch.distributed.group.WORLD] = "global_group"
         else:
-            even_recv_odd_send_group = group
+            nccl_dict['fwd_even_recv_odd_send_group'] = group
+            nccl_dict['bwd_even_recv_odd_send_group'] = group
     # _p2p_ops_kargs = {
     #     'tensor_send_next': tensor_send_next is not None,
     #     'tensor_recv_prev': tensor_recv_prev is not None,
     #     'tensor_send_prev': tensor_send_prev is not None,
     #     'tensor_recv_next': tensor_recv_next is not None,
-    #     'even_recv_odd_send_group': "global_group" if even_recv_odd_send_group is torch.distributed.group.WORLD else "pp_group",
-    #     'even_recv_odd_send_group': "global_group" if even_recv_odd_send_group is torch.distributed.group.WORLD else "pp_group",
+    #     # 'even_recv_odd_send_group': global_group_dict[even_recv_odd_send_group],
+    #     # 'even_recv_odd_send_group': global_group_dict[even_recv_odd_send_group],
+    #     'fwd_even_send_odd_recv_group': global_group_dict[nccl_dict['fwd_even_send_odd_recv_group']],
+    #     'fwd_even_recv_odd_send_group': global_group_dict[nccl_dict['fwd_even_recv_odd_send_group']],
+    #     'bwd_even_send_odd_recv_group': global_group_dict[nccl_dict['bwd_even_send_odd_recv_group']],
+    #     'bwd_even_recv_odd_send_group': global_group_dict[nccl_dict['bwd_even_recv_odd_send_group']],
     #     'prev_pipeline_rank': prev_pipeline_rank,
     #     'next_pipeline_rank': next_pipeline_rank,
     # }
-    # print(f"[rank {torch.distributed.get_rank()}] _p2p_ops kargs: {_p2p_ops_kargs}")
+    # # print(f"[rank {torch.distributed.get_rank()}] _p2p_ops kargs: {_p2p_ops_kargs}")
 
     if group.rank() % 2 == 0:
         if tensor_send_next is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before send_next in nccl group: {'fwd_even_send_odd_recv_group'}")
             send_next_req = torch.distributed.isend(
-                tensor=tensor_send_next, dst=next_pipeline_rank, group=even_send_odd_recv_group
+                tensor=tensor_send_next, dst=next_pipeline_rank, group=nccl_dict['fwd_even_send_odd_recv_group']
             )
             reqs["send_next"] = send_next_req
+            # print(f"[rank {torch.distributed.get_rank()}] send_next in nccl group: {'fwd_even_send_odd_recv_group'}")
 
         if tensor_recv_prev is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before recv_prev in nccl group: {'fwd_even_recv_odd_send_group'}")
             recv_prev_req = torch.distributed.irecv(
-                tensor=tensor_recv_prev, src=prev_pipeline_rank, group=even_recv_odd_send_group
+                tensor=tensor_recv_prev, src=prev_pipeline_rank, group=nccl_dict['fwd_even_recv_odd_send_group']
             )
             reqs["recv_prev"] = recv_prev_req
+            # print(f"[rank {torch.distributed.get_rank()}] recv_prev in nccl group: {'fwd_even_recv_odd_send_group'}")
 
         if tensor_send_prev is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before send_prev in nccl group: {'bwd_even_send_odd_recv_group'}")
             send_prev_req = torch.distributed.isend(
-                tensor=tensor_send_prev, dst=prev_pipeline_rank, group=even_send_odd_recv_group
+                tensor=tensor_send_prev, dst=prev_pipeline_rank, group=nccl_dict['bwd_even_send_odd_recv_group']
             )
             reqs["send_prev"] = send_prev_req
+            # print(f"[rank {torch.distributed.get_rank()}] send_prev in nccl group: {'bwd_even_send_odd_recv_group'}")
 
         if tensor_recv_next is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before recv_next in nccl group: {'bwd_even_recv_odd_send_group'}")
             recv_next_req = torch.distributed.irecv(
-                tensor=tensor_recv_next, src=next_pipeline_rank, group=even_recv_odd_send_group
+                tensor=tensor_recv_next, src=next_pipeline_rank, group=nccl_dict['bwd_even_recv_odd_send_group']
             )
             reqs["recv_next"] = recv_next_req
-
+            # print(f"[rank {torch.distributed.get_rank()}] recv_next in nccl group: {'bwd_even_recv_odd_send_group'}")
     else:
         if tensor_recv_prev is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before recv_prev in nccl group: {'fwd_even_send_odd_recv_group'}")
             recv_prev_req = torch.distributed.irecv(
-                tensor=tensor_recv_prev, src=prev_pipeline_rank, group=even_send_odd_recv_group
+                tensor=tensor_recv_prev, src=prev_pipeline_rank, group=nccl_dict['fwd_even_send_odd_recv_group']
             )
             reqs["recv_prev"] = recv_prev_req
+            # print(f"[rank {torch.distributed.get_rank()}] recv_prev in nccl group: {'fwd_even_send_odd_recv_group'}")
 
         if tensor_send_next is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before send_next in nccl group: {'fwd_even_recv_odd_send_group'}")
             send_next_req = torch.distributed.isend(
-                tensor=tensor_send_next, dst=next_pipeline_rank, group=even_recv_odd_send_group
+                tensor=tensor_send_next, dst=next_pipeline_rank, group=nccl_dict['fwd_even_recv_odd_send_group']
             )
             reqs["send_next"] = send_next_req
+            # print(f"[rank {torch.distributed.get_rank()}] send_next in nccl group: {'fwd_even_recv_odd_send_group'}")
 
         if tensor_recv_next is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before recv_next in nccl group: {'bwd_even_send_odd_recv_group'}")
             recv_next_req = torch.distributed.irecv(
-                tensor=tensor_recv_next, src=next_pipeline_rank, group=even_send_odd_recv_group
+                tensor=tensor_recv_next, src=next_pipeline_rank, group=nccl_dict['bwd_even_send_odd_recv_group']
             )
             reqs["recv_next"] = recv_next_req
+            # print(f"[rank {torch.distributed.get_rank()}] recv_next in nccl group: {'bwd_even_send_odd_recv_group'}")
 
         if tensor_send_prev is not None:
+            # print(f"[rank {torch.distributed.get_rank()}] before send_prev in nccl group: {'bwd_even_recv_odd_send_group'}")
             send_prev_req = torch.distributed.isend(
-                tensor=tensor_send_prev, dst=prev_pipeline_rank, group=even_recv_odd_send_group
+                tensor=tensor_send_prev, dst=prev_pipeline_rank, group=nccl_dict['bwd_even_recv_odd_send_group']
             )
             reqs["send_prev"] = send_prev_req
-    # print(f"[rank {torch.distributed.get_rank()}] _p2p_ops done")
+            # print(f"[rank {torch.distributed.get_rank()}] send_prev in nccl group: {'bwd_even_recv_odd_send_group'}")
+    # # print(f"[rank {torch.distributed.get_rank()}] _p2p_ops done")
     return reqs
 
 
@@ -173,7 +208,7 @@ class P2PCommunicator:
         self.config = config
         self.use_separate_send_recv_groups = use_separate_send_recv_groups
 
-        print(f"use_separate_send_recv_groups: {use_separate_send_recv_groups}")
+        # print(f"use_separate_send_recv_groups: {use_separate_send_recv_groups}")
 
         world_size = self.pp_group.size()
         curr_rank_in_pg = self.pp_group.rank()
@@ -189,31 +224,31 @@ class P2PCommunicator:
             else None
         )
 
-        # Create separate ProcessGroups for send and recv operations
-        # Each will have its own NCCL internal stream
+        # Use separate ProcessGroups for send and recv operations if enabled
+        # These groups are created globally in parallel_state.initialize_model_parallel()
         if use_separate_send_recv_groups:
-            pp_ranks = dist.get_process_group_ranks(pp_group)
-
-            # Create four separate process groups for the four different communication patterns
-            # to overlap the independent pp communications.
-            comm_options = dist.ProcessGroupNCCL.Options()
-            comm_options.is_high_priority_stream = pp_group.is_high_priority_stream
-            self.fwd_even_send_odd_recv_group = dist.new_group(
-                ranks=pp_ranks, backend="nccl", pg_options=comm_options
-            )
-            self.fwd_even_recv_odd_send_group = dist.new_group(
-                ranks=pp_ranks, backend="nccl", pg_options=comm_options
-            )
-            self.bwd_even_send_odd_recv_group = dist.new_group(
-                ranks=pp_ranks, backend="nccl", pg_options=comm_options
-            )
-            self.bwd_even_recv_odd_send_group = dist.new_group(
-                ranks=pp_ranks, backend="nccl", pg_options=comm_options
-            )
+            from megatron.core import parallel_state
+            
+            # Get the pre-created global process groups
+            self.fwd_even_send_odd_recv_group = parallel_state.get_pp_p2p_fwd_even_send_odd_recv_group(check_initialized=True)
+            self.fwd_even_recv_odd_send_group = parallel_state.get_pp_p2p_fwd_even_recv_odd_send_group(check_initialized=True)
+            self.bwd_even_send_odd_recv_group = parallel_state.get_pp_p2p_bwd_even_send_odd_recv_group(check_initialized=True)
+            self.bwd_even_recv_odd_send_group = parallel_state.get_pp_p2p_bwd_even_recv_odd_send_group(check_initialized=True)
+            
+            # Store in global dictionaries for lookup
+            global_group_dict[self.fwd_even_send_odd_recv_group] = "fwd_even_send_odd_recv_group"
+            global_group_dict[self.fwd_even_recv_odd_send_group] = "fwd_even_recv_odd_send_group"
+            global_group_dict[self.bwd_even_send_odd_recv_group] = "bwd_even_send_odd_recv_group"
+            global_group_dict[self.bwd_even_recv_odd_send_group] = "bwd_even_recv_odd_send_group"
+            nccl_dict['fwd_even_send_odd_recv_group'] = self.fwd_even_send_odd_recv_group
+            nccl_dict['fwd_even_recv_odd_send_group'] = self.fwd_even_recv_odd_send_group
+            nccl_dict['bwd_even_send_odd_recv_group'] = self.bwd_even_send_odd_recv_group
+            nccl_dict['bwd_even_recv_odd_send_group'] = self.bwd_even_recv_odd_send_group
         else:
             # Use the same group for both send and recv (original behavior)
             # self.send_group = pp_group
             # self.recv_group = pp_group
+            global_group_dict[self.pp_group] = "pp_group"
             pass
 
     def _communicate_shapes(self, tensor_send_next, tensor_send_prev, recv_prev, recv_next):
@@ -314,7 +349,6 @@ class P2PCommunicator:
         recv_next: bool,
         tensor_shape: Shape,
         wait_on_reqs: bool = True,
-        comm_type: Optional[str] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Communicate tensors between stages. Used as helper method in other
         communication methods that are used in megatron/schedules.py.
@@ -439,15 +473,6 @@ class P2PCommunicator:
             'next_pipeline_rank': next_rank,
         }
 
-        # Add send_group and recv_group if using separate groups and _p2p_ops
-        if self.use_separate_send_recv_groups and p2p_func == _p2p_ops and comm_type is not None:
-            if comm_type == "fwd":
-                p2p_kwargs['even_send_odd_recv_group'] = self.fwd_even_send_odd_recv_group
-                p2p_kwargs['even_recv_odd_send_group'] = self.fwd_even_recv_odd_send_group
-            elif comm_type == "bwd":
-                p2p_kwargs['even_send_odd_recv_group'] = self.bwd_even_send_odd_recv_group
-                p2p_kwargs['even_recv_odd_send_group'] = self.bwd_even_recv_odd_send_group
-
         p2p_reqs = p2p_func(**p2p_kwargs)
         if isinstance(p2p_reqs, list):
             reqs.extend(p2p_reqs)
@@ -464,7 +489,7 @@ class P2PCommunicator:
             # User should assert that we have a modern enough PyTorch to not need this
             torch.cuda.synchronize()
 
-        print(f"[rank {torch.distributed.get_rank()}] _communicate done")
+        # print(f"[rank {torch.distributed.get_rank()}] _communicate done")
 
         return tensor_recv_prev, tensor_recv_next, reqs
 
@@ -656,7 +681,6 @@ class P2PCommunicator:
             recv_next=False,
             tensor_shape=tensor_shape,
             wait_on_reqs=(not overlap_p2p_comm),
-            comm_type="fwd" if overlap_p2p_comm else None,
         )
         if config.timers is not None:
             config.timers('forward-send-forward-recv').stop()
@@ -683,7 +707,6 @@ class P2PCommunicator:
             recv_next=recv_next,
             tensor_shape=tensor_shape,
             wait_on_reqs=(not overlap_p2p_comm),
-            comm_type="bwd" if overlap_p2p_comm else None,
         )
         if config.timers is not None:
             config.timers('backward-send-backward-recv').stop()
