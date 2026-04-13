@@ -648,6 +648,7 @@ class TEGroupedMLP(MegatronModule):
         config: TransformerConfig,
         submodules: GroupedMLPSubmodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: str = None,
     ):
         super().__init__(config=config)
         self.num_local_experts = num_local_experts
@@ -675,6 +676,7 @@ class TEGroupedMLP(MegatronModule):
             is_expert=True,
             tp_comm_buffer_name='fc1',
             pg_collection=pg_collection,
+            name=name + ".linear_fc1",
         )
 
         if self.config.use_te_activation_func and not (submodules.activation_func is None):
@@ -697,6 +699,7 @@ class TEGroupedMLP(MegatronModule):
             is_expert=True,
             tp_comm_buffer_name='fc2',
             pg_collection=pg_collection,
+            name=name + ".linear_fc2",
         )
 
         self.offload_expert_fc1 = (
