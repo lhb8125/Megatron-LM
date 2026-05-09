@@ -1348,7 +1348,9 @@ class FusedMLASelfAttention(MLASelfAttention):
                 sharded_state_dict[kv_extra_key] = fused_obj
 
         for key in list(sharded_state_dict.keys()):
-            if key.startswith(fused_prefix):
+            if key.startswith(fused_prefix) and not (
+                key.endswith("layer_norm_weight") or key.endswith("layer_norm_bias")
+            ):
                 del sharded_state_dict[key]
 
         fused_weight = self.linear_qkv_down_proj.weight
@@ -1392,8 +1394,15 @@ class FusedMLASelfAttention(MLASelfAttention):
 
         return sharded_state_dict
 
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        """Load state dict with automatic unfused->fused conversion."""
+    def _synthesize_fused_qkv_down_weight(self, state_dict, prefix):
+        """Concatenate unfused linear_q_down_proj/linear_kv_down_proj weights into the
+        fused linear_qkv_down_proj.weight key, mutating ``state_dict`` in place.
+
+        No-op if the fused key is already present or either unfused key is missing.
+        Used both by the standard ``_load_from_state_dict`` path and by the distributed
+        optimizer's parameter matcher when reloading main params from a state dict that
+        carries the canonical (unfused) MLA naming.
+        """
         q_key = f"{prefix}linear_q_down_proj.weight"
         kv_key = f"{prefix}linear_kv_down_proj.weight"
         fused_key = f"{prefix}linear_qkv_down_proj.weight"
@@ -1411,3 +1420,7 @@ class FusedMLASelfAttention(MLASelfAttention):
             state_dict.pop(f"{prefix}linear_kv_down_proj.bias", None)
 
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Load state dict with automatic unfused->fused conversion."""
+        self._synthesize_fused_qkv_down_weight(state_dict, prefix)
