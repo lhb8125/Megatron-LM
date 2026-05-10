@@ -199,7 +199,7 @@ class TransformerLayerSchedulePlan:
         elif use_inner_fp4_context:
             low_precision_context = get_fp4_context(self.layer.config, self.layer.layer_number - 1)
         else:
-            nullcontext()
+            low_precision_context = nullcontext()
         return low_precision_context
 
     @staticmethod

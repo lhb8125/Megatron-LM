@@ -1419,8 +1419,8 @@ class FusedMLASelfAttention(MLASelfAttention):
             state_dict.pop(f"{prefix}linear_q_down_proj.bias", None)
             state_dict.pop(f"{prefix}linear_kv_down_proj.bias", None)
 
-        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         """Load state dict with automatic unfused->fused conversion."""
         self._synthesize_fused_qkv_down_weight(state_dict, prefix)
+
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
