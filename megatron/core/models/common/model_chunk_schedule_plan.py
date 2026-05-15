@@ -184,15 +184,10 @@ class TransformerLayerSchedulePlan:
         """
         Get the low precision context for the transformer layer.
         """
-
-        from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
-
         use_inner_fp8_context = (
             self.layer.config.fp8 and self.layer.config.fp8_recipe != Fp8Recipe.delayed
         )
-        use_inner_fp4_context = (
-            self.layer.config.fp4 and not isinstance(self.layer, MultiTokenPredictionLayer)
-        )
+        use_inner_fp4_context = self.layer.config.fp4
 
         if use_inner_fp8_context:
             low_precision_context = get_fp8_context(self.layer.config, self.layer.layer_number - 1)
