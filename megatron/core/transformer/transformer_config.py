@@ -1688,6 +1688,33 @@ class TransformerConfig(ModelParallelConfig):
                     "because the input of attn_proj is the output of core_attn, "
                     "which is needed in core_attn.backward()."
                 )
+            if self.recompute_granularity == "selective" and "moe" in self.recompute_modules:
+                offload_inside_moe = {"moe_act", "expert_fc1"} & set(self.offload_modules)
+                assert not offload_inside_moe, (
+                    f"Cannot offload {offload_inside_moe} while recomputing the entire MoE layer. "
+                    f"'moe' in recompute_modules wraps the full MoE forward in a checkpoint, "
+                    f"so offloading activations inside it is redundant and will cause errors. "
+                    f"Either remove 'moe' from --recompute-modules or remove "
+                    f"{offload_inside_moe} from --offload-modules."
+                )
+            assert not (
+                self.recompute_granularity == "selective"
+                and "expert_fc1" in self.recompute_modules
+                and "moe_act" in self.offload_modules
+            ), (
+                "Cannot offload moe_act while recomputing expert_fc1: moe_act offload "
+                "releases the input to moe_act, which is the same tensor produced by "
+                "expert_fc1 recompute."
+            )
+            assert (
+                self.min_offloaded_tensor_size >= 0
+            ), "min_offloaded_tensor_size must be non-negative."
+            assert (
+                self.activation_offload_fraction >= 0 and self.activation_offload_fraction <= 1
+            ), "activation_offload_fraction must be in range [0, 1]."
+            assert (
+                self.delta_offload_bytes_across_pp_ranks >= 0
+            ), "delta_offload_bytes_across_pp_ranks must be non-negative."
         if self.moe_paged_stash:
             if self.cpu_offloading:
                 raise ValueError("moe_paged_stash cannot be enabled with cpu_offloading.")
