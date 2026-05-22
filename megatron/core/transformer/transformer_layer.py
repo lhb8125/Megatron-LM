@@ -436,11 +436,19 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         self.recompute_mlp = False
         if self.config.recompute_granularity == 'selective':
             assert self.config.recompute_modules is not None
-            if "layernorm" in self.config.recompute_modules:
+            if (
+                "layernorm" in self.config.recompute_modules
+                or "attn_norm" in self.config.recompute_modules
+            ):
                 if not isinstance(self.input_layernorm, IdentityOp):
                     self.recompute_input_layernorm = True
                     if self.config.fp8 or self.config.fp4:
                         self.self_attention.set_for_recompute_input_layernorm()
+
+            if (
+                "layernorm" in self.config.recompute_modules
+                or "mlp_norm" in self.config.recompute_modules
+            ):
 
                 def can_recompute_pre_mlp_layernorm_for_cudagraph():
                     if (
@@ -683,6 +691,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                     attention_output_with_bias, residual, self.hidden_dropout
                 )
+        if hasattr(self.self_attention, "discard_recomputed_attn_proj_output"):
+            self.self_attention.discard_recomputed_attn_proj_output(hidden_states)
         nvtx_range_pop(suffix="self_attn_bda")
 
         # Delay the offload of the attention norm until after the self_attn_bda has been computed
@@ -726,6 +736,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             hidden_states = self.cross_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
+        if hasattr(self.cross_attention, "discard_recomputed_attn_proj_output"):
+            self.cross_attention.discard_recomputed_attn_proj_output(hidden_states)
 
         return hidden_states, context
 
