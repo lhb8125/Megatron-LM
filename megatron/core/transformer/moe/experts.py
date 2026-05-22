@@ -749,7 +749,6 @@ class TEGroupedMLP(MegatronModule):
                 fc1_output,
                 name="expert_fc1",
                 forced_released_tensors=[permuted_local_hidden_states],
-                delay_offload=self.config.delay_offload_until_cuda_graph,
             )
 
         if self.activation_recompute and not combined_expert_fc1_moe_act_recompute:
@@ -780,7 +779,6 @@ class TEGroupedMLP(MegatronModule):
                 output,
                 name="expert_fc1",
                 forced_released_tensors=[permuted_local_hidden_states],
-                delay_offload=self.config.delay_offload_until_cuda_graph,
             )
 
         # Delay the offload of the moe act until after the linear_fc2 has been computed

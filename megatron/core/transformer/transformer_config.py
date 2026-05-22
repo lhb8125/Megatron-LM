@@ -1711,12 +1711,6 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 self.min_offloaded_tensor_size >= 0
             ), "min_offloaded_tensor_size must be non-negative."
-            assert (
-                self.activation_offload_fraction >= 0 and self.activation_offload_fraction <= 1
-            ), "activation_offload_fraction must be in range [0, 1]."
-            assert (
-                self.delta_offload_bytes_across_pp_ranks >= 0
-            ), "delta_offload_bytes_across_pp_ranks must be non-negative."
         if self.moe_paged_stash:
             if self.cpu_offloading:
                 raise ValueError("moe_paged_stash cannot be enabled with cpu_offloading.")
