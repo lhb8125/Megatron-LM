@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import dataclasses
 import gc
@@ -2283,6 +2283,15 @@ class TECudaGraphHelper:
                     )
             else:
                 kwargs['fp8_enabled'] = False
+
+            from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+                FineGrainedActivationOffloadingInterface as off_interface,
+            )
+
+            # Disable and enable offloading before and after the warmup stage of cuda graph.
+            if self.config.fine_grained_activation_offloading:
+                kwargs['pre_warmup_hook'] = off_interface.disable_offload
+                kwargs['post_warmup_hook'] = off_interface.enable_offload
             return kwargs
 
         kwargs = get_make_graphed_callables_kwargs()
@@ -2330,6 +2339,12 @@ class TECudaGraphHelper:
         )
         _set_capture_end()
 
+        from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+            FineGrainedActivationOffloadingInterface as off_interface,
+        )
+
+        if self.config.fine_grained_activation_offloading:
+            off_interface.reset()
         torch.cuda.synchronize()
         self._reset_after_capture()
         if FREEZE_GC:
