@@ -19,7 +19,12 @@ from megatron.core.inference.utils import InferenceMode
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
-from megatron.core.transformer.enums import CudaGraphModule, InferenceCudaGraphScope, LayerType
+from megatron.core.transformer.enums import (
+    CudaGraphModule,
+    CudaGraphScope,
+    InferenceCudaGraphScope,
+    LayerType,
+)
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.module import GraphableMegatronModule
