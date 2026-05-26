@@ -22,6 +22,12 @@ def has_nvrx_async_support() -> bool:
     except (ImportError, ModuleNotFoundError):
         return False
 
+    try:
+        if not is_nvrx_min_version():
+            return False
+    except ImportError:
+        return False
+
     required_symbols = (
         getattr(core, "AsyncCallsQueue", None),
         getattr(core, "AsyncRequest", None),
