@@ -237,6 +237,13 @@ def create_group(
             # So need to unset timeout here if caller doesn't set value. Otherwise there is
             # type error.
             kwargs.pop("timeout")
+    if (
+        torch.distributed.is_initialized()
+        and torch.distributed.get_backend() == "fake"
+        and backend in (None, "fake")
+    ):
+        # PyTorch fake process groups do not accept NCCL-specific options.
+        kwargs["pg_options"] = None
     group = torch.distributed.new_group(**kwargs)
     global _global_process_group_list
     if _global_process_group_list is None:
