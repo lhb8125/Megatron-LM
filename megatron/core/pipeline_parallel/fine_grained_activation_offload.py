@@ -2,14 +2,16 @@
 
 from collections import defaultdict, deque
 from contextlib import nullcontext
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
 # CPU offload implementation for pipeline parallelism
-DEBUG = False
-DEBUG_RANK = 0
+DEBUG = os.environ.get("MCORE_FGAO_DEBUG", "0").lower() in ("1", "true", "yes", "on")
+DEBUG_RANK = int(os.environ.get("MCORE_FGAO_DEBUG_RANK", "0"))
+DEBUG_GROUP = os.environ.get("MCORE_FGAO_DEBUG_GROUP", "")
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
@@ -20,9 +22,11 @@ def debug_rank(message):
     # pylint: disable=bad-builtin
     if not DEBUG:
         return
+    if DEBUG_GROUP and DEBUG_GROUP not in message:
+        return
     assert torch.distributed.is_initialized()
     if torch.distributed.get_rank() == DEBUG_RANK:
-        print(message)
+        print(f"[FGAO_DEBUG] {message}", flush=True)
 
 
 def print_offload_summary_table(total_offload_bytes: Dict[str, int]):
@@ -818,18 +822,28 @@ class ChunkOffloadHandler:
         state = (src_tensor.device, cpu_backup, use_cpu_pool)
         return state
 
-    def reload(self, state, non_blocking=None):
+    def reload(self, state, non_blocking=None, debug_name=None, debug_tag=None):
         """Reload."""
         debug_rank("------reload")
         dev, cpu_backup, use_cpu_pool = state
         if non_blocking is None:
             non_blocking = cpu_backup.is_pinned()
+        debug_rank(
+            f"reload_alloc_start name={debug_name} tag={debug_tag} "
+            f"shape={tuple(cpu_backup.size())} dtype={cpu_backup.dtype} "
+            f"groups_to_reload={len(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
         gpu_tensor = torch.empty(
             cpu_backup.size(), dtype=cpu_backup.dtype, layout=cpu_backup.layout, device=dev
         )
         gpu_tensor.copy_(cpu_backup, non_blocking=non_blocking)
         if use_cpu_pool:
             self.cpu_tensor_pool.free(cpu_backup)
+        debug_rank(
+            f"reload_alloc_done name={debug_name} tag={debug_tag} "
+            f"ptr={gpu_tensor.data_ptr()} shape={tuple(gpu_tensor.size())}"
+        )
         return gpu_tensor
 
     def __init__(
@@ -875,6 +889,24 @@ class ChunkOffloadHandler:
         # Clear the pending-event FIFO at iter boundary so we never wait on
         # an event recorded in a previous (non-captured) iteration.
         self._offload_pending_by_name.clear()
+
+    def _debug_group_index(self, group):
+        """Return a stable 1-based group index for debug logging."""
+        if not DEBUG:
+            return -1
+        try:
+            return self.offload_groups.index(group) + 1
+        except ValueError:
+            return -1
+
+    def _debug_group_list(self, groups):
+        """Return compact group names and indexes for debug logging."""
+        if not DEBUG:
+            return ""
+        return [
+            f"{group._name}:{self._debug_group_index(group)}:{len(group._tensors)}"
+            for group in groups
+        ]
 
     def find_group_with_name(
         self, groups: list[OffloadTensorGroup], name: str, start_index: int = 0
@@ -935,10 +967,22 @@ class ChunkOffloadHandler:
         """Pop tensor from the offload handler."""
         debug_rank(f"--------tensor_pop {tensor_tag}")
         group_id, idx = tensor_tag
-        tensor = self.offload_groups[group_id - 1].pop_tensor(tensor_tag)
+        group = self.offload_groups[group_id - 1]
+        tensor_before = group._tensors.get(tensor_tag)
+        debug_rank(
+            f"tensor_pop_begin name={group._name} tag={tensor_tag} group_idx={group_id} "
+            f"stored_type={type(tensor_before).__name__} tensors_before={len(group._tensors)} "
+            f"groups_to_reload={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
+        tensor = group.pop_tensor(tensor_tag)
         # If tensor is offloaded (stored as tuple), reload it
         if isinstance(tensor, tuple):
-            tensor = self.reload(tensor)
+            tensor = self.reload(tensor, debug_name=group._name, debug_tag=tensor_tag)
+        debug_rank(
+            f"tensor_pop_end name={group._name} tag={tensor_tag} group_idx={group_id} "
+            f"shape={tuple(tensor.size())} tensors_after={len(group._tensors)}"
+        )
         debug_rank(f"--------tensor_pop {tensor.shape}")
         return tensor
 
@@ -992,6 +1036,13 @@ class ChunkOffloadHandler:
         """Bulk reload group."""
         debug_rank("----bulk_reload_group")
         group_to_reload = self._groups_to_reload[-1]
+        group_idx = self._debug_group_index(group_to_reload)
+        debug_rank(
+            f"bulk_reload_group_begin name={group_to_reload._name} group_idx={group_idx} "
+            f"tensors={len(group_to_reload._tensors)} "
+            f"groups_to_reload_before={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_before={self._debug_group_list(self._reloading_group)}"
+        )
         nvtx_msg = "activation reloading " + group_to_reload._name
         nvtx_range_push(nvtx_msg)
         with torch.cuda.stream(self.h2d_stream):
@@ -1001,13 +1052,24 @@ class ChunkOffloadHandler:
             for tensor_tag, state in group_to_reload._tensors.items():
                 # Only reload if tensor was offloaded (stored as tuple)
                 if isinstance(state, tuple):
-                    recovered_tensor = self.reload(state)
-                    debug_rank(f"----recovered_tensor {recovered_tensor.shape}")
+                    recovered_tensor = self.reload(
+                        state, debug_name=group_to_reload._name, debug_tag=tensor_tag
+                    )
+                    debug_rank(
+                        f"recovered_tensor name={group_to_reload._name} "
+                        f"group_idx={group_idx} tag={tensor_tag} "
+                        f"shape={tuple(recovered_tensor.size())}"
+                    )
                     group_to_reload.push_tensor(tensor_tag, recovered_tensor)
             group_to_reload.record_reload_event(self.h2d_stream)
         self._groups_to_reload.pop()
         # Add the group to the reloading group to wait for the reload event.
         self._reloading_group.append(group_to_reload)
+        debug_rank(
+            f"bulk_reload_group_end name={group_to_reload._name} group_idx={group_idx} "
+            f"groups_to_reload_after={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_after={self._debug_group_list(self._reloading_group)}"
+        )
         nvtx_range_pop(nvtx_msg)
 
     def pre_reload_last_layer(self):
@@ -1087,12 +1149,21 @@ class ChunkOffloadHandler:
     def bulk_reload(self):
         """Reload the next group of tensors from CPU to GPU."""
         debug_rank("--bulk_reload")
+        debug_rank(
+            f"bulk_reload_enter groups_to_reload={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
         if len(self._groups_to_reload) > 0:
             # Reload the next layer group
             self.bulk_reload_group()
         else:
             # Pre-load the last layer of the next backward chunk to hide latency
             next_backward_chunk = PipelineOffloadManager.get_instance().front_backward_chunk()
+            debug_rank(
+                f"bulk_reload_preload_next_chunk current_reloading="
+                f"{self._debug_group_list(self._reloading_group)} "
+                f"next_chunk={id(next_backward_chunk) if next_backward_chunk is not None else None}"
+            )
             # Don't pre-reload the last layer if the next backward chunk hasn't finished fprop yet.
             if (
                 next_backward_chunk is not None
@@ -1108,7 +1179,11 @@ class ChunkOffloadHandler:
         """
         if not self.do_offload:
             return
-        debug_rank("--on_group_commit_backward")
+        debug_rank(
+            f"on_group_commit_backward_begin name={name} "
+            f"groups_to_reload={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
         cur_backward_chunk = PipelineOffloadManager.get_instance().cur_backward_chunk()
         # Switch to this chunk if it's not already current
         if cur_backward_chunk is not self:
@@ -1116,12 +1191,20 @@ class ChunkOffloadHandler:
         cur_backward_chunk = PipelineOffloadManager.get_instance().cur_backward_chunk()
         assert cur_backward_chunk is self, f"Chunk mismatch {cur_backward_chunk} {self}"
         # Wait for reload to complete before using tensors
+        matched_group = None
         if not is_graph_capturing() and len(self._reloading_group) > 0:
             for reloading_group in self._reloading_group:
                 if reloading_group._name == name:
+                    matched_group = reloading_group
                     reloading_group.wait_reload_event(torch.cuda.current_stream())
                     self._reloading_group.remove(reloading_group)
                     break
+        debug_rank(
+            f"on_group_commit_backward_end name={name} "
+            f"matched_group_idx={self._debug_group_index(matched_group) if matched_group else None} "
+            f"groups_to_reload={self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
 
     def on_group_start_forward(self, name):
         """
@@ -1152,10 +1235,19 @@ class ChunkOffloadHandler:
         """
         if not self.do_offload:
             return
-        debug_rank(f"--on_group_start_backward {self}")
+        debug_rank(
+            f"on_group_start_backward_begin groups_to_reload="
+            f"{self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
         # Wait for compute to finish before starting reload
         self.h2d_stream.wait_stream(torch.cuda.current_stream())
         self.bulk_reload()
+        debug_rank(
+            f"on_group_start_backward_end groups_to_reload="
+            f"{self._debug_group_list(self._groups_to_reload)} "
+            f"reloading_groups={self._debug_group_list(self._reloading_group)}"
+        )
 
 
 def fine_grained_offloading_disable_offload():
