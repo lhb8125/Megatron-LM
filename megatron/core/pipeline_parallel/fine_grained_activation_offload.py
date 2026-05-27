@@ -592,7 +592,8 @@ class PipelineOffloadManager:
                 offloaded_groups_count * (1 - self._activation_offload_fraction)
             )
             debug_rank(f"Disabled {disabled_groups_count}/{offloaded_groups_count} groups")
-            for group in reversed(chunk.offload_groups):
+            # Keep the last offloadable groups so H2D reload order follows backward consumption.
+            for group in chunk.offload_groups:
                 if group.offload:
                     if disabled_groups_count > 0:
                         disabled_groups_count -= 1
