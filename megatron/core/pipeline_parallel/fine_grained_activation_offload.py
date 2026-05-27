@@ -914,18 +914,6 @@ class ChunkOffloadHandler:
         assert name is not None, "Name is required"
         return self.find_group_with_name(self.offload_groups, name, self._offloaded_group_index)
 
-    def find_previous_group(self, group: OffloadTensorGroup):
-        """Find the group whose backward will run after ``group``."""
-        if group is None:
-            return None
-        try:
-            group_index = self.offload_groups.index(group)
-        except ValueError:
-            return None
-        if group_index == 0:
-            return None
-        return self.offload_groups[group_index - 1]
-
     def tensor_push(self, tensor):
         """Push tensor to the offload handler."""
         torch_stray_tensor = isinstance(
@@ -1008,7 +996,10 @@ class ChunkOffloadHandler:
             group_to_reload = self._groups_to_reload[-1]
         elif group_to_reload not in self._groups_to_reload:
             return
-        if not group_to_reload.offload:
+        has_offloaded_tensor = any(
+            isinstance(state, tuple) for state in group_to_reload._tensors.values()
+        )
+        if not has_offloaded_tensor:
             self._groups_to_reload.remove(group_to_reload)
             return
         nvtx_msg = "activation reloading " + group_to_reload._name
@@ -1069,8 +1060,11 @@ class ChunkOffloadHandler:
         assert (
             group_to_offload is not None
         ), f"Group {name} not found in {self._groups_to_offload}"
+        # Keep every group in the reload queue, including groups that are not
+        # actually offloaded.  Non-offloaded groups become no-op reload slots,
+        # preserving the backward clock when activation_offload_fraction < 1.
+        self._groups_to_reload.append(group_to_offload)
         if self.should_bulk_offload(name):
-            self._groups_to_reload.append(group_to_offload)
             self.bulk_offload_group(group_to_offload)
             # Manually release tensors not auto-freed by torch GC
             if len(forced_released_tensors) > 0:
@@ -1180,7 +1174,7 @@ class ChunkOffloadHandler:
         debug_rank(f"groups to offload {self._groups_to_offload}")
         return group
 
-    def on_group_start_backward(self, group=None):
+    def on_group_start_backward(self):
         """
         Called at the start of a layer group's backward pass.
         Preloads tensors for the next group in backward order.
@@ -1188,12 +1182,6 @@ class ChunkOffloadHandler:
         if not self.do_offload:
             return
         debug_rank(f"--on_group_start_backward {self}")
-        group_to_reload = self.find_previous_group(group)
-        if group_to_reload is not None:
-            self.h2d_stream.wait_stream(torch.cuda.current_stream())
-            self.bulk_reload_group(group_to_reload)
-            return
-        # At a chunk boundary, preserve the original cross-chunk preload behavior.
         self.h2d_stream.wait_stream(torch.cuda.current_stream())
         self.bulk_reload()
 
@@ -1305,7 +1293,7 @@ class FineGrainedOffloadingGroupStartFunction(torch.autograd.Function):
         ctx.cpu_offload_handler = cpu_offload_handler
         debug_rank("FineGrainedOffloadingGroupStartFunction forward")
 
-        ctx.offload_group = cpu_offload_handler.on_group_start_forward(name)
+        cpu_offload_handler.on_group_start_forward(name)
         # return the identical tensor
         return tensor
 
@@ -1314,7 +1302,7 @@ class FineGrainedOffloadingGroupStartFunction(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         debug_rank("FineGrainedOffloadingGroupStartFunction backward")
         cpu_offload_handler = ctx.cpu_offload_handler
-        cpu_offload_handler.on_group_start_backward(ctx.offload_group)
+        cpu_offload_handler.on_group_start_backward()
         return grad_output, None, None, None
 
 
