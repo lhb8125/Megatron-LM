@@ -37,8 +37,8 @@ def model_provider(
     if args.record_memory_history:
         torch.cuda.memory._record_memory_history(
             True,
-            # keep 100,000 alloc/free events from before the snapshot
-            trace_alloc_max_entries=100000,
+            # keep enough alloc/free events to cover the full fake-PG training run
+            trace_alloc_max_entries=2000000,
             # record stack information for the trace events
             trace_alloc_record_context=True,
         )
