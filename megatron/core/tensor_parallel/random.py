@@ -718,6 +718,7 @@ class CheckpointWithoutOutput(object):
         self.fwd_cuda_rng_state_tracker = None
         self.ctx = None
         self.outputs = None
+        self.before_recompute = None
 
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """Checkpoint function."""
@@ -754,6 +755,11 @@ class CheckpointWithoutOutput(object):
                 "Checkpointing is not compatible with .grad(), "
                 "please use .backward() if possible"
             )
+
+        if self.before_recompute is not None:
+            before_recompute = self.before_recompute
+            self.before_recompute = None
+            before_recompute()
 
         with _fork_rng():
             _set_all_rng_states(*self.rng_states)
@@ -801,6 +807,34 @@ class CheckpointWithoutOutput(object):
         self.outputs = None
         self.ctx = None
 
+    def set_before_recompute(self, callback):
+        """
+        Run callback immediately before this checkpoint recomputes its own outputs.
+
+        This is useful when this checkpoint's saved inputs are outputs from another
+        output-discarding checkpoint. The dependency must restore its output storage before this
+        checkpoint reads saved inputs for replay.
+        """
+        self.before_recompute = callback
+
+    def recompute_output(self):
+        """Recompute output immediately if it has not been recomputed already."""
+        self._recompute(None)
+
+    def discard_output(self):
+        """Release output tensor storages while keeping tensor metadata."""
+
+        from megatron.core.transformer.cuda_graphs import is_graph_warmup
+
+        if is_graph_warmup():
+            return False
+
+        # use resize to release the output tensor memory and still keep the metadata in the tensors.
+        # the metadata is still needed for backward
+        for output in self.outputs:
+            output.untyped_storage().resize_(0)
+        return True
+
     def discard_output_and_register_recompute(self, hook_tensor):
         """
         Release the output tensor storages and register the recompute function as a grad hook of
@@ -816,10 +850,7 @@ class CheckpointWithoutOutput(object):
         if is_graph_warmup():
             return
 
-        # use resize to release the output tensor memory and still keep the metadata in the tensors.
-        # the metadata is still needed for backward
-        for output in self.outputs:
-            output.untyped_storage().resize_(0)
+        self.discard_output()
 
         # register the recomputation as a backward hook, when the the gradient of the hook_tensor
         # is computed, the recomputation will be triggered. The hook_tensor should be selected

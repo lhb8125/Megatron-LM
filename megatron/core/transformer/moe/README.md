@@ -367,6 +367,10 @@ Memory optimization is critical for large-scale MoE training, as MoE models main
 #### Fine-grained Recomputation
 A new output-discarding checkpointing method is also supported. This method discards the output memory of certain submodules during the forward pass and recomputes them during the backward pass, which can save memory compared to standard checkpointing. This can be enabled for specific submodules using the `--recompute-granularity selective --recompute-modules [submodule1, submodule2, ...]` argument. The supported submodules are:
 
+* `self_attn`: Recompute the full self-attention block from transformer layer input through
+  the self-attention residual-add output. With EP A2A overlap, the fine-grained schedule
+  registers the same replay dependencies around pre-MLP norm and MLP BDA as the normal
+  layer forward path.
 * `attn_norm`: Recompute the input_layernorm (when it is not `IdentityOp`).
 * `mlp_norm`: Recompute the pre_mlp_layernorm (when it is not `IdentityOp`).
 * `layernorm`: Recompute both `attn_norm` and `mlp_norm`.

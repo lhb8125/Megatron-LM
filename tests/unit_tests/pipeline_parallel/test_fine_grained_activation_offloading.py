@@ -311,29 +311,40 @@ def test_gpt_fine_grained_activation_offloading_correctness_and_memory(
     reason="EP A2A overlap requires TE 1.9.0.dev0+ in this repo's tests.",
 )
 @pytest.mark.parametrize(
-    "dispatcher_backend, is_mla, offload_modules",
+    "dispatcher_backend, is_mla, offload_modules, recompute_modules",
     [
-        ("alltoall", True, ["attn_norm"]),
-        ("alltoall", True, ["core_attn"]),
-        ("alltoall", True, ["attn_norm", "core_attn", "attn_proj"]),
-        ("alltoall", True, ["mlp_norm"]),
-        ("alltoall", False, ["expert_fc1"]),
-        ("alltoall", False, ["moe_act"]),
-        ("alltoall", False, ["mlp_norm", "expert_fc1", "moe_act"]),
+        ("alltoall", True, ["attn_norm"], ["layernorm", "moe_act"]),
+        ("alltoall", True, ["core_attn"], ["layernorm", "moe_act"]),
+        ("alltoall", True, ["attn_norm", "core_attn", "attn_proj"], ["layernorm", "moe_act"]),
+        ("alltoall", True, ["mlp_norm"], ["layernorm", "moe_act"]),
+        ("alltoall", False, ["expert_fc1"], ["layernorm", "moe_act"]),
+        ("alltoall", False, ["moe_act"], ["layernorm", "moe_act"]),
+        ("alltoall", False, ["mlp_norm", "expert_fc1", "moe_act"], ["layernorm", "moe_act"]),
+        (
+            "alltoall",
+            False,
+            ["expert_fc1", "moe_act"],
+            ["self_attn", "layernorm", "moe_act"],
+        ),
         (
             "alltoall",
             True,
             ["attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"],
+            ["layernorm", "moe_act"],
         ),
         (
             "alltoall",
             False,
             ["attn_norm", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"],
+            ["layernorm", "moe_act"],
         ),
     ],
 )
 def test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility(
-    dispatcher_backend: str, is_mla: bool, offload_modules: List[str]
+    dispatcher_backend: str,
+    is_mla: bool,
+    offload_modules: List[str],
+    recompute_modules: List[str],
 ):
     """
     Compatibility test for:
@@ -415,7 +426,7 @@ def test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility(
             use_cpu_initialization=True,
             attention_backend=AttnBackend.unfused,
             # Recompute
-            recompute_modules=["layernorm", "moe_act"],
+            recompute_modules=recompute_modules,
             recompute_granularity="selective",
             bf16=True,
             # MoE + EP overlap

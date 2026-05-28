@@ -384,6 +384,7 @@ class Attention(MegatronModule, ABC):
         )
         self.qkv_linear_checkpoint = None
         self.attn_proj_checkpoint = None
+        self.attn_proj_offload_forced_release = None
 
         self.offload_qkv_linear = (
             self.config.fine_grained_activation_offloading
@@ -1393,19 +1394,36 @@ class Attention(MegatronModule, ABC):
             with attn_proj_manager as core_attn_out:
                 output, bias = apply_module(self.linear_proj)(core_attn_out)
         if self.offload_attn_proj:
-            output = off_interface.group_commit(
-                output, name="attn_proj", forced_released_tensors=[core_attn_out]
-            )
+            if self.recompute_attn_proj and self.training:
+                self.attn_proj_offload_forced_release = core_attn_out
+            else:
+                output = off_interface.group_commit(
+                    output, name="attn_proj", forced_released_tensors=[core_attn_out]
+                )
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
 
     def discard_recomputed_attn_proj_output(self, hook_tensor):
-        """Discard attention projection output and restore it before BDA backward."""
+        """Discard attention projection output and restore it before its backward consumers."""
         if self.recompute_attn_proj and self.training:
             assert self.attn_proj_checkpoint is not None
-            self.attn_proj_checkpoint.discard_output_and_register_recompute(hook_tensor)
+            attn_proj_checkpoint = self.attn_proj_checkpoint
+            attn_proj_checkpoint.discard_output_and_register_recompute(hook_tensor)
+            hook_tensor = self.commit_recomputed_attn_proj_offload(hook_tensor)
             self.attn_proj_checkpoint = None
+        return hook_tensor
+
+    def commit_recomputed_attn_proj_offload(self, hook_tensor):
+        """Commit delayed attn_proj offload after the recompute hook tensor."""
+        if self.attn_proj_offload_forced_release is not None:
+            hook_tensor = off_interface.group_commit(
+                hook_tensor,
+                name="attn_proj",
+                forced_released_tensors=[self.attn_proj_offload_forced_release],
+            )
+            self.attn_proj_offload_forced_release = None
+        return hook_tensor
 
     @jit_fuser
     def _apply_output_gate(self, x, gate):

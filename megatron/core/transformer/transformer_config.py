@@ -499,9 +499,11 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "qkv_linear", "attn_proj", "moe_act", "layernorm",
+    choices: "self_attn", "core_attn", "qkv_linear", "attn_proj", "moe_act", "layernorm",
     "attn_norm", "mlp_norm", "mla_up_proj", "mlp", "moe", "expert_fc1", "shared_experts".
     default: ["core_attn"].
+    "self_attn": recompute the full self-attention block from the layer input through
+    bias/dropout/residual-add output.
     "core_attn": recompute the core attention part of the transformer layer.
     "qkv_linear": recompute the attention QKV projection output.
     "attn_proj": recompute the attention output projection output.
@@ -516,8 +518,8 @@ class TransformerConfig(ModelParallelConfig):
     "shared_experts": recompute the shared experts in the MoE layer.
     When both "expert_fc1" and "moe_act" are selected, GroupedMLP recomputes them as one
     dependency-ordered checkpoint.
-    "qkv_linear", "attn_proj", "moe_act", "layernorm", "attn_norm", "mlp_norm",
-    "mla_up_proj", and "expert_fc1" use output-discarding checkpointing.
+    "self_attn", "qkv_linear", "attn_proj", "moe_act", "layernorm", "attn_norm",
+    "mlp_norm", "mla_up_proj", and "expert_fc1" use output-discarding checkpointing.
     "core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.
     """
 
@@ -1135,6 +1137,9 @@ class TransformerConfig(ModelParallelConfig):
     min_offloaded_tensor_size: int = 1024 * 1024
     """The minimum size of the tensor to be offloaded."""
 
+    delay_offload_until_cuda_graph: bool = False
+    """If True, delay fine-grained activation offload commits until CUDA graph capture."""
+
     moe_paged_stash: bool = False
     """If True, enable paged stash for all routed-expert activations needed for backward"""
 
@@ -1576,6 +1581,7 @@ class TransformerConfig(ModelParallelConfig):
         if self.recompute_granularity == "selective":
             if len(self.recompute_modules) > 0:
                 allowed_modules = {
+                    "self_attn",
                     "core_attn",
                     "qkv_linear",
                     "attn_proj",
@@ -1610,6 +1616,20 @@ class TransformerConfig(ModelParallelConfig):
                     "mla_up_proj in recompute_modules is only supported with "
                     "multi_latent_attention."
                 )
+
+            if "self_attn" in self.recompute_modules:
+                self_attn_inner_modules = {
+                    "core_attn",
+                    "qkv_linear",
+                    "attn_proj",
+                    "mla_up_proj",
+                } & set(self.recompute_modules)
+                if self_attn_inner_modules:
+                    raise ValueError(
+                        "self_attn in recompute_modules already covers the attention internals "
+                        f"and BDA output. Remove redundant nested modules: "
+                        f"{self_attn_inner_modules}."
+                    )
 
             attention_linear_modules = {"qkv_linear", "attn_proj"} & set(self.recompute_modules)
             if attention_linear_modules and self.multi_latent_attention:
@@ -1708,15 +1728,25 @@ class TransformerConfig(ModelParallelConfig):
                 "releases the input to moe_act, which is the same tensor produced by "
                 "expert_fc1 recompute."
             )
+            if (
+                self.recompute_granularity == "selective"
+                and "self_attn" in self.recompute_modules
+            ):
+                self_attn_offload_conflicts = {
+                    "attn_norm",
+                    "mlp_norm",
+                    "qkv_linear",
+                    "core_attn",
+                    "attn_proj",
+                } & set(self.offload_modules)
+                assert not self_attn_offload_conflicts, (
+                    f"Cannot offload {self_attn_offload_conflicts} while recomputing self_attn: "
+                    "these activations are inside or directly consume the self_attn checkpoint "
+                    "output and are restored from the layer input during backward."
+                )
             assert (
                 self.min_offloaded_tensor_size >= 0
             ), "min_offloaded_tensor_size must be non-negative."
-            assert (
-                self.activation_offload_fraction >= 0 and self.activation_offload_fraction <= 1
-            ), "activation_offload_fraction must be in range [0, 1]."
-            assert (
-                self.delta_offload_bytes_across_pp_ranks >= 0
-            ), "delta_offload_bytes_across_pp_ranks must be non-negative."
         if self.moe_paged_stash:
             if self.cpu_offloading:
                 raise ValueError("moe_paged_stash cannot be enabled with cpu_offloading.")
