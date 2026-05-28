@@ -557,6 +557,12 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                             hidden_states
                         )
 
+                pre_mlp_layernorm_output = (
+                    layer._prepare_self_attn_recompute_after_pre_mlp_layernorm(
+                        pre_mlp_layernorm_output
+                    )
+                )
+
                 # When using fused residual norm (e.g. TEFusedResidualRMSNorm),
                 # the layernorm returns (normalized_output, residual). Unpack
                 # and use the fused residual for the downstream BDA connection.
@@ -675,6 +681,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
+        output = layer._discard_self_attn_output_after_mlp(output)
 
         # Need to record tensors created on comp stream to comm stream
         node.layer_state.residual.record_stream(torch.cuda.current_stream())
