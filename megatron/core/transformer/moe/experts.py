@@ -488,32 +488,8 @@ class TEGroupedMLP(MegatronModule):
                             f"but a {submodule.__class__.__name__} submodule "
                             "has a pre-forward hook that modifies the input tensor."
                         )
-            self._prepare_fsdp_main_grad_placeholders_for_fused_ops()
 
         return forward_pre_hook
-
-    def _prepare_fsdp_main_grad_placeholders_for_fused_ops(self) -> None:
-        """Satisfy TE op fuser's eager main_grad check for Megatron-FSDP.
-
-        Megatron-FSDP exposes main_grad lazily via get_main_grad(), and TE's
-        grouped-linear backward path refreshes the real buffer before writing
-        wgrad. The op-fuser forward currently checks for a non-None main_grad
-        too early, so use a zero-size placeholder after FSDP pre-forward hooks
-        have marked the parameter.
-        """
-
-        for linear in (self.linear_fc1, self.linear_fc2):
-            if not getattr(linear, "fuse_wgrad_accumulation", False):
-                continue
-            if getattr(linear, "single_grouped_weight", False):
-                weights = (linear.weight,)
-            else:
-                weights = tuple(getattr(linear, f"weight{i}") for i in range(linear.num_gemms))
-            for weight in weights:
-                if not hasattr(weight, "__fsdp_param__") or not hasattr(weight, "get_main_grad"):
-                    continue
-                if not hasattr(weight, "main_grad") or weight.main_grad is None:
-                    weight.main_grad = torch.empty(0, dtype=weight.dtype, device=weight.device)
 
     def _fused_forward(
         self,
