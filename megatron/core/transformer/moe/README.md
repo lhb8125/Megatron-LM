@@ -374,8 +374,6 @@ A new output-discarding checkpointing method is also supported. This method disc
 * `attn_proj`: Recompute the standard attention output projection output.
 * `moe_act`: Recompute the GroupedMLP activation function.
 * `expert_fc1`: Recompute the GroupedMLP expert FC1 projection output.
-  When both `expert_fc1` and `moe_act` are selected, GroupedMLP uses a single
-  combined checkpoint that recomputes `expert_fc1` before `moe_act`.
 * `mla_up_proj`: Recompute the MLA up projection and RoPE applying parts.
 * `core_attn`: Recompute the core attention submodule (uses standard checkpointing rather than output-discarding).
 * `mlp`: Recompute the dense MLP submodule (uses standard checkpointing rather than output-discarding) which is useful for hybrid-models like DeepSeek-V3.

@@ -621,6 +621,41 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
+        expert_fc1_manager = off_interface(
+            self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
+        )
+        if self.expert_fc1_recompute:
+            quantization = self.config.fp8 or self.config.fp4
+            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
+            bias_parallel = None
+
+            def expert_fc1_forward(permuted_local_hidden_states):
+                nonlocal bias_parallel
+                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+                return fc1_output
+
+            with expert_fc1_manager as permuted_local_hidden_states:
+                fc1_output = self.expert_fc1_checkpoint.checkpoint(
+                    expert_fc1_forward, permuted_local_hidden_states
+                )
+        else:
+            with expert_fc1_manager as permuted_local_hidden_states:
+                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+        delay_expert_fc1_offload = self.expert_fc1_recompute and self.offload_expert_fc1
+        if self.offload_expert_fc1 and not delay_expert_fc1_offload:
+            fc1_output = off_interface.group_commit(
+                fc1_output,
+                name="expert_fc1",
+                forced_released_tensors=[permuted_local_hidden_states],
+                delay_offload=self.config.delay_offload_until_cuda_graph,
+            )
+
+        moe_act_manager = off_interface(self.offload_moe_act, fc1_output, "moe_act")
+
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
 
             # Whether activation function is interleaved GLU
@@ -696,82 +731,26 @@ class TEGroupedMLP(MegatronModule):
                 intermediate_parallel = intermediate_parallel.to(original_dtype)
             return intermediate_parallel
 
-        expert_fc1_manager = off_interface(
-            self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
-        )
-        combined_expert_fc1_moe_act_recompute = (
-            self.expert_fc1_recompute and self.activation_recompute
-        )
-        delay_expert_fc1_offload = self.expert_fc1_recompute and self.offload_expert_fc1
-
-        if combined_expert_fc1_moe_act_recompute:
-            assert (
-                not self.offload_moe_act
-            ), "expert_fc1 recompute cannot be combined with moe_act offload."
-            quantization = self.config.fp8 or self.config.fp4
-            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
-
-            def expert_fc1_and_moe_act_forward(permuted_local_hidden_states, permuted_probs):
-                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                    permuted_local_hidden_states, tokens_per_expert
-                )
-                return bias_act_func(fc1_output, bias_parallel, permuted_probs)
-
-            with expert_fc1_manager as permuted_local_hidden_states:
-                bias_act_output = self.expert_fc1_checkpoint.checkpoint(
-                    expert_fc1_and_moe_act_forward, permuted_local_hidden_states, permuted_probs
-                )
-            fc1_output = None
-        elif self.expert_fc1_recompute:
-            quantization = self.config.fp8 or self.config.fp4
-            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
-            bias_parallel = None
-
-            def expert_fc1_forward(permuted_local_hidden_states):
-                nonlocal bias_parallel
-                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                    permuted_local_hidden_states, tokens_per_expert
-                )
-                return fc1_output
-
-            with expert_fc1_manager as permuted_local_hidden_states:
-                fc1_output = self.expert_fc1_checkpoint.checkpoint(
-                    expert_fc1_forward, permuted_local_hidden_states
-                )
-        else:
-            with expert_fc1_manager as permuted_local_hidden_states:
-                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                    permuted_local_hidden_states, tokens_per_expert
-                )
-
-        if self.offload_expert_fc1 and not delay_expert_fc1_offload:
-            fc1_output = expert_fc1_manager.group_offload(
-                fc1_output,
-                forced_released_tensors=[permuted_local_hidden_states],
-                delay_offload=self.config.delay_offload_until_cuda_graph,
-            )
-
-        moe_act_manager = off_interface(self.offload_moe_act, fc1_output, "moe_act")
-
-        if self.activation_recompute and not combined_expert_fc1_moe_act_recompute:
+        if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with moe_act_manager as fc1_output:
                 bias_act_output = self.activation_checkpoint.checkpoint(
                     bias_act_func, fc1_output, bias_parallel, permuted_probs
                 )
-        elif not combined_expert_fc1_moe_act_recompute:
+        else:
             with moe_act_manager as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.expert_fc1_recompute:
             assert self.expert_fc1_checkpoint is not None
-            # When expert_fc1 and moe_act are both recomputed, this checkpoint returns
-            # bias_act_output and replays the full expert_fc1 -> moe_act dependency chain.
-            # Otherwise expert_fc1 alone restores fc1_output before its first consumer.
+            # When moe_act recompute is nested inside expert_fc1 recompute, activation
+            # recompute needs fc1_output restored before FC2 backward consumes
+            # bias_act_output. Register on output first so expert_fc1 recomputes before
+            # moe_act's output hook below.
             hook_tensor = output if self.activation_recompute else bias_act_output
             self.expert_fc1_checkpoint.discard_output_and_register_recompute(hook_tensor)
             self.expert_fc1_checkpoint = None
-        if self.activation_recompute and not combined_expert_fc1_moe_act_recompute:
+        if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 
         # For expert_fc1 recompute, commit the expert_fc1 offload after registering the

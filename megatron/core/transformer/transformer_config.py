@@ -514,8 +514,6 @@ class TransformerConfig(ModelParallelConfig):
     "moe": recompute the MoE layer.
     "expert_fc1": recompute the MoE expert FC1 projection output.
     "shared_experts": recompute the shared experts in the MoE layer.
-    When both "expert_fc1" and "moe_act" are selected, GroupedMLP recomputes them as one
-    dependency-ordered checkpoint.
     "qkv_linear", "attn_proj", "moe_act", "layernorm", "attn_norm", "mlp_norm",
     "mla_up_proj", and "expert_fc1" use output-discarding checkpointing.
     "core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.
