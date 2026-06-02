@@ -626,7 +626,9 @@ class TEGroupedMLP(MegatronModule):
         )
         if self.expert_fc1_recompute:
             quantization = self.config.fp8 or self.config.fp4
-            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
+            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(
+                fp8=quantization
+            )
             bias_parallel = None
 
             def expert_fc1_forward(permuted_local_hidden_states):
@@ -645,8 +647,7 @@ class TEGroupedMLP(MegatronModule):
                 fc1_output, bias_parallel = apply_module(self.linear_fc1)(
                     permuted_local_hidden_states, tokens_per_expert
                 )
-        delay_expert_fc1_offload = self.expert_fc1_recompute and self.offload_expert_fc1
-        if self.offload_expert_fc1 and not delay_expert_fc1_offload:
+        if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
                 fc1_output,
                 name="expert_fc1",
@@ -752,15 +753,6 @@ class TEGroupedMLP(MegatronModule):
             self.expert_fc1_checkpoint = None
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
-
-        # For expert_fc1 recompute, commit the expert_fc1 offload after registering the
-        # recompute hook so the offload backward group is active before saved inputs are read.
-        if delay_expert_fc1_offload:
-            output = expert_fc1_manager.group_offload(
-                output,
-                forced_released_tensors=[permuted_local_hidden_states],
-                delay_offload=self.config.delay_offload_until_cuda_graph,
-            )
 
         # Delay the offload of the moe act until after the linear_fc2 has been computed
         # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.

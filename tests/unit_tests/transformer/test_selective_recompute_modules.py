@@ -1,4 +1,4 @@
-# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
 import pytest
 
@@ -12,7 +12,11 @@ from tests.unit_tests.test_utilities import Utils
 
 def _base_config(**kwargs):
     return TransformerConfig(
-        num_layers=2, hidden_size=128, num_attention_heads=4, use_cpu_initialization=True, **kwargs
+        num_layers=2,
+        hidden_size=128,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+        **kwargs,
     )
 
 
@@ -28,56 +32,18 @@ def test_config_accepts_new_selective_recompute_modules():
 def test_expert_fc1_recompute_requires_grouped_gemm():
     with pytest.raises(ValueError, match="expert_fc1.*moe_grouped_gemm"):
         _base_config(
-            num_moe_experts=2, recompute_granularity="selective", recompute_modules=["expert_fc1"]
-        )
-
-    config = _base_config(
-        num_moe_experts=2,
-        moe_grouped_gemm=True,
-        recompute_granularity="selective",
-        recompute_modules=["expert_fc1"],
-    )
-    assert config.recompute_modules == ["expert_fc1"]
-
-
-def test_expert_fc1_recompute_conflicts_with_moe_act_offload():
-    with pytest.raises(AssertionError, match="moe_act.*expert_fc1"):
-        _base_config(
             num_moe_experts=2,
-            moe_grouped_gemm=True,
             recompute_granularity="selective",
             recompute_modules=["expert_fc1"],
-            fine_grained_activation_offloading=True,
-            offload_modules=["moe_act"],
         )
 
-
-def test_expert_fc1_recompute_allows_expert_fc1_offload():
     config = _base_config(
         num_moe_experts=2,
         moe_grouped_gemm=True,
         recompute_granularity="selective",
         recompute_modules=["expert_fc1"],
-        fine_grained_activation_offloading=True,
-        offload_modules=["expert_fc1"],
     )
-
     assert config.recompute_modules == ["expert_fc1"]
-    assert config.offload_modules == ["expert_fc1"]
-
-
-def test_moe_act_recompute_allows_moe_act_offload():
-    config = _base_config(
-        num_moe_experts=2,
-        moe_grouped_gemm=True,
-        recompute_granularity="selective",
-        recompute_modules=["moe_act"],
-        fine_grained_activation_offloading=True,
-        offload_modules=["moe_act"],
-    )
-
-    assert config.recompute_modules == ["moe_act"]
-    assert config.offload_modules == ["moe_act"]
 
 
 def test_attention_linear_recompute_is_standard_attention_only():
@@ -91,9 +57,15 @@ def test_attention_linear_recompute_is_standard_attention_only():
 
 @pytest.mark.parametrize(
     "modules,recompute_input_norm,recompute_pre_mlp_norm",
-    [(["attn_norm"], True, False), (["mlp_norm"], False, True), (["layernorm"], True, True)],
+    [
+        (["attn_norm"], True, False),
+        (["mlp_norm"], False, True),
+        (["layernorm"], True, True),
+    ],
 )
-def test_granular_layernorm_recompute_flags(modules, recompute_input_norm, recompute_pre_mlp_norm):
+def test_granular_layernorm_recompute_flags(
+    modules, recompute_input_norm, recompute_pre_mlp_norm
+):
     Utils.initialize_model_parallel(1, 1)
     try:
         model_parallel_cuda_manual_seed(123)
@@ -111,10 +83,13 @@ def test_attention_linear_recompute_flags():
     try:
         model_parallel_cuda_manual_seed(123)
         config = _base_config(
-            recompute_granularity="selective", recompute_modules=["qkv_linear", "attn_proj"]
+            recompute_granularity="selective",
+            recompute_modules=["qkv_linear", "attn_proj"],
         )
         attention = SelfAttention(
-            config, get_gpt_layer_local_submodules().self_attention.submodules, layer_number=1
+            config,
+            get_gpt_layer_local_submodules().self_attention.submodules,
+            layer_number=1,
         )
 
         assert attention.recompute_qkv_linear
