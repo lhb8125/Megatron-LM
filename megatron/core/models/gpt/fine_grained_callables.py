@@ -74,14 +74,8 @@ def should_free_input(name, is_moe, config, num_local_experts):
     # so we can free the input memory after the forward pass.
 
     # When low precision fp8/4 is enabled, the casted tensors are saved and the
-    # original bf16 tensors are safe to be freed. HybridEP is an exception when
-    # expert_fc1 recompute is enabled: dispatch_postprocess passes the dispatched
-    # tokens through as the expert input, and the recompute checkpoint saves that
-    # same storage for replay.
-    recompute_modules = set(config.recompute_modules or [])
-    free_mlp = (config.fp8 is not None or config.fp4 is not None) and not (
-        enable_hybridep and "expert_fc1" in recompute_modules
-    )
+    # original bf16 tensors are safe to be freed.
+    free_mlp = config.fp8 is not None or config.fp4 is not None
     if not free_mlp:
         # AlltoAll dispatcher with local_num_experts=1 and HybridEP both use identity
         # operation for `dispatch_postprocess`, hence the mlp inputs will be directly

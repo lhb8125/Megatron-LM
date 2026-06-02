@@ -1,10 +1,8 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-from megatron.core.models.gpt.fine_grained_callables import build_layer_callables, should_free_input
+from megatron.core.models.gpt.fine_grained_callables import build_layer_callables
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_submodules,
 )
@@ -21,41 +19,6 @@ from tests.unit_tests.a2a_overlap.utils import (
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
-
-
-def _free_input_config(**overrides):
-    values = {
-        "cuda_graph_modules": [],
-        "fp4": None,
-        "fp8": "e4m3",
-        "moe_flex_dispatcher_backend": "hybridep",
-        "moe_token_dispatcher_type": "flex",
-        "recompute_modules": [],
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
-
-
-def test_hybridep_expert_fc1_recompute_keeps_mlp_input():
-    config = _free_input_config(recompute_modules=["expert_fc1", "moe_act"])
-
-    assert not should_free_input("mlp", is_moe=True, config=config, num_local_experts=1)
-
-
-def test_hybridep_without_expert_fc1_recompute_can_free_fp8_mlp_input():
-    config = _free_input_config(recompute_modules=["moe_act"])
-
-    assert should_free_input("mlp", is_moe=True, config=config, num_local_experts=1)
-
-
-def test_alltoall_expert_fc1_recompute_can_free_fp8_mlp_input():
-    config = _free_input_config(
-        moe_flex_dispatcher_backend=None,
-        moe_token_dispatcher_type="alltoall",
-        recompute_modules=["expert_fc1", "moe_act"],
-    )
-
-    assert should_free_input("mlp", is_moe=True, config=config, num_local_experts=1)
 
 
 def run_model_ref_with_capture(model, input_tensors, iterations):
