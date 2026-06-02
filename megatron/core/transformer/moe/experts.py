@@ -741,16 +741,11 @@ class TEGroupedMLP(MegatronModule):
         else:
             with moe_act_manager as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
-        output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.expert_fc1_recompute:
             assert self.expert_fc1_checkpoint is not None
-            # When moe_act recompute is nested inside expert_fc1 recompute, activation
-            # recompute needs fc1_output restored before FC2 backward consumes
-            # bias_act_output. Register on output first so expert_fc1 recomputes before
-            # moe_act's output hook below.
-            hook_tensor = output if self.activation_recompute else bias_act_output
-            self.expert_fc1_checkpoint.discard_output_and_register_recompute(hook_tensor)
+            self.expert_fc1_checkpoint.discard_output_and_register_recompute(bias_act_output)
             self.expert_fc1_checkpoint = None
+        output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 
