@@ -447,21 +447,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         self.is_moe_layer = isinstance(self.mlp, MoELayer)
 
-        self.recompute_self_attn = False
-        self.self_attn_checkpoint = None
         self.recompute_input_layernorm = False
         self.recompute_pre_mlp_layernorm = False
         self.recompute_mlp = False
         if self.config.recompute_granularity == 'selective':
             assert self.config.recompute_modules is not None
-            if "self_attn" in self.config.recompute_modules:
-                self.recompute_self_attn = True
             if (
-                not self.recompute_self_attn
-                and (
-                    "layernorm" in self.config.recompute_modules
-                    or "attn_norm" in self.config.recompute_modules
-                )
+                "layernorm" in self.config.recompute_modules
+                or "attn_norm" in self.config.recompute_modules
             ):
                 if not isinstance(self.input_layernorm, IdentityOp):
                     self.recompute_input_layernorm = True
@@ -586,10 +579,12 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         )
         return get_transformer_layer_offset(config)
 
-    def _forward_self_attention(
+    def _forward_attention(
         self,
         hidden_states: Tensor,
         attention_mask: Optional[Tensor] = None,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
         rotary_pos_emb: Optional[Tensor] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
@@ -598,8 +593,38 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         inference_context: Optional[BaseInferenceContext] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[Tensor] = None,
+        padding_mask: Optional[Tensor] = None,
+        *,
+        inference_params: Optional[Any] = None,
     ):
-        """Run input layernorm, self-attention, and self-attention BDA."""
+        """
+        Perform a forward pass through the attention layer and the layernorms before and after
+        the attention operations.
+
+        Args:
+            hidden_states (Tensor): Input tensor of shape [s, b, h] where s is sequence length,
+                b is batch size, and h is hidden size.
+            attention_mask (Tensor): Mask tensor for self-attention.
+            context (Tensor, optional): Context tensor for cross-attention.
+            context_mask (Tensor, optional): Mask tensor for cross-attention.
+            rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
+            rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
+            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
+            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
+            attention_bias (Tensor, optional): Bias tensor for Q * K.T.
+            inference_context (object, optional): Parameters for inference-time optimizations.
+            packed_seq_params (object, optional): Parameters for packed sequence processing.
+            sequence_len_offset (Tensor, optional): Offset along sequence dimension
+                during inference.
+
+        Returns:
+            Tuple[Tensor, Tensor]: A tuple containing:
+                hidden_states (Tensor): Transformed hidden states before the MLP layernorm.
+                context (Tensor): Updated context tensor if cross-attention is used,
+                otherwise None.
+        """
+        inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # Optional Input Layer norm
         attn_norm_manager = self.off_interface(self.offload_attn_norm, hidden_states, "attn_norm")
@@ -669,11 +694,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             hidden_states = attention_output_with_bias[0]
         else:
             with self.bias_dropout_add_exec_handler():
-                hidden_states = self.self_attn_bda(
-                    self.training, self.config.bias_dropout_fusion
-                )(attention_output_with_bias, residual, self.hidden_dropout)
+                hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                    attention_output_with_bias, residual, self.hidden_dropout
+                )
         if hasattr(self.self_attention, "discard_recomputed_attn_proj_output"):
-            hidden_states = self.self_attention.discard_recomputed_attn_proj_output(hidden_states)
+            self.self_attention.discard_recomputed_attn_proj_output(hidden_states)
         nvtx_range_pop(suffix="self_attn_bda")
 
         # Delay the offload of the attention norm until after the self_attn_bda has been computed
@@ -681,90 +706,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         hidden_states = attn_norm_manager.group_offload(
             hidden_states, forced_released_tensors=[residual]
         )
-
-        return hidden_states
-
-    def _forward_attention(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Optional[Tensor] = None,
-        context: Optional[Tensor] = None,
-        context_mask: Optional[Tensor] = None,
-        rotary_pos_emb: Optional[Tensor] = None,
-        rotary_pos_cos: Optional[Tensor] = None,
-        rotary_pos_sin: Optional[Tensor] = None,
-        rotary_pos_cos_sin: Optional[Tensor] = None,
-        attention_bias: Optional[Tensor] = None,
-        inference_context: Optional[BaseInferenceContext] = None,
-        packed_seq_params: Optional[PackedSeqParams] = None,
-        sequence_len_offset: Optional[Tensor] = None,
-        padding_mask: Optional[Tensor] = None,
-        *,
-        inference_params: Optional[Any] = None,
-    ):
-        """
-        Perform a forward pass through the attention layer and the layernorms before and after
-        the attention operations.
-
-        Args:
-            hidden_states (Tensor): Input tensor of shape [s, b, h] where s is sequence length,
-                b is batch size, and h is hidden size.
-            attention_mask (Tensor): Mask tensor for self-attention.
-            context (Tensor, optional): Context tensor for cross-attention.
-            context_mask (Tensor, optional): Mask tensor for cross-attention.
-            rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
-            rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
-            rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
-            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
-            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
-            attention_bias (Tensor, optional): Bias tensor for Q * K.T.
-            inference_context (object, optional): Parameters for inference-time optimizations.
-            packed_seq_params (object, optional): Parameters for packed sequence processing.
-            sequence_len_offset (Tensor, optional): Offset along sequence dimension
-                during inference.
-
-        Returns:
-            Tuple[Tensor, Tensor]: A tuple containing:
-                hidden_states (Tensor): Transformed hidden states before the MLP layernorm.
-                context (Tensor): Updated context tensor if cross-attention is used,
-                otherwise None.
-        """
-        inference_context = deprecate_inference_params(inference_context, inference_params)
-
-        if self.recompute_self_attn and self.training:
-            quantization = self.config.fp8 or self.config.fp4
-            self.self_attn_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
-
-            def self_attn_forward(hidden_states):
-                return self._forward_self_attention(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    inference_context=inference_context,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    rotary_pos_cos_sin=rotary_pos_cos_sin,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    sequence_len_offset=sequence_len_offset,
-                )
-
-            hidden_states = self.self_attn_checkpoint.checkpoint(
-                self_attn_forward, hidden_states
-            )
-        else:
-            hidden_states = self._forward_self_attention(
-                hidden_states,
-                attention_mask=attention_mask,
-                inference_context=inference_context,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                rotary_pos_cos_sin=rotary_pos_cos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-            )
 
         # Optional Layer norm after self-attention
         pre_cross_attn_layernorm_output = apply_module(self.pre_cross_attn_layernorm)(hidden_states)
@@ -801,7 +742,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 attention_output_with_bias, residual, self.hidden_dropout
             )
         if hasattr(self.cross_attention, "discard_recomputed_attn_proj_output"):
-            hidden_states = self.cross_attention.discard_recomputed_attn_proj_output(hidden_states)
+            self.cross_attention.discard_recomputed_attn_proj_output(hidden_states)
 
         return hidden_states, context
 
@@ -858,9 +799,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Optional Layer norm post the cross-attention.
         pre_mlp_layernorm_output = self._forward_pre_mlp_layernorm(hidden_states)
-        pre_mlp_layernorm_output = self._prepare_self_attn_recompute_after_pre_mlp_layernorm(
-            pre_mlp_layernorm_output
-        )
 
         if isinstance(pre_mlp_layernorm_output, tuple):
             if len(pre_mlp_layernorm_output) != 2:
@@ -948,6 +886,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
 
         nvtx_range_pop(suffix="mlp")
+
         if (
             self.is_moe_layer
             and self.config.cuda_graph_impl == "transformer_engine"
@@ -962,51 +901,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 # path. So only register in one path is risky.
                 for tensor in mlp_output_with_bias:
                     self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(tensor)
-                if hasattr(self.self_attention, "commit_recomputed_attn_proj_offload"):
-                    mlp_output_with_bias = list(mlp_output_with_bias)
-                    mlp_output_with_bias[0] = (
-                        self.self_attention.commit_recomputed_attn_proj_offload(
-                            mlp_output_with_bias[0]
-                        )
-                    )
             return list(mlp_output_with_bias) + [residual]
         else:
-            output = self._forward_post_mlp(mlp_output_with_bias, residual)
-            output = self._discard_self_attn_output_after_mlp(output)
-            return output
-
-    def _prepare_self_attn_recompute_after_pre_mlp_layernorm(
-        self, pre_mlp_layernorm_output: Tensor | tuple[Tensor, Tensor]
-    ):
-        """Link pre-MLP norm replay to self-attention replay before saved inputs are read."""
-        if (
-            not self.recompute_self_attn
-            or not self.training
-            or self.self_attn_checkpoint is None
-        ):
-            return pre_mlp_layernorm_output
-
-        if self.recompute_pre_mlp_layernorm:
-            # pre_mlp_layernorm replay saves the self_attn output as its input. Restore the
-            # dependency explicitly before pre_mlp_layernorm reads saved inputs.
-            self.pre_mlp_norm_checkpoint.set_before_recompute(
-                self.self_attn_checkpoint.recompute_output
-            )
-            return pre_mlp_layernorm_output
-
-        return pre_mlp_layernorm_output
-
-    def _discard_self_attn_output_after_mlp(self, hook_tensor: Tensor):
-        """Discard self_attn output after the MLP BDA residual path has consumed it."""
-        if (
-            not self.recompute_self_attn
-            or not self.training
-            or self.self_attn_checkpoint is None
-        ):
-            return hook_tensor
-        self.self_attn_checkpoint.discard_output_and_register_recompute(hook_tensor)
-        self.self_attn_checkpoint = None
-        return hook_tensor
+            return self._forward_post_mlp(mlp_output_with_bias, residual)
 
     def _forward_post_mlp(
         self, mlp_output_with_bias: tuple[Tensor, Tensor | None], residual: Tensor
@@ -1032,12 +929,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
                 mlp_output_with_bias[0]
             )
-            if hasattr(self.self_attention, "commit_recomputed_attn_proj_offload"):
-                mlp_output = self.self_attention.commit_recomputed_attn_proj_offload(
-                    mlp_output_with_bias[0]
-                )
-                if mlp_output is not mlp_output_with_bias[0]:
-                    mlp_output_with_bias = (mlp_output, mlp_output_with_bias[1])
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -1705,9 +1596,6 @@ class MoETransformerLayer(TransformerLayer):
 
         self.mlp.fwd_execution_map = "route"
         pre_mlp_layernorm_output = self._forward_pre_mlp_layernorm(hidden_states)
-        pre_mlp_layernorm_output = self._prepare_self_attn_recompute_after_pre_mlp_layernorm(
-            pre_mlp_layernorm_output
-        )
         if isinstance(pre_mlp_layernorm_output, tuple):
             if len(pre_mlp_layernorm_output) != 2:
                 raise ValueError(
@@ -1774,9 +1662,7 @@ class MoETransformerLayer(TransformerLayer):
 
         self.mlp.fwd_execution_map = "postprocess"
         output = apply_module(self.mlp)(None, intermediate_tensors=(output, shared_expert_output))
-        output = self._forward_post_mlp((output, mlp_bias), residual)
-        output = self._discard_self_attn_output_after_mlp(output)
-        return output
+        return self._forward_post_mlp((output, mlp_bias), residual)
 
     def _forward_mlp(self, hidden_states, inference_context=None, padding_mask=None):
         """

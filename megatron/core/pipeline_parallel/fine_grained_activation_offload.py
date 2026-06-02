@@ -1401,13 +1401,6 @@ class FineGrainedActivationOffloadingInterface:
         return tensor
 
     @staticmethod
-    def group_commit(tensor, name, forced_released_tensors=None, delay_offload=False):
-        """Commit an offload group without an active interface instance."""
-        return fine_grained_offloading_group_commit(
-            tensor, name, forced_released_tensors, delay_offload
-        )
-
-    @staticmethod
     def mark_not_offload(tensor: torch.Tensor):
         """Mark the tensor as not offloadable."""
         PipelineOffloadManager.get_instance().mark_not_offload(tensor)
