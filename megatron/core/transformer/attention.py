@@ -374,16 +374,6 @@ class Attention(MegatronModule, ABC):
             self.config.recompute_granularity == 'selective'
             and "core_attn" in self.config.recompute_modules
         )
-        self.recompute_qkv_linear = (
-            self.config.recompute_granularity == 'selective'
-            and "qkv_linear" in self.config.recompute_modules
-        )
-        self.recompute_attn_proj = (
-            self.config.recompute_granularity == 'selective'
-            and "attn_proj" in self.config.recompute_modules
-        )
-        self.qkv_linear_checkpoint = None
-        self.attn_proj_checkpoint = None
 
         self.offload_qkv_linear = (
             self.config.fine_grained_activation_offloading
@@ -1123,36 +1113,13 @@ class Attention(MegatronModule, ABC):
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
         qkv_linear_manager = off_interface(self.offload_qkv_linear, hidden_states, "qkv_linear")
-        if self.recompute_qkv_linear and self.training:
-            if key_value_states is not None:
-                raise ValueError("qkv_linear recompute is only supported for self-attention.")
-            if not split_qkv:
-                raise ValueError(
-                    "qkv_linear recompute is not supported with fused_single_qkv_rope."
-                )
-            quantization = self.config.fp8 or self.config.fp4
-            self.qkv_linear_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
-
-            def qkv_linear_forward(hidden_states):
-                return self.get_query_key_value_tensors(
-                    hidden_states,
-                    key_value_states,
-                    split_qkv=split_qkv,
-                    output_gate=self.config.attention_output_gate,
-                )
-
-            with qkv_linear_manager as hidden_states:
-                qkv_output = self.qkv_linear_checkpoint.checkpoint(
-                    qkv_linear_forward, hidden_states
-                )
-        else:
-            with qkv_linear_manager as hidden_states:
-                qkv_output = self.get_query_key_value_tensors(
-                    hidden_states,
-                    key_value_states,
-                    split_qkv=split_qkv,
-                    output_gate=self.config.attention_output_gate,
-                )
+        with qkv_linear_manager as hidden_states:
+            qkv_output = self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                split_qkv=split_qkv,
+                output_gate=self.config.attention_output_gate,
+            )
         # `qkv_output` may be a tuple; commit supports tuple/list and will keep structure.
         qkv_output = qkv_linear_manager.group_offload(qkv_output, forced_released_tensors=[])
         attn_mask_type = self.attn_mask_type
@@ -1351,10 +1318,6 @@ class Attention(MegatronModule, ABC):
             core_attn_out = core_attn_manager.group_offload(
                 core_attn_out, forced_released_tensors=[query, key, value]
             )
-        if self.recompute_qkv_linear and self.training:
-            assert self.qkv_linear_checkpoint is not None
-            self.qkv_linear_checkpoint.discard_output_and_register_recompute(core_attn_out)
-            self.qkv_linear_checkpoint = None
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
@@ -1374,32 +1337,12 @@ class Attention(MegatronModule, ABC):
         # =================
         nvtx_range_push(suffix="linear_proj")
         attn_proj_manager = off_interface(self.offload_attn_proj, core_attn_out, "attn_proj")
-        if self.recompute_attn_proj and self.training:
-            quantization = self.config.fp8 or self.config.fp4
-            self.attn_proj_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=quantization)
-            bias = None
-
-            def attn_proj_forward(core_attn_out):
-                nonlocal bias
-                output, bias = apply_module(self.linear_proj)(core_attn_out)
-                return output
-
-            with attn_proj_manager as core_attn_out:
-                output = self.attn_proj_checkpoint.checkpoint(attn_proj_forward, core_attn_out)
-        else:
-            with attn_proj_manager as core_attn_out:
-                output, bias = apply_module(self.linear_proj)(core_attn_out)
+        with attn_proj_manager as core_attn_out:
+            output, bias = apply_module(self.linear_proj)(core_attn_out)
         output = attn_proj_manager.group_offload(output, forced_released_tensors=[core_attn_out])
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
-
-    def discard_recomputed_attn_proj_output(self, hook_tensor):
-        """Discard attention projection output and restore it before BDA backward."""
-        if self.recompute_attn_proj and self.training:
-            assert self.attn_proj_checkpoint is not None
-            self.attn_proj_checkpoint.discard_output_and_register_recompute(hook_tensor)
-            self.attn_proj_checkpoint = None
 
     @jit_fuser
     def _apply_output_gate(self, x, gate):

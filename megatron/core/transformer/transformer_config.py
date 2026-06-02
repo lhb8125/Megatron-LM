@@ -499,23 +499,16 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "qkv_linear", "attn_proj", "moe_act", "layernorm",
-    "attn_norm", "mlp_norm", "mla_up_proj", "mlp", "moe", "expert_fc1", "shared_experts".
+    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
-    "qkv_linear": recompute the attention QKV projection output.
-    "attn_proj": recompute the attention output projection output.
     "moe_act": recompute the MoE MLP activation function.
     "layernorm": recompute the input_layernorm and pre_mlp_layernorm.
-    "attn_norm": recompute the input_layernorm.
-    "mlp_norm": recompute the pre_mlp_layernorm.
     "mla_up_proj": recompute the MLA up projection and RoPE applying parts.
     "mlp": recompute the dense MLP submodule.
     "moe": recompute the MoE layer.
-    "expert_fc1": recompute the MoE expert FC1 projection output.
     "shared_experts": recompute the shared experts in the MoE layer.
-    "qkv_linear", "attn_proj", "moe_act", "layernorm", "attn_norm", "mlp_norm",
-    "mla_up_proj", and "expert_fc1" use output-discarding checkpointing.
+    "moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing,
     "core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.
     """
 
@@ -1590,16 +1583,11 @@ class TransformerConfig(ModelParallelConfig):
             if len(self.recompute_modules) > 0:
                 allowed_modules = {
                     "core_attn",
-                    "qkv_linear",
-                    "attn_proj",
                     "moe_act",
                     "layernorm",
-                    "attn_norm",
-                    "mlp_norm",
                     "mla_up_proj",
                     "mlp",
                     "moe",
-                    "expert_fc1",
                     "shared_experts",
                 }
                 invalid_modules = set(self.recompute_modules) - allowed_modules
@@ -1613,22 +1601,10 @@ class TransformerConfig(ModelParallelConfig):
                     "moe_act in recompute_modules is only supported with moe_grouped_gemm."
                 )
 
-            if "expert_fc1" in self.recompute_modules and not self.moe_grouped_gemm:
-                raise ValueError(
-                    "expert_fc1 in recompute_modules is only supported with moe_grouped_gemm."
-                )
-
             if "mla_up_proj" in self.recompute_modules and not self.multi_latent_attention:
                 raise ValueError(
                     "mla_up_proj in recompute_modules is only supported with "
                     "multi_latent_attention."
-                )
-
-            attention_linear_modules = {"qkv_linear", "attn_proj"} & set(self.recompute_modules)
-            if attention_linear_modules and self.multi_latent_attention:
-                raise ValueError(
-                    f"{attention_linear_modules} in recompute_modules are only supported with "
-                    "standard attention. Use mla_up_proj for MLA projection recompute."
                 )
 
             if "core_attn" in self.recompute_modules:
@@ -1649,13 +1625,10 @@ class TransformerConfig(ModelParallelConfig):
                     )
 
             if self.fp8:
-                layernorm_recompute_modules = {"layernorm", "attn_norm", "mlp_norm"}
-                if "moe_act" in self.recompute_modules or (
-                    layernorm_recompute_modules & set(self.recompute_modules)
-                ):
+                if "moe_act" in self.recompute_modules or "layernorm" in self.recompute_modules:
                     if self.fp8_recipe == 'delayed':
                         raise ValueError(
-                            "Delayed scaling does not support moe_act or layernorm recompute "
+                            "Delayed scaling does not support moe_act and layernorm recompute "
                             "for fp8."
                         )
                     if not is_te_min_version("2.6.0dev0"):

@@ -253,11 +253,6 @@ class TEGroupedMLP(MegatronModule):
             self.config.recompute_granularity == 'selective'
             and "moe_act" in self.config.recompute_modules
         )
-        self.expert_fc1_recompute = (
-            self.config.recompute_granularity == 'selective'
-            and "expert_fc1" in self.config.recompute_modules
-        )
-        self.expert_fc1_checkpoint = None
         if self.activation_recompute and (self.config.fp8 or self.config.fp4):
             from megatron.core.extensions.transformer_engine import set_save_original_input
 
@@ -621,41 +616,18 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        expert_fc1_manager = off_interface(
+        with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
-        )
-        if self.expert_fc1_recompute:
-            quantization = self.config.fp8 or self.config.fp4
-            self.expert_fc1_checkpoint = tensor_parallel.CheckpointWithoutOutput(
-                fp8=quantization
+        ) as permuted_local_hidden_states:
+            fc1_output, bias_parallel = apply_module(self.linear_fc1)(
+                permuted_local_hidden_states, tokens_per_expert
             )
-            bias_parallel = None
-
-            def expert_fc1_forward(permuted_local_hidden_states):
-                nonlocal bias_parallel
-                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                    permuted_local_hidden_states, tokens_per_expert
-                )
-                return fc1_output
-
-            with expert_fc1_manager as permuted_local_hidden_states:
-                fc1_output = self.expert_fc1_checkpoint.checkpoint(
-                    expert_fc1_forward, permuted_local_hidden_states
-                )
-        else:
-            with expert_fc1_manager as permuted_local_hidden_states:
-                fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                    permuted_local_hidden_states, tokens_per_expert
-                )
         if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
                 fc1_output,
                 name="expert_fc1",
                 forced_released_tensors=[permuted_local_hidden_states],
-                delay_offload=self.config.delay_offload_until_cuda_graph,
             )
-
-        moe_act_manager = off_interface(self.offload_moe_act, fc1_output, "moe_act")
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
 
@@ -741,10 +713,6 @@ class TEGroupedMLP(MegatronModule):
         else:
             with moe_act_manager as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
-        if self.expert_fc1_recompute:
-            assert self.expert_fc1_checkpoint is not None
-            self.expert_fc1_checkpoint.discard_output_and_register_recompute(bias_act_output)
-            self.expert_fc1_checkpoint = None
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)

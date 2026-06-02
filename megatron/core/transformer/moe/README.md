@@ -367,13 +367,8 @@ Memory optimization is critical for large-scale MoE training, as MoE models main
 #### Fine-grained Recomputation
 A new output-discarding checkpointing method is also supported. This method discards the output memory of certain submodules during the forward pass and recomputes them during the backward pass, which can save memory compared to standard checkpointing. This can be enabled for specific submodules using the `--recompute-granularity selective --recompute-modules [submodule1, submodule2, ...]` argument. The supported submodules are:
 
-* `attn_norm`: Recompute the input_layernorm (when it is not `IdentityOp`).
-* `mlp_norm`: Recompute the pre_mlp_layernorm (when it is not `IdentityOp`).
-* `layernorm`: Recompute both `attn_norm` and `mlp_norm`.
-* `qkv_linear`: Recompute the standard attention QKV projection output.
-* `attn_proj`: Recompute the standard attention output projection output.
 * `moe_act`: Recompute the GroupedMLP activation function.
-* `expert_fc1`: Recompute the GroupedMLP expert FC1 projection output.
+* `layernorm`: Recompute the input_layernorm and pre_mlp_layernorm (when they are not `IdentityOp`).
 * `mla_up_proj`: Recompute the MLA up projection and RoPE applying parts.
 * `core_attn`: Recompute the core attention submodule (uses standard checkpointing rather than output-discarding).
 * `mlp`: Recompute the dense MLP submodule (uses standard checkpointing rather than output-discarding) which is useful for hybrid-models like DeepSeek-V3.

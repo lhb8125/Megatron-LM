@@ -13,7 +13,7 @@ Contributed in collaboration with RedNote.
 
 Fine-grained activation offloading reduces GPU memory by asynchronously transferring activations to CPU at the granularity of individual submodules within a transformer layer. Unlike layer-level offloading, it allows precise control over which activations to offload, enabling a tradeoff between memory savings and PCIe bandwidth overhead.
 
-Supported offloading modules are `"attn_norm"`, `"qkv_linear"`, `"core_attn"`, `"attn_proj"`, `"mlp_norm"`, `"expert_fc1"`, and `"moe_act"`. They can be combined with fine-grained recomputation to free almost all activations for a transformer layer on the device.
+Supported offloading modules are `"attn_norm"`, `"core_attn"`, `"attn_proj"`, `"mlp_norm"`, `"expert_fc1"`, and `"moe_act"`. They can be combined with fine-grained recomputation to free almost all activations for a transformer layer on the device.
 
 ## User Guide
 
