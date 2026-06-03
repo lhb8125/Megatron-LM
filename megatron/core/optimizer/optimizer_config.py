@@ -170,6 +170,9 @@ class OptimizerConfig:
     fp8_recipe: Optional[str] = None
     """The type of fp8 recipe will affect the processing logic inside distributed optimizer."""
 
+    fp4_param_gather: bool = False
+    """If true, model params may be held as NVFP4 tensors for distributed optimizer gather."""
+
     fp16: bool = False
     """If true, train with fp16 mixed precision training. Defaults to False."""
 
@@ -404,7 +407,12 @@ class OptimizerConfig:
             self.use_precision_aware_optimizer
             and (
                 self.main_params_dtype != torch.float32
-                or (self.fp8_recipe is None or self.fp8_recipe == "delayed")
+                # NVFP4 param-gather with FP32 main params follows the same
+                # MCore-managed main-param path as non-delayed FP8 params.
+                or (
+                    (self.fp8_recipe is None or self.fp8_recipe == "delayed")
+                    and not self.fp4_param_gather
+                )
                 or self.optimizer_cpu_offload
             )
         )
