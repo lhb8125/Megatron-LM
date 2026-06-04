@@ -56,6 +56,17 @@ else:
 _MOE_LAYER_WISE_LOGGING_TRACKER: dict = {}
 
 
+def should_skip_shared_expert_cudagraph_capture(config: TransformerConfig) -> bool:
+    """Return True when shared experts should stay outside TE partial MoE graphs."""
+    return (
+        getattr(config, "use_megatron_fsdp", False)
+        and config.cuda_graph_impl == "transformer_engine"
+        and CudaGraphScope.moe_router in (config.cuda_graph_scope or [])
+        and config.moe_shared_expert_intermediate_size is not None
+        and not config.moe_shared_expert_overlap
+    )
+
+
 def switch_load_balancing_loss_func(
     probs: torch.Tensor,
     tokens_per_expert: torch.Tensor,
@@ -1321,8 +1332,12 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         ctx.weight_dtype = weight.dtype
         inp_shape = inp.shape
         inp = inp.view(-1, inp_shape[-1])
+        use_te_gemm = (
+            te_general_gemm is not None
+            and router_dtype != torch.float64
+        )
 
-        if te_general_gemm is not None and router_dtype != torch.float64:
+        if use_te_gemm:
             output = te_general_gemm(weight, inp, router_dtype, layout="TN", bias=bias)
             output = output[0]
         elif bias is None:
@@ -1354,8 +1369,12 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         grad_shape = grad_output.shape
         inp = inp.view(-1, inp_shape[-1])
         grad_output = grad_output.view(-1, grad_shape[-1])
+        use_te_gemm = (
+            te_general_gemm is not None
+            and ctx.router_dtype != torch.float64
+        )
 
-        if te_general_gemm is not None and ctx.router_dtype != torch.float64:
+        if use_te_gemm:
             grad_input = te_general_gemm(
                 weight.to(ctx.router_dtype), grad_output, ctx.router_dtype, layout="NN", grad=True
             )
@@ -1469,6 +1488,7 @@ class MoECudaGraphPartialCaptureSignal(Exception):
             # "token_dispatcher.cudagraph_attrs".
             outputs = [self.kwargs['hidden_states'], self.kwargs['probs']]
             valid_cudagraph_attrs = []
+            probs_output = self.kwargs['probs']
             for attr_name in self.moe_layer.token_dispatcher.cudagraph_attrs:
                 hier_attr_name = attr_name.split('.')
                 attr = self.moe_layer.token_dispatcher
@@ -1477,6 +1497,14 @@ class MoECudaGraphPartialCaptureSignal(Exception):
                     if attr is None:
                         break
                 if isinstance(attr, torch.Tensor):
+                    if (
+                        attr_name.endswith('token_probs')
+                        and isinstance(probs_output, torch.Tensor)
+                        and attr.shape == probs_output.shape
+                        and attr.dtype == probs_output.dtype
+                        and attr.data_ptr() == probs_output.data_ptr()
+                    ):
+                        continue
                     outputs.append(attr)
                     valid_cudagraph_attrs.append(attr_name)
             if self.moe_layer.token_dispatcher.valid_cudagraph_attrs is None:

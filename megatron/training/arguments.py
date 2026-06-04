@@ -1744,7 +1744,12 @@ def core_transformer_config_from_args(args, config_class=None):
         kw_args['kitchen_attention_backend'] = args.kitchen_attention_backend
 
     # Return config.
-    return config_class(**kw_args)
+    config = config_class(**kw_args)
+    # Megatron-FSDP is a distributed wrapper setting rather than a TransformerConfig
+    # dataclass field. Partial MoE CUDA graph needs to know it at runtime when
+    # deciding whether shared experts must stay outside the graph.
+    config.use_megatron_fsdp = getattr(args, 'use_megatron_fsdp', False)
+    return config
 
 
 def _add_transformer_engine_args(parser):
@@ -2705,6 +2710,11 @@ def _add_distributed_args(parser):
                        default=False, help='If set, average directly in data-parallel communication collective.')
     group.add_argument('--overlap-param-gather', action='store_true',
                        default=False, help='If set, overlap param all-gather in distributed optimizer.')
+    group.add_argument('--fsdp-all-gather-in-start-param-sync',
+                       action=argparse.BooleanOptionalAction, default=True,
+                       help='If set, Megatron FSDP starts the first parameter all-gather in '
+                       'start_param_sync. Use --no-fsdp-all-gather-in-start-param-sync to '
+                       'let forward pre-hooks issue the first all-gather instead.')
     group.add_argument('--overlap-param-gather-with-optimizer-step', action='store_true',
                        default=False, help='If set, overlap param all-gather of first bucket with optimizer step.')
     group.add_argument('--no-align-param-gather', action='store_false',
