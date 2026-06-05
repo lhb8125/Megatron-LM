@@ -2551,6 +2551,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         def copy_group_grads(model_groups, shard_main_groups):
             for model_group, shard_main_group in zip(model_groups, shard_main_groups):
                 for model_param, shard_main_param in zip(model_group, shard_main_group):
+                    if shard_main_param is None:
+                        # Quantized params can use None placeholders when the optimizer
+                        # owns their update path directly.
+                        continue
 
                     param_range_map = self._get_model_param_range_map(model_param)
                     param_range = param_range_map["param"]
