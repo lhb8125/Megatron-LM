@@ -1139,7 +1139,9 @@ def pretrain(
         }
         for name, delta in startup_timers.items():
             timers(name, log_level=0).set_elapsed(delta)
-        timers.log(list(startup_timers.keys()), barrier=True)
+        skip_startup_timers_log = os.getenv("MCORE_SKIP_STARTUP_TIMERS_LOG", "").lower()
+        if skip_startup_timers_log not in ("1", "true", "yes", "on"):
+            timers.log(list(startup_timers.keys()), barrier=True)
 
         # Print rank 0's absolute timestamps
         startup_timestamps = {
