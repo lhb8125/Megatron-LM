@@ -1358,7 +1358,12 @@ class ChainedOptimizer(MegatronOptimizer):
         if found_inf_flag:
             return False, None, None
 
-        grad_norm = self.get_grad_norm()
+        should_clip_grad = any(
+            not (hasattr(optimizer, 'is_stub_optimizer') and optimizer.is_stub_optimizer)
+            and optimizer.config.clip_grad > 0.0
+            for optimizer in self.chained_optimizers
+        )
+        grad_norm = self.get_grad_norm() if should_clip_grad else None
 
         # Clip gradients.
         for optimizer in self.chained_optimizers:
