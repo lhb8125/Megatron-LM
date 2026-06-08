@@ -80,6 +80,11 @@ def _shutdown_distributed_process_group():
         except Exception:
             pass
         _cleanup_trace("cuda synchronize end")
+        if os.environ.get("MCORE_FORCE_EXIT_AFTER_TRAINING") == "1":
+            _cleanup_trace("force process exit")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
         _cleanup_trace("abort process group start")
         torch.distributed.distributed_c10d._abort_process_group()
         _cleanup_trace("abort process group end")
