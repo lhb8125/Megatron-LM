@@ -80,9 +80,9 @@ def _shutdown_distributed_process_group():
         except Exception:
             pass
         _cleanup_trace("cuda synchronize end")
-        _cleanup_trace("destroy process group start")
-        torch.distributed.destroy_process_group()
-        _cleanup_trace("destroy process group end")
+        _cleanup_trace("abort process group start")
+        torch.distributed.distributed_c10d._abort_process_group()
+        _cleanup_trace("abort process group end")
 
 
 try:
