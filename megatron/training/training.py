@@ -63,14 +63,27 @@ _LEGACY_TRAIN_START_TIME = time.time()  # NOTE(asolergi-nv): Legacy timestamp
 import torch
 
 
+def _cleanup_trace(message):
+    try:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    except Exception:
+        rank = 0
+    if rank == 0:
+        print(f"[pretrain cleanup] {message}", flush=True)
+
+
 def _shutdown_distributed_process_group():
     """Destroy the default process group so all ranks exit cleanly."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
+        _cleanup_trace("cuda synchronize start")
         try:
             torch.cuda.synchronize()
         except Exception:
             pass
+        _cleanup_trace("cuda synchronize end")
+        _cleanup_trace("destroy process group start")
         torch.distributed.destroy_process_group()
+        _cleanup_trace("destroy process group end")
 
 
 try:
@@ -1460,22 +1473,36 @@ def pretrain(
 
     wandb_writer = get_wandb_writer()
     if wandb_writer:
+        _cleanup_trace("wandb finish start")
         wandb_writer.finish()
+        _cleanup_trace("wandb finish end")
 
+    _cleanup_trace("async save finalize start")
     ft_integration.on_checkpointing_start()
     maybe_finalize_async_save(blocking=True, terminate=True)
     ft_integration.on_checkpointing_end(is_async_finalization=True)
+    _cleanup_trace("async save finalize end")
 
+    _cleanup_trace("one logger metrics start")
     one_logger and one_logger.log_metrics(
         {'app_finish_time': one_logger_utils.get_timestamp_in_ms()}
     )
+    _cleanup_trace("one logger metrics end")
 
     if args.perform_rl_step:
+        _cleanup_trace("rl inference shutdown start")
         rl_utils.rl_inference_interface_shutdown()
+        _cleanup_trace("rl inference shutdown end")
 
+    _cleanup_trace("ft shutdown start")
     ft_integration.shutdown()
+    _cleanup_trace("ft shutdown end")
+    _cleanup_trace("one logger finish start")
     one_logger_utils.finish()
+    _cleanup_trace("one logger finish end")
+    _cleanup_trace("distributed shutdown start")
     _shutdown_distributed_process_group()
+    _cleanup_trace("distributed shutdown end")
 
 
 def update_train_iters(args):
