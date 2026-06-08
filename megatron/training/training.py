@@ -62,6 +62,17 @@ _LEGACY_TRAIN_START_TIME = time.time()  # NOTE(asolergi-nv): Legacy timestamp
 
 import torch
 
+
+def _shutdown_distributed_process_group():
+    """Destroy the default process group so all ranks exit cleanly."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        torch.distributed.destroy_process_group()
+
+
 try:
     from megatron.rl import rl_utils
 
@@ -1464,6 +1475,7 @@ def pretrain(
 
     ft_integration.shutdown()
     one_logger_utils.finish()
+    _shutdown_distributed_process_group()
 
 
 def update_train_iters(args):
@@ -3634,6 +3646,7 @@ def train(
         one_logger_utils.finish()
         if args.perform_rl_step:
             rl_utils.rl_inference_interface_shutdown()
+        _shutdown_distributed_process_group()
         sys.exit(exit_code)
 
     return iteration, num_floating_point_operations_so_far
