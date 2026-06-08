@@ -68,8 +68,7 @@ def _cleanup_trace(message):
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     except Exception:
         rank = 0
-    if rank == 0:
-        print(f"[pretrain cleanup] {message}", flush=True)
+    print(f"[pretrain cleanup][rank {rank}] {message}", flush=True)
 
 
 def _shutdown_distributed_process_group():
