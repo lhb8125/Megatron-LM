@@ -4,12 +4,23 @@
 
 import gc
 import logging
+import os
 
 import torch
 
 from megatron.core.tensor_parallel.random import get_all_rng_states
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_enabled():
+    return os.environ.get("MCORE_DEBUG_FULL_CG") == "1"
+
+
+def _debug_rank():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return -1
 
 # The below functions traverse through nested data structures (tuples, lists, dicts)
 # present in src and creates a deep copy where all PyTorch tensors are cloned,
@@ -158,10 +169,26 @@ class FullCudaGraphWrapper:
 
         training = not kwargs['forward_only']
         data_iterator = kwargs['data_iterator']
+        training_str = 'training' if training else 'validation'
+        if _debug_enabled():
+            logger.info(
+                "[fullcg-debug] rank=%s stage=%s iter=%s before_data_read graph=%s",
+                _debug_rank(),
+                training_str,
+                self.curr_iter(training_str),
+                FullCudaGraphWrapper.cuda_graph[training_str] is not None,
+            )
         data_list = self.data_read(data_iterator, model, training, num_microbatches)
+        if _debug_enabled():
+            logger.info(
+                "[fullcg-debug] rank=%s stage=%s iter=%s after_data_read graph=%s",
+                _debug_rank(),
+                training_str,
+                self.curr_iter(training_str),
+                FullCudaGraphWrapper.cuda_graph[training_str] is not None,
+            )
         kwargs['data_iterator'] = data_list
 
-        training_str = 'training' if training else 'validation'
         curr_iteration = self.curr_iter(training_str)
         if curr_iteration == self.cuda_graph_warmup_steps:
             logger.info(f'Capture CUDA graph for {training_str}!!!')
@@ -184,10 +211,47 @@ class FullCudaGraphWrapper:
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
+            if _debug_enabled():
+                logger.info(
+                    "[fullcg-debug] rank=%s stage=%s iter=%s before_eager",
+                    _debug_rank(),
+                    training_str,
+                    curr_iteration,
+                )
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
+            if _debug_enabled():
+                logger.info(
+                    "[fullcg-debug] rank=%s stage=%s iter=%s after_eager",
+                    _debug_rank(),
+                    training_str,
+                    curr_iteration,
+                )
         else:
+            if _debug_enabled():
+                logger.info(
+                    "[fullcg-debug] rank=%s stage=%s iter=%s before_replay",
+                    _debug_rank(),
+                    training_str,
+                    curr_iteration,
+                )
             FullCudaGraphWrapper.cuda_graph[training_str].replay()
+            if os.environ.get("MCORE_DEBUG_FULL_CG_SYNC") == "1":
+                torch.cuda.synchronize()
+            if _debug_enabled():
+                logger.info(
+                    "[fullcg-debug] rank=%s stage=%s iter=%s after_replay",
+                    _debug_rank(),
+                    training_str,
+                    curr_iteration,
+                )
         self.next_iter(training_str)
+        if _debug_enabled():
+            logger.info(
+                "[fullcg-debug] rank=%s stage=%s iter=%s after_next_iter",
+                _debug_rank(),
+                training_str,
+                self.curr_iter(training_str),
+            )
         return FullCudaGraphWrapper.result[training_str]
 
     def curr_iter(self, stage):

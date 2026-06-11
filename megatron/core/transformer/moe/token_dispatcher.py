@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
@@ -1121,6 +1122,20 @@ class _HybridEPManager(_DispatchManager):
         is_current_stream_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
         if is_current_stream_capturing is not None and is_current_stream_capturing():
             self._cuda_graph_handles.append(self.handle)
+            if os.environ.get("MCORE_DEBUG_HYBRIDEP_HANDLE") == "1":
+                rank = (
+                    torch.distributed.get_rank()
+                    if torch.distributed.is_available() and torch.distributed.is_initialized()
+                    else -1
+                )
+                handle_size = len(self.handle) if hasattr(self.handle, "__len__") else "NA"
+                logger.info(
+                    "[hybridep-debug] rank=%s retained_cuda_graph_handle count=%s type=%s size=%s",
+                    rank,
+                    len(self._cuda_graph_handles),
+                    type(self.handle).__name__,
+                    handle_size,
+                )
         self.handle = None
         if not self.drop_and_pad:
             self.num_permuted_tokens = None
