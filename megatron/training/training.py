@@ -3115,10 +3115,21 @@ def train(
 
         def finalize_model_grads_with_state_reload(*fmg_args, **fmg_kwargs):
             # Reload offloaded states for all DistributedOptimizer instances
+            reloaded_optimizers = []
             for optim_instance in optimizer.chained_optimizers:
                 if isinstance(optim_instance, DistributedOptimizer):
                     optim_instance.reload_offloaded_states()
-            return finalize_model_grads(*fmg_args, **fmg_kwargs)
+                    reloaded_optimizers.append(optim_instance)
+            result = finalize_model_grads(*fmg_args, **fmg_kwargs)
+            if (
+                args.cuda_graph_impl == "local"
+                and CudaGraphScope.full_iteration in args.cuda_graph_scope
+            ):
+                # Full-iteration CUDA graph capture requires all side-stream work
+                # launched inside forward/backward to rejoin before capture_end.
+                for optim_instance in reloaded_optimizers:
+                    optim_instance.sync_reloaded_states()
+            return result
 
         config.finalize_model_grads_func = finalize_model_grads_with_state_reload
     else:

@@ -2882,6 +2882,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         if self._state_offloader is not None:
             self._state_offloader.reload()
 
+    def sync_reloaded_states(self):
+        """Wait for async reload of offloaded states to complete."""
+        if self._state_offloader is not None:
+            self._state_offloader.sync_before_step()
+
     def release_offloaded_gpu_states(self):
         """Release GPU memory after D2H completes. For delayed release case."""
         if self._state_offloader is not None:
