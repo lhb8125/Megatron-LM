@@ -4058,6 +4058,14 @@ class AllGatherPipeline:
         )  # Sort in order of unique bucket ID.
         ag_buckets = list(current_ag_buckets)
         parameter_groups = self.buffer.parameter_groups
+
+        # Current buckets may already be READY_TO_USE, especially during activation
+        # recomputation where forward all-gather has just materialized them. Mark
+        # them live before filtering EMPTY buckets so lazy recycling from another
+        # bucket gather cannot release a current bucket before the caller waits on it.
+        for bucket_id in current_ag_buckets:
+            self.bucket_can_be_released[self.get_bucket_key(bucket_id, bwd)] = False
+
         if self.buffer.ddp_config.fsdp_double_buffer:
             double_buf_units = set()
             for bucket_id in current_ag_buckets:
@@ -4154,7 +4162,7 @@ class AllGatherPipeline:
         if len(ag_buckets) == 0:
             return
 
-        # Do not release the buckets that are being all-gathered.
+        # Do not release newly issued prefetch buckets while they are being all-gathered.
         for bucket_id in ag_buckets:
             self.bucket_can_be_released[self.get_bucket_key(bucket_id, bwd)] = False
 
