@@ -69,6 +69,14 @@ def _full_cg_debug(message, iteration=None):
         print(f"[trainstep-debug][rank {rank}][iter {iteration}] {message}", flush=True)
 
 
+def _full_iteration_cuda_graph_captured(args):
+    return (
+        args.cuda_graph_impl == "local"
+        and CudaGraphScope.full_iteration in args.cuda_graph_scope
+        and FullCudaGraphWrapper.cuda_graph['training'] is not None
+    )
+
+
 def _cleanup_trace(message):
     try:
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
@@ -2095,9 +2103,14 @@ def train_step(
         # This needs to be done after _copy_main_params_to_param_buffer().
         # Separate offload and release to allow early D2H transfer to overlap with other operations.
         if args.offload_optimizer_states:
-            for optim_instance in optimizer.chained_optimizers:
-                if isinstance(optim_instance, DistributedOptimizer):
-                    optim_instance.release_offloaded_gpu_states()
+            if _full_iteration_cuda_graph_captured(args):
+                _full_cg_debug(
+                    "skip_release_offloaded_gpu_states_after_full_cg_capture", iteration
+                )
+            else:
+                for optim_instance in optimizer.chained_optimizers:
+                    if isinstance(optim_instance, DistributedOptimizer):
+                        optim_instance.release_offloaded_gpu_states()
 
         if config.sequence_packing_scheduler is not None:
             # This wrapper is designed to support DP-balanced THD and dynamic-CP.
