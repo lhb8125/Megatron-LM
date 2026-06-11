@@ -62,13 +62,6 @@ _LEGACY_TRAIN_START_TIME = time.time()  # NOTE(asolergi-nv): Legacy timestamp
 
 import torch
 
-
-def _full_cg_debug(message, iteration=None):
-    if os.environ.get("MCORE_DEBUG_FULL_CG") == "1":
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-        print(f"[trainstep-debug][rank {rank}][iter {iteration}] {message}", flush=True)
-
-
 def _full_iteration_cuda_graph_captured(args):
     return (
         args.cuda_graph_impl == "local"
@@ -2099,15 +2092,11 @@ def train_step(
                     if isinstance(optim_instance, DistributedOptimizer):
                         optim_instance._copy_main_params_to_param_buffer()
 
-        # Release GPU memory for offloaded optimizer states.
-        # This needs to be done after _copy_main_params_to_param_buffer().
-        # Separate offload and release to allow early D2H transfer to overlap with other operations.
+        # Release GPU memory for offloaded optimizer states after param-buffer
+        # copies, unless a full-iteration graph has captured H2D destinations
+        # that must keep stable storage across later replays.
         if args.offload_optimizer_states:
-            if _full_iteration_cuda_graph_captured(args):
-                _full_cg_debug(
-                    "skip_release_offloaded_gpu_states_after_full_cg_capture", iteration
-                )
-            else:
+            if not _full_iteration_cuda_graph_captured(args):
                 for optim_instance in optimizer.chained_optimizers:
                     if isinstance(optim_instance, DistributedOptimizer):
                         optim_instance.release_offloaded_gpu_states()
@@ -2148,7 +2137,6 @@ def train_step(
             adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
             force_all_reduce=save_wgrads_in_this_iteration,
         )
-        _full_cg_debug("after_forward_backward", iteration)
         if save_dgrads_in_this_iteration:
             save_dgrads(iteration + 1)
             disable_dgrad_logging()
@@ -2199,30 +2187,24 @@ def train_step(
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    _full_cg_debug("before_optimizer_step", iteration)
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    _full_cg_debug("after_optimizer_step", iteration)
 
     # get max attention logit for logging and run clip_qk()
     # Part of MuonClip Optimizer step
     log_max_attention_logit = 0
     if args.qk_clip or args.log_max_attention_logit:
         log_max_attention_logit = clip_qk(model, log_max_only=not args.qk_clip)
-    _full_cg_debug("after_qk_clip", iteration)
 
     timers('optimizer').stop()
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
     # so we must gather across mp ranks
     update_successful = logical_and_across_model_parallel_group(update_successful)
-    _full_cg_debug("after_update_successful_reduce", iteration)
     # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
     # so we must gather across mp ranks
     grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
-    _full_cg_debug("after_grad_norm_reduce", iteration)
     if args.log_num_zeros_in_grad:
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
-        _full_cg_debug("after_num_zeros_reduce", iteration)
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
@@ -2254,7 +2236,6 @@ def train_step(
                 torch.distributed.all_reduce(
                     val, group=mpu.get_data_parallel_group(with_context_parallel=True)
                 )
-                _full_cg_debug(f"after_loss_reduce:{key}", iteration)
                 loss_reduced[key] = val[0] / val[1]
             elif val[0].numel() == 1:
                 # legacy behavior, we average over the number of microbatches
