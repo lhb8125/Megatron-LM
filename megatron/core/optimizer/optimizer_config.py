@@ -403,18 +403,16 @@ class OptimizerConfig:
         # handling while FP8 delayed scaling is an exception because the Adam optimizer in
         # TransformerEngine supports it in the kernel computation.
         # This is also the flag to determine the usage of param.grad or param.decoupled_grad
-        self.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = (
-            self.use_precision_aware_optimizer
-            and (
-                self.main_params_dtype != torch.float32
-                # NVFP4 param-gather with FP32 main params follows the same
-                # MCore-managed main-param path as non-delayed FP8 params.
-                or (
-                    (self.fp8_recipe is None or self.fp8_recipe == "delayed")
-                    and not self.fp4_param_gather
-                )
-                or self.optimizer_cpu_offload
-            )
+        use_mcore_main_param_path = (
+            self.fp8_recipe is None or self.fp8_recipe == "delayed"
+        ) and not self.fp4_param_gather
+        use_pa_optimizer = self.use_precision_aware_optimizer
+        self.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = use_pa_optimizer and (
+            self.main_params_dtype != torch.float32
+            # NVFP4 param-gather with FP32 main params follows the same
+            # MCore-managed main-param path as non-delayed FP8 params.
+            or use_mcore_main_param_path
+            or self.optimizer_cpu_offload
         )
 
         if self.fp8_recipe == "mxfp8":

@@ -2712,7 +2712,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         model_param_to_state_dict_param_map = {}
         for chunk_idx, model_chunk in enumerate(self.model_chunks):
             chunk_state_dict = state_dict_list[chunk_idx]
- 
+
             # Some modules need to synthesize a runtime parameter from multiple unfused
             # state-dict tensors (e.g. FusedMLASelfAttention concatenates linear_q_down_proj
             # + linear_kv_down_proj into the fused linear_qkv_down_proj). Give every module
@@ -2720,11 +2720,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for module_path, module in model_chunk.named_modules():
                 synth = getattr(module, '_synthesize_fused_qkv_down_weight', None)
                 if callable(synth):
-                    module_path = module_path[len('module.module.'):]
+                    module_path = module_path[len('module.module.') :]
                     synth(chunk_state_dict, f"{module_path}." if module_path else "")
- 
+
             names_in_state_dict = set(chunk_state_dict.keys())
- 
+
             # Some layer specs declare a sharded_state_dict_keys_map that rewrites runtime
             # parameter prefixes to canonical checkpoint prefixes (e.g. fused-LN MLA stores its
             # LN scale/bias on linear_qkv_down_proj at runtime, but the checkpoint canonicalizes
@@ -2740,7 +2740,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     continue
                 layer_prefix = f"{layer_path}." if layer_path else ""
                 canonical_rewrites.append((layer_prefix, list(key_map.items())))
- 
+
             def _candidate_state_dict_names(name):
                 candidates = [name]
                 for layer_prefix, mappings in canonical_rewrites:
@@ -2749,9 +2749,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     sub = name[len(layer_prefix) :]
                     for old_prefix, new_prefix in mappings:
                         if sub.startswith(old_prefix):
-                            candidates.append(
-                                f"{layer_prefix}{new_prefix}{sub[len(old_prefix) :]}"
-                            )
+                            candidates.append(f"{layer_prefix}{new_prefix}{sub[len(old_prefix) :]}")
                             break
                 return candidates
 
