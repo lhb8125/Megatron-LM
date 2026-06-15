@@ -487,6 +487,22 @@ def test_layer_input_offloading_requires_uniform_full_recompute():
         )
 
 
+def test_layer_input_offloading_is_mutually_exclusive_with_module_offload():
+    """layer_input offloading cannot be combined with module-internal activation offload."""
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=128,
+            num_attention_heads=4,
+            fine_grained_activation_offloading=True,
+            offload_modules=["layer_input", "qkv_linear"],
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+            recompute_modules=[],
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for offloading tests.")
 def test_backward_commit_prefetches_next_reload_before_group_start(monkeypatch):
     """Backward commit should prefetch the next group before group-start backward runs."""
@@ -564,8 +580,7 @@ def test_te_checkpoint_resizes_fgao_reloaded_input(monkeypatch):
             sum(
                 1
                 for inp in detached_inputs
-                if torch.is_tensor(inp)
-                and getattr(inp, "_mcore_fgao_resize_after_backward", False)
+                if torch.is_tensor(inp) and getattr(inp, "_mcore_fgao_resize_after_backward", False)
             )
         )
         return original_resize(detached_inputs)
@@ -579,12 +594,7 @@ def test_te_checkpoint_resizes_fgao_reloaded_input(monkeypatch):
         return (inp * inp).sum()
 
     loss = te_ext.te_checkpoint(
-        forward_func,
-        False,
-        None,
-        None,
-        x,
-        release_fgao_reloaded_inputs=True,
+        forward_func, False, None, None, x, release_fgao_reloaded_inputs=True
     )
     loss.backward()
     torch.cuda.synchronize()

@@ -473,6 +473,7 @@ class PipelineOffloadManager:
         # Sometimes we need to delay the offloading and launch it later.
         # The delayed offload groups are stored in a queue.
         self._delayed_offload_groups = []
+        self._te_cpu_offload_context_stack = []
         self.reset()
 
         self._saved_tensors_hooks = saved_tensors_hooks(
@@ -519,9 +520,10 @@ class PipelineOffloadManager:
 
     def reset(self):
         """Reset manager state for a new training iteration."""
-        self._inside_context = False
+        self.inside_context = False
         self._cur_forward_chunk = None
         self._cur_backward_chunk = None
+        self._te_cpu_offload_context_stack = []
         # Reset CPU tensor pool to reuse all CPU tensors for next iteration
         if hasattr(self, '_cpu_tensor_pool'):
             self._cpu_tensor_pool.reset()
@@ -783,32 +785,41 @@ class PipelineOffloadManager:
         if tensor is not None:
             tensor._do_not_offload = True
 
-    def __enter__(self):
+    def __enter__(self, name: Optional[str] = None):
         """Enter context manager to enable activation offloading hooks."""
         debug_rank("----__enter__")
-        if self._cur_forward_chunk is None or not self.cur_forward_chunk().do_offload:
+        cur_forward_chunk = self.cur_forward_chunk()
+        if cur_forward_chunk is None or not cur_forward_chunk.do_offload:
             return
-        from megatron.core.extensions.transformer_engine import cpu_offload
 
-        if cpu_offload is not None:
+        # layer_input offloads checkpoint inputs through PyTorch saved-tensor hooks,
+        # not TE activation markers. Keep TE's global flag off for that mode so TE
+        # ops such as GroupedLinear keep bulk allocation enabled.
+        enable_te_cpu_offload = name != "layer_input"
+        if enable_te_cpu_offload:
+            from megatron.core.extensions.transformer_engine import cpu_offload
+
+            if cpu_offload is None:
+                raise RuntimeError("TE CPU offload is not available")
             cpu_offload.CPUOffloadEnabled = True
-        else:
-            raise RuntimeError("TE CPU offload is not available")
+        self._te_cpu_offload_context_stack.append(enable_te_cpu_offload)
         self.inside_context = True
         self._saved_tensors_hooks.__enter__()
 
     def __exit__(self, *args: Any):
         """Exit context manager and restore original tensor saving behavior."""
         debug_rank("----__exit__")
-        if self._cur_forward_chunk is None or not self.cur_forward_chunk().do_offload:
+        if not self._te_cpu_offload_context_stack:
             return
-        from megatron.core.extensions.transformer_engine import cpu_offload
 
-        if cpu_offload is not None:
+        enabled_te_cpu_offload = self._te_cpu_offload_context_stack.pop()
+        if enabled_te_cpu_offload and not any(self._te_cpu_offload_context_stack):
+            from megatron.core.extensions.transformer_engine import cpu_offload
+
+            if cpu_offload is None:
+                raise RuntimeError("TE CPU offload is not available")
             cpu_offload.CPUOffloadEnabled = False
-        else:
-            raise RuntimeError("TE CPU offload is not available")
-        self.inside_context = False
+        self.inside_context = bool(self._te_cpu_offload_context_stack)
         self._saved_tensors_hooks.__exit__()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
@@ -1392,7 +1403,7 @@ class FineGrainedActivationOffloadingInterface:
             self.tensor = fine_grained_offloading_group_start(
                 self.tensor, self.name, self.max_offloaded_tensors
             )
-            PipelineOffloadManager.get_instance().__enter__()
+            PipelineOffloadManager.get_instance().__enter__(self.name)
         return self.tensor
 
     def __exit__(self, *args: Any):
