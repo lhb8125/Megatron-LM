@@ -97,12 +97,17 @@ def set_ideal_affinity_for_current_gpu():
     try:
         import cuda.bindings.driver as cuda_driver
         import cuda.bindings.runtime as cuda_runtime
-    except:
+    except (ImportError, ModuleNotFoundError):
         try:
             import cuda.cuda as cuda_driver
             import cuda.cudart as cuda_runtime
-        except:
-            raise RuntimeError("Please install cuda-python to enable GPU affinity setting")
+        except (ImportError, ModuleNotFoundError):
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                "Skipping GPU affinity setting because cuda-python is not installed.",
+            )
+            return
     import pynvml
 
     # Get current CUDA device ID
