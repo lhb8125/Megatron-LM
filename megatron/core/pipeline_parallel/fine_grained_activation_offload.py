@@ -95,6 +95,22 @@ def _debug_interesting_tensor(tensor):
     )
 
 
+def _te_do_not_offload(tensor):
+    """Return whether TE marked a tensor-like object as non-offloadable."""
+    if getattr(tensor, "_TE_do_not_offload", False):
+        return True
+    if not hasattr(tensor, "get_data_tensors"):
+        return False
+    try:
+        data_tensors = tensor.get_data_tensors()
+    except Exception:  # pragma: no cover - best effort for third-party tensor wrappers
+        return False
+    return any(
+        data_tensor is not None and getattr(data_tensor, "_TE_do_not_offload", False)
+        for data_tensor in data_tensors
+    )
+
+
 def print_offload_summary_table(total_offload_bytes: Dict[str, int]):
     """
     Print an ASCII table summarizing offload bytes across all ranks.
@@ -986,7 +1002,7 @@ class ChunkOffloadHandler:
         reason = None
         if not self._can_manage_tensor_for_offload(tensor):
             reason = "not_manageable"
-        elif getattr(tensor, "_TE_do_not_offload", False):
+        elif _te_do_not_offload(tensor):
             reason = "te_do_not_offload"
         elif tensor.numel() < self.min_offloaded_tensor_size:
             reason = "below_min_size"
