@@ -1,5 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import os
 from collections import defaultdict, deque
 from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
@@ -9,6 +10,8 @@ import torch
 # CPU offload implementation for pipeline parallelism
 DEBUG = False
 DEBUG_RANK = 0
+DEBUG_MXFP8_FGAO = os.getenv("MCORE_DEBUG_MXFP8_FGAO", "0") == "1"
+DEBUG_MXFP8_FGAO_RANK = int(os.getenv("MCORE_DEBUG_MXFP8_FGAO_RANK", "0"))
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
@@ -22,6 +25,74 @@ def debug_rank(message):
     assert torch.distributed.is_initialized()
     if torch.distributed.get_rank() == DEBUG_RANK:
         print(message)
+
+
+def _debug_mxfp8_fgao(message):
+    """Print focused MXFP8/FGAO debug output for one rank."""
+    # pylint: disable=bad-builtin
+    if not DEBUG_MXFP8_FGAO:
+        return
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if torch.distributed.get_rank() != DEBUG_MXFP8_FGAO_RANK:
+            return
+    print(f"[MCORE_DEBUG_MXFP8_FGAO][fgao] {message}", flush=True)
+
+
+def _debug_flag_summary(tensor):
+    """Return compact offload-related flags for a tensor-like object."""
+    flags = []
+    for attr in ("_TE_do_not_offload", "activation_offloading", "needs_force_clear"):
+        if hasattr(tensor, attr):
+            flags.append(f"{attr}={getattr(tensor, attr)}")
+    return ",".join(flags) if flags else "-"
+
+
+def _debug_tensor_summary(tensor):
+    """Summarize tensor-like objects without materializing/dequantizing data."""
+    if tensor is None:
+        return "None"
+    fields = [f"type={type(tensor).__module__}.{type(tensor).__name__}"]
+    for attr in ("shape", "dtype", "device"):
+        try:
+            fields.append(f"{attr}={getattr(tensor, attr)}")
+        except Exception:  # pragma: no cover - debug-only best effort
+            pass
+    fields.append(f"flags={_debug_flag_summary(tensor)}")
+    quantizer = getattr(tensor, "_quantizer", None)
+    if quantizer is None and hasattr(tensor, "_get_quantizer"):
+        try:
+            quantizer = tensor._get_quantizer()
+        except Exception:  # pragma: no cover - debug-only best effort
+            quantizer = None
+    if quantizer is not None:
+        fields.append(f"quantizer={type(quantizer).__module__}.{type(quantizer).__name__}")
+    if hasattr(tensor, "get_data_tensors"):
+        try:
+            data_tensors = tensor.get_data_tensors()
+        except Exception as exc:  # pragma: no cover - debug-only best effort
+            fields.append(f"data_tensors_error={type(exc).__name__}")
+        else:
+            data_flags = []
+            for idx, data_tensor in enumerate(data_tensors):
+                if data_tensor is None:
+                    data_flags.append(f"{idx}:None")
+                else:
+                    data_flags.append(f"{idx}:{_debug_flag_summary(data_tensor)}")
+            fields.append("data_flags=[" + ";".join(data_flags) + "]")
+    return " ".join(fields)
+
+
+def _debug_interesting_tensor(tensor):
+    """Return whether a tensor is relevant to MXFP8/FGAO weight-save debugging."""
+    if tensor is None:
+        return False
+    type_name = f"{type(tensor).__module__}.{type(tensor).__name__}"
+    return (
+        "MXFP8" in type_name
+        or "Float8" in type_name
+        or hasattr(tensor, "get_data_tensors")
+        or hasattr(tensor, "_TE_do_not_offload")
+    )
 
 
 def print_offload_summary_table(total_offload_bytes: Dict[str, int]):
@@ -871,12 +942,18 @@ class ChunkOffloadHandler:
     def tensor_push(self, tensor):
         """Push tensor to the offload handler."""
         if not self._can_manage_tensor_for_offload(tensor):
+            if _debug_interesting_tensor(tensor):
+                _debug_mxfp8_fgao(f"tensor_push passthrough {_debug_tensor_summary(tensor)}")
             return tensor
 
         # Assign unique tag based on group index and position within group
         tensor_tag = (self._offloaded_group_index, self._tensor_count_current_group)
         self._tensor_count_current_group += 1
         self.offload_groups[self._offloaded_group_index - 1].push_tensor(tensor_tag, tensor)
+        if _debug_interesting_tensor(tensor):
+            _debug_mxfp8_fgao(
+                f"tensor_push managed tag={tensor_tag} {_debug_tensor_summary(tensor)}"
+            )
         debug_rank(f"--------tensor_push {tensor_tag}")
         return tensor_tag
 
@@ -884,13 +961,20 @@ class ChunkOffloadHandler:
         """Pop tensor from the offload handler."""
         if isinstance(tensor_tag, torch.Tensor):
             debug_rank(f"--------tensor_pop passthrough tensor {tensor_tag.shape}")
+            if _debug_interesting_tensor(tensor_tag):
+                _debug_mxfp8_fgao(f"tensor_pop passthrough {_debug_tensor_summary(tensor_tag)}")
             return tensor_tag
         debug_rank(f"--------tensor_pop {tensor_tag}")
         group_id, idx = tensor_tag
         tensor = self.offload_groups[group_id - 1].pop_tensor(tensor_tag)
         # If tensor is offloaded (stored as tuple), reload it
         if isinstance(tensor, tuple):
+            _debug_mxfp8_fgao(f"tensor_pop reload tag={tensor_tag}")
             tensor = self.reload(tensor)
+        if _debug_interesting_tensor(tensor):
+            _debug_mxfp8_fgao(
+                f"tensor_pop restored tag={tensor_tag} {_debug_tensor_summary(tensor)}"
+            )
         debug_rank(f"--------tensor_pop {tensor.shape}")
         return tensor
 
@@ -899,16 +983,24 @@ class ChunkOffloadHandler:
         debug_rank(
             f"tensor_need_offloading_checker {getattr(tensor, 'offloading_activation', None)}"
         )
+        reason = None
         if not self._can_manage_tensor_for_offload(tensor):
-            return False
-        if getattr(tensor, "_TE_do_not_offload", False):
-            return False
-        if tensor.numel() < self.min_offloaded_tensor_size:
-            return False
+            reason = "not_manageable"
+        elif getattr(tensor, "_TE_do_not_offload", False):
+            reason = "te_do_not_offload"
+        elif tensor.numel() < self.min_offloaded_tensor_size:
+            reason = "below_min_size"
         # Respect tensor's offload preference if specified
-        if hasattr(tensor, "offloading_activation") and not tensor.offloading_activation:
-            return False
-        return True
+        elif hasattr(tensor, "offloading_activation") and not tensor.offloading_activation:
+            reason = "activation_flag_false"
+
+        decision = reason is None
+        if _debug_interesting_tensor(tensor):
+            _debug_mxfp8_fgao(
+                f"need_offload={decision} reason={reason or 'yes'} "
+                f"{_debug_tensor_summary(tensor)}"
+            )
+        return decision
 
     def bulk_offload_group(self):
         """offload a group of tensors recorded in tensor_push()."""

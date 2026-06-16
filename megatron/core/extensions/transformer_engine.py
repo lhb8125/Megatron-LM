@@ -86,6 +86,186 @@ except ImportError:
 _TE_CONFIG_TYPE_KEY = "transformer_engine_config_type"
 
 
+def _debug_mxfp8_fgao_enabled() -> bool:
+    """Whether to install focused MXFP8/FGAO debug hooks."""
+    return os.getenv("MCORE_DEBUG_MXFP8_FGAO", "0") == "1"
+
+
+def _debug_mxfp8_fgao_rank() -> int:
+    """Rank that should emit focused MXFP8/FGAO debug logs."""
+    return int(os.getenv("MCORE_DEBUG_MXFP8_FGAO_RANK", "0"))
+
+
+def _debug_mxfp8_fgao_print(message: str) -> None:
+    """Print focused MXFP8/FGAO debug output for one rank."""
+    # pylint: disable=bad-builtin
+    if not _debug_mxfp8_fgao_enabled():
+        return
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        if torch.distributed.get_rank() != _debug_mxfp8_fgao_rank():
+            return
+    print(f"[MCORE_DEBUG_MXFP8_FGAO][te-linear] {message}", flush=True)
+
+
+def _debug_mxfp8_fgao_flag_summary(tensor: Any) -> str:
+    """Return compact offload-related flags for a tensor-like object."""
+    flags = []
+    for attr in ("_TE_do_not_offload", "activation_offloading", "needs_force_clear"):
+        if hasattr(tensor, attr):
+            flags.append(f"{attr}={getattr(tensor, attr)}")
+    return ",".join(flags) if flags else "-"
+
+
+def _debug_mxfp8_fgao_tensor_summary(tensor: Any) -> str:
+    """Summarize tensor-like objects without materializing/dequantizing data."""
+    if tensor is None:
+        return "None"
+    fields = [f"type={type(tensor).__module__}.{type(tensor).__name__}"]
+    for attr in ("shape", "dtype", "device"):
+        try:
+            fields.append(f"{attr}={getattr(tensor, attr)}")
+        except Exception:  # pragma: no cover - debug-only best effort
+            pass
+    fields.append(f"flags={_debug_mxfp8_fgao_flag_summary(tensor)}")
+    quantizer = getattr(tensor, "_quantizer", None)
+    if quantizer is None and hasattr(tensor, "_get_quantizer"):
+        try:
+            quantizer = tensor._get_quantizer()
+        except Exception:  # pragma: no cover - debug-only best effort
+            quantizer = None
+    if quantizer is not None:
+        fields.append(f"quantizer={type(quantizer).__module__}.{type(quantizer).__name__}")
+    if hasattr(tensor, "get_data_tensors"):
+        try:
+            data_tensors = tensor.get_data_tensors()
+        except Exception as exc:  # pragma: no cover - debug-only best effort
+            fields.append(f"data_tensors_error={type(exc).__name__}")
+        else:
+            data_flags = []
+            for idx, data_tensor in enumerate(data_tensors):
+                if data_tensor is None:
+                    data_flags.append(f"{idx}:None")
+                else:
+                    data_flags.append(f"{idx}:{_debug_mxfp8_fgao_flag_summary(data_tensor)}")
+            fields.append("data_flags=[" + ";".join(data_flags) + "]")
+    return " ".join(fields)
+
+
+def _debug_mxfp8_fgao_interesting_tensor(tensor: Any) -> bool:
+    """Return whether a tensor is relevant to MXFP8/FGAO weight-save debugging."""
+    if tensor is None:
+        return False
+    type_name = f"{type(tensor).__module__}.{type(tensor).__name__}"
+    return (
+        "MXFP8" in type_name
+        or "Float8" in type_name
+        or hasattr(tensor, "get_data_tensors")
+        or hasattr(tensor, "_TE_do_not_offload")
+    )
+
+
+def _install_mxfp8_fgao_debug_hooks() -> None:
+    """Install env-gated Transformer Engine Linear debug wrappers."""
+    if not _debug_mxfp8_fgao_enabled() or not HAVE_TE:
+        return
+    try:
+        from transformer_engine.pytorch.module import linear as te_linear
+    except Exception as exc:  # pragma: no cover - debug-only best effort
+        _debug_mxfp8_fgao_print(f"failed to import TE linear module: {type(exc).__name__}: {exc}")
+        return
+
+    if getattr(te_linear, "_mcore_debug_mxfp8_fgao_installed", False):
+        return
+
+    max_lines = int(os.getenv("MCORE_DEBUG_MXFP8_FGAO_MAX_LINES", "240"))
+    line_count = {"value": 0}
+
+    def maybe_print(message: str, force: bool = False) -> None:
+        if not force and line_count["value"] >= max_lines:
+            return
+        line_count["value"] += 1
+        _debug_mxfp8_fgao_print(message)
+
+    original_forward_impl = te_linear._linear_forward_impl
+    original_backward = te_linear._linear_backward
+
+    def wrapped_forward_impl(args):
+        result = original_forward_impl(args)
+        try:
+            tensors_to_save = result[2]
+            wt_save = tensors_to_save[1] if len(tensors_to_save) > 1 else None
+            new_workspace = result[1]
+            if (
+                _debug_mxfp8_fgao_interesting_tensor(wt_save)
+                or _debug_mxfp8_fgao_interesting_tensor(new_workspace)
+                or getattr(args, "cache_weight", False)
+            ):
+                maybe_print(
+                    "forward "
+                    f"fp8={getattr(args, 'fp8', None)} "
+                    f"cpu_offloading={getattr(args, 'cpu_offloading', None)} "
+                    f"is_first_microbatch={getattr(args, 'is_first_microbatch', None)} "
+                    f"cache_weight={getattr(args, 'cache_weight', None)} "
+                    f"quantizer={type(getattr(args, 'weight_quantizer', None)).__name__} "
+                    f"weight={_debug_mxfp8_fgao_tensor_summary(getattr(args, 'weight', None))} "
+                    f"weight_workspace="
+                    f"{_debug_mxfp8_fgao_tensor_summary(getattr(args, 'weight_workspace', None))} "
+                    f"wt_save={_debug_mxfp8_fgao_tensor_summary(wt_save)} "
+                    f"new_workspace={_debug_mxfp8_fgao_tensor_summary(new_workspace)}"
+                )
+        except Exception as exc:  # pragma: no cover - debug-only best effort
+            maybe_print(f"forward debug failed: {type(exc).__name__}: {exc}", force=True)
+        return result
+
+    def wrapped_backward(args):
+        try:
+            weight_fp8 = getattr(args, "weight_fp8", None)
+            saved_weight = getattr(args, "saved_weight", None)
+            grad_output = getattr(args, "grad_output", None)
+            if (
+                _debug_mxfp8_fgao_interesting_tensor(weight_fp8)
+                or _debug_mxfp8_fgao_interesting_tensor(saved_weight)
+                or _debug_mxfp8_fgao_interesting_tensor(grad_output)
+            ):
+                maybe_print(
+                    "backward-pre "
+                    f"fp8={getattr(args, 'fp8', None)} "
+                    f"cpu_offloading={getattr(args, 'cpu_offloading', None)} "
+                    f"is_first_microbatch={getattr(args, 'is_first_microbatch', None)} "
+                    f"recipe={type(getattr(args, 'fp8_recipe', None)).__name__} "
+                    f"weight_quantizer={type(getattr(args, 'weight_quantizer', None)).__name__} "
+                    f"weight_fp8={_debug_mxfp8_fgao_tensor_summary(weight_fp8)} "
+                    f"saved_weight={_debug_mxfp8_fgao_tensor_summary(saved_weight)} "
+                    f"grad_output={_debug_mxfp8_fgao_tensor_summary(grad_output)}"
+                )
+        except Exception as exc:  # pragma: no cover - debug-only best effort
+            maybe_print(f"backward-pre debug failed: {type(exc).__name__}: {exc}", force=True)
+
+        try:
+            return original_backward(args)
+        except Exception as exc:
+            maybe_print(
+                "backward-exception "
+                f"{type(exc).__name__}: {exc} "
+                f"weight_fp8="
+                f"{_debug_mxfp8_fgao_tensor_summary(getattr(args, 'weight_fp8', None))} "
+                f"saved_weight="
+                f"{_debug_mxfp8_fgao_tensor_summary(getattr(args, 'saved_weight', None))} "
+                f"grad_output="
+                f"{_debug_mxfp8_fgao_tensor_summary(getattr(args, 'grad_output', None))}",
+                force=True,
+            )
+            raise
+
+    te_linear._linear_forward_impl = wrapped_forward_impl
+    te_linear._linear_backward = wrapped_backward
+    te_linear._mcore_debug_mxfp8_fgao_installed = True
+    _debug_mxfp8_fgao_print("installed TE Linear debug wrappers")
+
+
+_install_mxfp8_fgao_debug_hooks()
+
+
 class TransformerEngineConfigType(enum.Enum):
     """Configuration object types in config dictionary"""
 
