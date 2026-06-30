@@ -464,10 +464,13 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
 
 For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
 the allocator `free` event but retains the buffer's tensor/view object. The
-first-microbatch trace can therefore assign one stable physical slot to
-non-overlapping layer buffers. After planning, each retained view is rebound to
-its planned address before graph capture; graph replay keeps that address while
-the recorded kernel order preserves the traced reuse lifetime.
+trace spans the complete combined 1F1B iteration, including forward-only,
+steady-state overlap, and backward-only phases, so buffers are shared only when
+their lifetimes do not overlap in any phase. A logically released trace buffer
+is resurrected in place when a later microbatch uses the same key. After the
+last backward-only phase, each retained view is rebound to its planned address
+before graph capture; graph replay keeps that address while the recorded kernel
+order preserves the traced reuse lifetime.
 
 ### 4.5 Gradient sync suppression — `no_sync()`
 

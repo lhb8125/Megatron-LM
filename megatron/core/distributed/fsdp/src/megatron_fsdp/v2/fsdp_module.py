@@ -142,6 +142,9 @@ class _FSDPRootContext:
     enable_full_iteration_cuda_graph: bool = False
     """True when full-iteration CUDA graph capture needs stable FSDP buffers."""
 
+    defer_trace_pool_plan: bool = False
+    """Trace the complete externally managed schedule before planning slots."""
+
     cuda_graph_stream: Optional[torch.cuda.Stream] = None
     """Side stream for CUDA graph capture/replay.  Created lazily on the
     first forward pre-hook and shared across all FSDP modules."""
@@ -538,6 +541,7 @@ class FSDPModule:
         bucket_allocator: BucketAllocator,
         enable_cuda_graph: bool = False,
         enable_full_iteration_cuda_graph: bool = False,
+        defer_trace_pool_plan: bool = False,
     ):
         """Initialize FSDP state and mark nested FSDP modules as non-root.
 
@@ -590,6 +594,7 @@ class FSDPModule:
             enable_unshard_prefetch=enable_unshard_prefetch,
             enable_async_reduce_grad=enable_async_reduce_grad,
             enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
+            defer_trace_pool_plan=defer_trace_pool_plan,
             _reversed_order=list(reversed(forward_order)),
             bucket_allocator=bucket_allocator,
         )

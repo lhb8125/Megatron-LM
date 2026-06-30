@@ -693,7 +693,12 @@ class DataParallelBuffer:
         caching-allocator behaviour.
         """
         if self.is_distributed:
-            if self._unsharded_buffer is None:
+            trace_storage_was_released = (
+                self._unsharded_buffer is not None
+                and getattr(self.allocator, "phase", None) == "trace"
+                and self._unsharded_buffer._typed_storage()._size() == 0
+            )
+            if self._unsharded_buffer is None or trace_storage_was_released:
                 bucket = self.allocator.allocate(
                     key=self.alloc_key,
                     size=self.buffer_index.bucket_meta.size,

@@ -284,28 +284,47 @@ def mfsdp_post_backward_final_callback(root_module: nn.Module):
     for module in ctx.forward_order:
         module._fsdp_pre_backward_done = False
 
-    # ---- trace → optimized transition (first micro-batch only) --------
-    if isinstance(ctx.bucket_allocator, TracePoolAllocator):
-        bucket_alloc = ctx.bucket_allocator
-        if bucket_alloc.phase == "trace":
-            if torch.distributed.get_rank() == 0:
-                logger.debug(bucket_alloc.dump_trace())
-                for m in ctx.forward_order:
-                    logger.debug(f"module_id={id(m)}, module_name={m._fsdp_module_name}")
-            bucket_alloc.plan()
-            rebound_grad_buffers = 0
-            for module in ctx.forward_order:
-                for param_group in module._fsdp_param_groups:
-                    if param_group.rebind_full_iteration_grad_buffer():
-                        rebound_grad_buffers += 1
-            if rebound_grad_buffers and torch.distributed.get_rank() == 0:
-                logger.debug(
-                    "Rebound %s full-iteration CUDA graph grad buffers to "
-                    "TracePoolAllocator planned slots",
-                    rebound_grad_buffers,
-                )
-        elif bucket_alloc.phase != "optimized":
-            raise ValueError(f"Unexpected bucket allocator phase: {bucket_alloc.phase}")
+    if not ctx.defer_trace_pool_plan:
+        mfsdp_finalize_trace_pool(root_module)
+
+
+def mfsdp_finalize_trace_pool(root_module: nn.Module) -> None:
+    """Plan traced slots and rebind retained full-iteration gradient views."""
+    if not isinstance(root_module, FSDPModule):
+        raise TypeError(
+            "mfsdp_finalize_trace_pool only supports FSDPModule, "
+            f"got {type(root_module).__name__}"
+        )
+    if not root_module._fsdp_state._is_root:
+        raise RuntimeError("mfsdp_finalize_trace_pool requires root FSDP module")
+
+    ctx = root_module._fsdp_root_context
+    if not isinstance(ctx.bucket_allocator, TracePoolAllocator):
+        return
+
+    bucket_alloc = ctx.bucket_allocator
+    if bucket_alloc.phase == "optimized":
+        return
+    if bucket_alloc.phase != "trace":
+        raise ValueError(f"Unexpected bucket allocator phase: {bucket_alloc.phase}")
+
+    if torch.distributed.get_rank() == 0:
+        logger.debug(bucket_alloc.dump_trace())
+        for module in ctx.forward_order:
+            logger.debug(f"module_id={id(module)}, module_name={module._fsdp_module_name}")
+    bucket_alloc.plan()
+
+    rebound_grad_buffers = 0
+    for module in ctx.forward_order:
+        for param_group in module._fsdp_param_groups:
+            if param_group.rebind_full_iteration_grad_buffer():
+                rebound_grad_buffers += 1
+    if rebound_grad_buffers and torch.distributed.get_rank() == 0:
+        logger.debug(
+            "Rebound %s full-iteration CUDA graph grad buffers to "
+            "TracePoolAllocator planned slots",
+            rebound_grad_buffers,
+        )
 
 
 # ---------------------------------------------------------------------------

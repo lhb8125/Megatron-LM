@@ -137,6 +137,27 @@ class TestTracePoolFullIterationGradBuffers:
         assert first._unsharded_buffer.numel() == 16
         assert second._unsharded_buffer.numel() == 16
 
+    def test_complete_trace_preserves_later_phase_conflicts(self):
+        allocator = TracePoolAllocator()
+        first = self._make_buffer(allocator, (0, "main_grad"), 16)
+        first.release_unsharded_buffer_for_reuse()
+        second = self._make_buffer(allocator, (1, "main_grad"), 16)
+        second.release_unsharded_buffer_for_reuse()
+
+        first_trace_tensor = first._unsharded_buffer
+        assert first.fetch_buffer() is first_trace_tensor
+        assert first_trace_tensor._typed_storage()._size() == 16
+        assert second.fetch_buffer()._typed_storage()._size() == 16
+        first.release_unsharded_buffer_for_reuse()
+        second.release_unsharded_buffer_for_reuse()
+
+        allocator.plan()
+
+        assert len(allocator._slots) == 2
+        assert first.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert second.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert first._unsharded_buffer.data_ptr() != second._unsharded_buffer.data_ptr()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

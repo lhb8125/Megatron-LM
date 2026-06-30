@@ -128,6 +128,7 @@ def fully_shard(
         bucket_allocator=bucket_allocator,
         enable_cuda_graph=enable_cuda_graph,
         enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
+        defer_trace_pool_plan=(enable_full_iteration_cuda_graph and skip_final_backward_callback),
     )
     module._init_param_main_grad_func()
 
