@@ -1,17 +1,32 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+import gc
 import traceback
 
 import pytest
+import torch
 
+from megatron.core.distributed import DistributedDataParallelConfig
+from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
+from megatron.core.transformer import TransformerLayer
 from megatron.core.utils import is_te_min_version
-from tests.unit_tests.a2a_overlap.test_fsdp_1f1b_overlap import (
-    TestFSDP1F1BOverlap as _FSDPOverlapHarness,
+from tests.unit_tests.a2a_overlap.utils import (
+    build_gpt_model,
+    build_input_data,
+    deterministic_mode,
+    get_test_config,
+    get_valid_flex_dispatcher_backend,
+    get_valid_fp8_flags,
+    overlap_train_step,
 )
-from tests.unit_tests.a2a_overlap.utils import get_valid_fp8_flags
 from tests.unit_tests.test_utilities import Utils
+
+SEQ_LEN = 32
+VOCAB_SIZE = 128
+NUM_MICROBATCHES = 4
+LR = 0.01
 
 
 class TestFSDPV2LayerNormRecompute:
@@ -29,7 +44,8 @@ class TestFSDPV2LayerNormRecompute:
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
-    def test_mxfp8_layernorm_recompute(self):
+    def test_mxfp8_layernorm_recompute(self, monkeypatch):
+        monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -38,17 +54,78 @@ class TestFSDPV2LayerNormRecompute:
         if not mxfp8_flags:
             pytest.skip("Requires Blackwell with MXFP8 support")
 
-        try:
-            _FSDPOverlapHarness._run_test_helper(
-                self,
-                dispatcher_type="alltoall",
-                fp8_flag=mxfp8_flags[0],
-                sharding_strategy="optim_grads_params",
-                recompute_modules=["layernorm"],
+        flex_backend = get_valid_flex_dispatcher_backend()
+        if flex_backend != "hybridep":
+            pytest.skip("Requires HybridEP support")
+
+        recompute_kwargs = {
+            "moe_token_dispatcher_type": "flex",
+            "moe_flex_dispatcher_backend": flex_backend,
+            "moe_router_topk": 8,
+            "moe_router_padding_for_quantization": True,
+            "moe_permute_fusion": True,
+            "fp8": mxfp8_flags[0][0],
+            "fp8_recipe": mxfp8_flags[0][1],
+            "overlap_moe_expert_parallel_comm": True,
+            "delay_wgrad_compute": True,
+            "recompute_granularity": "selective",
+            "recompute_modules": ["moe_act", "layernorm"],
+        }
+
+        def make_ddp_config():
+            return DistributedDataParallelConfig(
+                use_megatron_fsdp=True,
                 use_megatron_fsdp_v2=True,
+                data_parallel_sharding_strategy="optim_grads_params",
+                overlap_grad_reduce=True,
+                overlap_param_gather=True,
                 fp8_param_gather=True,
-                test_only_kwargs={"delay_wgrad_compute": True},
+                megatron_fsdp_main_params_dtype=None,
             )
+
+        try:
+            with deterministic_mode():
+                data = build_input_data(seq_len=SEQ_LEN, vocab_size=VOCAB_SIZE)
+                recompute_config = get_test_config(
+                    num_layers=2,
+                    extra_kwargs=recompute_kwargs,
+                    multi_latent_attention=False,
+                    num_attention_heads=8,
+                    kv_channels=64,
+                )
+                recompute_model = build_gpt_model(recompute_config, vocab_size=VOCAB_SIZE)
+                recompute_model.bfloat16()
+                assert all(
+                    layer.recompute_pre_mlp_layernorm for layer in recompute_model.decoder.layers
+                )
+                recompute_fsdp = FullyShardedDataParallel(
+                    config=recompute_config,
+                    ddp_config=make_ddp_config(),
+                    module=recompute_model,
+                    fsdp_unit_modules=[TransformerLayer],
+                )
+                recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
+
+                rank = torch.distributed.get_rank()
+                recompute_loss = overlap_train_step(
+                    recompute_fsdp,
+                    recompute_opt,
+                    recompute_config,
+                    data,
+                    num_microbatches=NUM_MICROBATCHES,
+                )
+                assert torch.isfinite(
+                    recompute_loss
+                ), f"[rank {rank}] Non-finite loss: {recompute_loss.item()}"
+                for name, param in recompute_fsdp.named_parameters():
+                    if param.grad is not None:
+                        assert torch.isfinite(
+                            param.grad
+                        ).all(), f"[rank {rank}] Non-finite gradient: {name}"
+
+                del recompute_fsdp, recompute_opt
+                gc.collect()
+                torch.cuda.empty_cache()
         except Exception:
             traceback.print_exc()
             raise

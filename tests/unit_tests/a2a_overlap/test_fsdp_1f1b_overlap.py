@@ -89,9 +89,6 @@ class TestFSDP1F1BOverlap:
         shared_expert_intermediate_size=None,
         recompute_modules=None,
         offload_modules=None,
-        use_megatron_fsdp_v2=False,
-        fp8_param_gather=False,
-        test_only_kwargs=None,
         **kwargs,
     ):
         """Verify multi-step FSDP training with overlap produces identical
@@ -125,8 +122,6 @@ class TestFSDP1F1BOverlap:
                 overlap_grad_reduce=True,
                 overlap_param_gather=True,
                 megatron_fsdp_main_params_dtype=None,
-                use_megatron_fsdp_v2=use_megatron_fsdp_v2,
-                fp8_param_gather=fp8_param_gather,
             )
 
         with deterministic_mode():
@@ -144,15 +139,10 @@ class TestFSDP1F1BOverlap:
                 fsdp_unit_modules=[TransformerLayer],
             )
             ref_opt = torch.optim.SGD(ref_fsdp.parameters(), lr=LR)
-            if not use_megatron_fsdp_v2:
-                ref_opt = fully_shard_optimizer(optimizer=ref_opt)
+            ref_opt = fully_shard_optimizer(optimizer=ref_opt)
 
             # --- Test: FSDP model with overlap training loop ---
-            test_kwargs = {
-                **extra_kwargs,
-                **(test_only_kwargs or {}),
-                "overlap_moe_expert_parallel_comm": True,
-            }
+            test_kwargs = {**extra_kwargs, "overlap_moe_expert_parallel_comm": True}
             test_config = get_test_config(num_layers=num_layers, extra_kwargs=test_kwargs)
             test_model = build_gpt_model(test_config, vocab_size=VOCAB_SIZE)
             reset_model(test_model, init_params)
@@ -164,8 +154,7 @@ class TestFSDP1F1BOverlap:
                 fsdp_unit_modules=[TransformerLayer],
             )
             test_opt = torch.optim.SGD(test_fsdp.parameters(), lr=LR)
-            if not use_megatron_fsdp_v2:
-                test_opt = fully_shard_optimizer(optimizer=test_opt)
+            test_opt = fully_shard_optimizer(optimizer=test_opt)
 
             rank = torch.distributed.get_rank()
             for step in range(NUM_STEPS):

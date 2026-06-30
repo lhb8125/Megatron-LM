@@ -307,7 +307,27 @@ the expert boundary, causing the earlier path to discard or hook the wrong
 LayerNorm output. Router backward then reads invalid restored storage and can
 produce a non-finite `mlp.router.weight.grad`.
 
-### 3.6 Hook fire count — what to expect
+### 3.6 LayerNorm checkpoint lifetime through HybridEP combine
+
+HybridEP `dispatch_preprocess()` returns a view of the pre-MLP LayerNorm output,
+and the dispatch handle remains live until `hybrid_ep_combine()` completes. The
+fine-grained schedule must therefore not discard the LayerNorm checkpoint output
+at the routed-expert boundary. FSDP v2's allocator can reuse that released
+storage while HybridEP still owns the dispatch lifetime, corrupting the router
+path seen during backward.
+
+The overlap path now matches `TransformerLayer._forward_post_mlp()`: it waits for
+MoE combine and postprocess to produce the complete MLP output, then discards the
+checkpoint output immediately before BDA. The recompute hook is registered on
+that final MoE output, so recomputation still runs before combine, expert, and
+router backward consume the restored LayerNorm activation.
+
+The Blackwell regression in
+`tests/unit_tests/a2a_overlap/test_fsdp_v2_layernorm_recompute.py` covers four
+interleaved microbatches with HybridEP, `topk=8`, MXFP8 parameter gather,
+delayed wgrad, and combined `moe_act` + `layernorm` recomputation.
+
+### 3.7 Hook fire count — what to expect
 
 The FSDP 1F1B overlap regression suite includes a Blackwell-only production
 configuration with v2 FSDP, MXFP8 parameter gather, delayed wgrad, and

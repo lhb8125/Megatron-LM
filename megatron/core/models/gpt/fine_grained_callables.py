@@ -679,13 +679,6 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             tokens_per_expert = token_dispatcher._comm_manager.get_number_of_tokens_per_expert()
             node.layer_state.tokens_per_expert = tokens_per_expert
 
-        if layer.recompute_pre_mlp_layernorm:
-            # discard the output of the pre-mlp layernorm and register the recompute
-            # as a gradient hook of expert_output
-            pre_mlp_norm_checkpoint = node.layer_state.pre_mlp_norm_checkpoint
-            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
-            node.layer_state.pre_mlp_norm_checkpoint = None
-
         return expert_output
 
     def submodule_combine_forward(node: ScheduleNode, output: torch.Tensor):
@@ -702,6 +695,17 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         output = layer.mlp.combine(output)
         _check_router_input_lifetime(node.layer_state, "combine-exit")
         output = layer.mlp.postprocess(output, shared_expert_output)
+
+        if layer.recompute_pre_mlp_layernorm:
+            # HybridEP keeps dispatch state alive through combine, and its dispatch input can be
+            # a view of the layernorm output. Match the regular TransformerLayer path by waiting
+            # until the complete MLP output exists before releasing the checkpoint output.
+            pre_mlp_norm_checkpoint = node.layer_state.pre_mlp_norm_checkpoint
+            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(output)
+            node.layer_state.pre_mlp_norm_checkpoint = None
+            if getattr(node.layer_state, "router_input_lifetime_tensor", None) is not None:
+                node.layer_state.router_input_lifetime_tensor = None
+                node.layer_state.router_input_lifetime_reference = None
 
         mlp_output_with_bias = (output, None)
         if hasattr(layer, 'cuda_graphs') and layer.cuda_graphs:
