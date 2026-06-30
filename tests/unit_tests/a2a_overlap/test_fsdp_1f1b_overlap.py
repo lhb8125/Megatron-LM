@@ -101,7 +101,7 @@ class TestFSDP1F1BOverlap:
             recompute_modules=["layernorm"],
             use_megatron_fsdp_v2=True,
             fp8_param_gather=True,
-            delay_wgrad_compute=True,
+            test_only_kwargs={"delay_wgrad_compute": True},
         )
 
     def _run_test_helper(
@@ -114,6 +114,7 @@ class TestFSDP1F1BOverlap:
         offload_modules=None,
         use_megatron_fsdp_v2=False,
         fp8_param_gather=False,
+        test_only_kwargs=None,
         **kwargs,
     ):
         """Verify multi-step FSDP training with overlap produces identical
@@ -170,7 +171,11 @@ class TestFSDP1F1BOverlap:
                 ref_opt = fully_shard_optimizer(optimizer=ref_opt)
 
             # --- Test: FSDP model with overlap training loop ---
-            test_kwargs = {**extra_kwargs, "overlap_moe_expert_parallel_comm": True}
+            test_kwargs = {
+                **extra_kwargs,
+                **(test_only_kwargs or {}),
+                "overlap_moe_expert_parallel_comm": True,
+            }
             test_config = get_test_config(num_layers=num_layers, extra_kwargs=test_kwargs)
             test_model = build_gpt_model(test_config, vocab_size=VOCAB_SIZE)
             reset_model(test_model, init_params)
