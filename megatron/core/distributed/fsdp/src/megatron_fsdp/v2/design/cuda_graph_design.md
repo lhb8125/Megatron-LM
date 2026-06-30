@@ -372,12 +372,18 @@ requirements:
   `enable_full_iteration_cuda_graph=True`.
 - `_pre_backward_setup()` pre-allocates dist grads and fetches the full
   `main_grad_buffer` before capture so TE and FSDP write to fixed addresses.
-- After the first trace micro-batch calls `TracePoolAllocator.plan()`, any
-  cached full `main_grad_buffer` is rebound from its trace bucket to the planned
-  optimized slot and zeroed before full-iteration capture.  This prevents the
-  trace bucket and optimized slot from both staying resident.
-- `ParameterGroup.release_grad_buffer()` and `_maybe_free_grad_data()` keep
-  gradient storage resident for full-iteration replay.
+- `ParameterGroup.release_grad_buffer()` records logical allocator free events
+  while retaining the full `main_grad_buffer` tensor/view object. This lets
+  non-overlapping buffers share planned storage without changing capture-visible
+  tensor identities.
+- Hook-managed schedules call `TracePoolAllocator.plan()` after their first
+  complete backward. The externally managed combined 1F1B schedule defers the
+  plan until its full forward-only, steady, and backward-only trace is complete.
+  Cached full grad buffers are then rebound from trace buckets to planned slots
+  and zeroed before full-iteration capture, so trace and optimized storage do not
+  remain resident together.
+- `_maybe_free_grad_data()` keeps optimizer-facing gradient storage resident
+  for full-iteration replay.
 - `ParameterGroup.zero_grad()` clears existing buffer storage instead of
   dropping the tensor objects, preserving the addresses captured by CUDA graph.
 - The full-iteration wrapper synchronizes outstanding FSDP parameter gathers

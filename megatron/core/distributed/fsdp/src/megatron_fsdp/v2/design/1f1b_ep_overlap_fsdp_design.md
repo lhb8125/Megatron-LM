@@ -435,7 +435,9 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
   3. Drains pending async reduce-grad events (`event.wait()` + release buffers).
   4. Resets root/context state (`backward_phase = False`, clears
      `backward_done_modules`, `_fsdp_pre_backward_done` flags).
-  5. Transitions bucket allocator from trace → optimized plan (first micro-batch).
+  5. Transitions the bucket allocator from trace to the optimized plan for
+     hook-managed schedules. The externally managed combined 1F1B schedule
+     defers this transition until its final backward-only phase completes.
 
 ### 4.3 Per-layer post-forward (reshard only) — `mfsdp_post_forward_hook`
 
