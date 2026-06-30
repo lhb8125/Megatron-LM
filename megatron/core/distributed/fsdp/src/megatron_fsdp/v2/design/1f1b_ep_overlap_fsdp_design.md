@@ -296,7 +296,18 @@ For EP overlap **without** `delay_wgrad_compute`, the autograd hook fires at
 the right time (all grads are ready inline during backward), so it is
 **not** skipped.
 
-### 3.5 Hook fire count — what to expect
+### 3.5 Per-microbatch LayerNorm recompute state
+
+The overlap schedule can have several schedule plans for the same transformer
+layer in flight at once. Each plan owns a distinct `TransformerLayerState`.
+`CheckpointWithoutOutput` for the pre-MLP LayerNorm must therefore be stored on
+that per-plan state, not on the shared `TransformerLayer` instance. Otherwise a
+later microbatch can replace the checkpoint before an earlier microbatch reaches
+the expert boundary, causing the earlier path to discard or hook the wrong
+LayerNorm output. Router backward then reads invalid restored storage and can
+produce a non-finite `mlp.router.weight.grad`.
+
+### 3.6 Hook fire count — what to expect
 
 `mfsdp_forward_pre_hook` fires on **every** `Module.__call__()`, not just on
 the FSDP unit modules.  Because the EP overlap schedule invokes sub-modules

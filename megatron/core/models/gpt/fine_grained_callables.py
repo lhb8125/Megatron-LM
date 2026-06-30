@@ -51,12 +51,12 @@ def _check_router_input_lifetime(layer_state, stage):
         f"Saved router input storage released at layer={layer_number} stage={stage}: "
         f"{storage_bytes} < {required_bytes} bytes; dispatch_alias={dispatch_alias}"
     )
-    assert torch.isfinite(tensor).all(), (
-        f"Non-finite saved router input at layer={layer_number} stage={stage}"
-    )
-    assert torch.equal(tensor, reference), (
-        f"Saved router input changed at layer={layer_number} stage={stage}"
-    )
+    assert torch.isfinite(
+        tensor
+    ).all(), f"Non-finite saved router input at layer={layer_number} stage={stage}"
+    assert torch.equal(
+        tensor, reference
+    ), f"Saved router input changed at layer={layer_number} stage={stage}"
 
 
 def weak_method(method):
@@ -578,9 +578,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_norm_manager = off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm")
                 node.layer_state.mlp_norm_manager = mlp_norm_manager
                 if layer.recompute_pre_mlp_layernorm:
-                    layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+                    pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+                    node.layer_state.pre_mlp_norm_checkpoint = pre_mlp_norm_checkpoint
                     with mlp_norm_manager as hidden_states:
-                        pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
+                        pre_mlp_layernorm_output = pre_mlp_norm_checkpoint.checkpoint(
                             apply_module(layer.pre_mlp_layernorm), hidden_states
                         )
                 else:
@@ -603,9 +604,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
                 probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
-                _capture_router_input_lifetime_reference(
-                    node, layer, pre_mlp_layernorm_output
-                )
+                _capture_router_input_lifetime_reference(node, layer, pre_mlp_layernorm_output)
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
@@ -683,7 +682,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         if layer.recompute_pre_mlp_layernorm:
             # discard the output of the pre-mlp layernorm and register the recompute
             # as a gradient hook of expert_output
-            layer.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
+            pre_mlp_norm_checkpoint = node.layer_state.pre_mlp_norm_checkpoint
+            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
+            node.layer_state.pre_mlp_norm_checkpoint = None
 
         return expert_output
 
