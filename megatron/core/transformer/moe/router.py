@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from abc import ABC, abstractmethod
+import os
 from typing import Optional, Union
 
 import torch
@@ -24,6 +25,57 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+
+def _debug_check_router_tensor(tensor: torch.Tensor, label: str) -> None:
+    """Fail fast on a non-finite router value or gradient when explicitly enabled."""
+    if os.environ.get("MCORE_MOE_ROUTER_NAN_CHECK", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+
+    with torch.no_grad():
+        assert torch.isfinite(tensor).all(), f"Non-finite router value at {label}"
+
+    if tensor.requires_grad:
+
+        def check_grad(grad: torch.Tensor) -> torch.Tensor:
+            assert torch.isfinite(grad).all(), f"Non-finite router gradient at {label}"
+            return grad
+
+        tensor.register_hook(check_grad)
+
+
+def _debug_install_router_weight_checks(weight: torch.nn.Parameter, label: str) -> None:
+    """Check the gating GEMM result before and after leaf-gradient accumulation."""
+    if os.environ.get("MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+    if getattr(weight, "_mcore_router_weight_checks_installed", False):
+        return
+
+    def check_contribution(grad: torch.Tensor) -> torch.Tensor:
+        assert torch.isfinite(grad).all(), (
+            f"Non-finite router weight contribution at {label}"
+        )
+        return grad
+
+    def check_accumulated(param: torch.nn.Parameter) -> None:
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all(), (
+            f"Non-finite accumulated router weight gradient at {label}"
+        )
+
+    weight.register_hook(check_contribution)
+    weight.register_post_accumulate_grad_hook(check_accumulated)
+    setattr(weight, "_mcore_router_weight_checks_installed", True)
 
 
 class Router(MegatronModule):
@@ -782,11 +834,17 @@ class TopKRouter(Router):
 
         # Apply input jitter
         input = self.apply_input_jitter(input)
-        logits = self.gating(input)
+        debug_prefix = f"layer={self.layer_number}"
+        _debug_install_router_weight_checks(self.weight, debug_prefix)
+        _debug_check_router_tensor(input, f"{debug_prefix}:input")
+        raw_logits = self.gating(input)
+        _debug_check_router_tensor(raw_logits, f"{debug_prefix}:raw_logits")
+        logits = raw_logits
 
         if self.config.moe_router_force_load_balancing:
             # Apply force load balancing with random logits for benchmark
             logits = apply_random_logits(logits)
+            _debug_check_router_tensor(logits, f"{debug_prefix}:random_logits")
 
         if self.config.moe_router_force_biased is not None:
             # Apply biased logits with shared random bias across all ranks
@@ -795,6 +853,7 @@ class TopKRouter(Router):
             )
 
         probs, routing_map = self.routing(logits, padding_mask=padding_mask, input_ids=input_ids)
+        _debug_check_router_tensor(probs, f"{debug_prefix}:probs")
 
         return probs, routing_map
 

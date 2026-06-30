@@ -224,6 +224,12 @@ class DistributedDataParallelConfig:
       main gradients to parameter dtype for `.grad`.
     """
 
+    megatron_fsdp_cuda_graph_mode: bool = False
+    """If true, Megatron-FSDP uses CUDA graph-safe operations, such as preserving
+    parameter gradient references after the optimizer step so replay writes into the
+    same storage captured by the graph.
+    """
+
     use_megatron_fsdp_v2: bool = False
     """If true, use the `fully_shard` API for FSDP sharding the model.
     """

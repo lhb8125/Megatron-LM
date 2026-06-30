@@ -1,5 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import os
 import weakref
 from contextlib import nullcontext
 from functools import partial
@@ -24,6 +25,38 @@ from megatron.core.transformer.multi_token_prediction import (
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
 from megatron.core.typed_torch import apply_module, copy_signature
 from megatron.core.utils import internal_api, nvtx_range_pop, nvtx_range_push
+
+
+def _capture_router_input_lifetime_reference(node, layer, tensor):
+    """Retain one router input and an immutable reference for opt-in debugging."""
+    target_layer = os.environ.get("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK")
+    if target_layer is None or target_layer != str(getattr(layer, "layer_number", "")):
+        return
+    node.layer_state.router_input_lifetime_tensor = tensor
+    node.layer_state.router_input_lifetime_reference = tensor.detach().clone()
+    node.layer_state.router_input_lifetime_layer = target_layer
+
+
+def _check_router_input_lifetime(layer_state, stage):
+    """Fail at the first schedule boundary that mutates a saved router input."""
+    tensor = getattr(layer_state, "router_input_lifetime_tensor", None)
+    if tensor is None:
+        return
+    reference = layer_state.router_input_lifetime_reference
+    layer_number = layer_state.router_input_lifetime_layer
+    dispatch_alias = getattr(layer_state, "router_input_dispatch_alias", None)
+    storage_bytes = tensor.untyped_storage().size()
+    required_bytes = (tensor.storage_offset() + tensor.numel()) * tensor.element_size()
+    assert storage_bytes >= required_bytes, (
+        f"Saved router input storage released at layer={layer_number} stage={stage}: "
+        f"{storage_bytes} < {required_bytes} bytes; dispatch_alias={dispatch_alias}"
+    )
+    assert torch.isfinite(tensor).all(), (
+        f"Non-finite saved router input at layer={layer_number} stage={stage}"
+    )
+    assert torch.equal(tensor, reference), (
+        f"Saved router input changed at layer={layer_number} stage={stage}"
+    )
 
 
 def weak_method(method):
@@ -317,6 +350,7 @@ class TransformerLayerNode(ScheduleNode):
 
     def backward_impl(self, outputs, output_grad):
         """Implements the backward pass for the transformer layer node."""
+        _check_router_input_lifetime(self.layer_state, f"{self.name}:backward-entry")
         detached_grad = tuple([e.grad for e in self.detached])
         grads = output_grad + detached_grad
         self.default_backward_func(outputs + self.before_detached, grads)
@@ -335,8 +369,13 @@ class TransformerLayerNode(ScheduleNode):
         """Execute backward pass and corresponding hooks."""
         grads = super().backward(*output_grad)
         if not self.delay_wgrad_compute and self.is_layer_first_node:
-            self._post_backward_hook()
+            self._run_post_backward_hook()
         return grads
+
+    def _run_post_backward_hook(self):
+        """Run the layer callback after work queued on this node's stream."""
+        torch.cuda.current_stream().wait_stream(self.stream)
+        self._post_backward_hook()
 
     def backward_dw(self):
         """Computes the weight gradients for the transformer layer node."""
@@ -377,7 +416,7 @@ class TransformerLayerNode(ScheduleNode):
 
         # Execute TransformerLayer backward hook.
         if self.is_layer_first_node:
-            self._post_backward_hook()
+            self._run_post_backward_hook()
 
         self.bwd_dw_callables = None
 
@@ -564,9 +603,13 @@ def build_transformer_layer_callables(layer: TransformerLayer):
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
                 probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
+                _capture_router_input_lifetime_reference(
+                    node, layer, pre_mlp_layernorm_output
+                )
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
+                _check_router_input_lifetime(node.layer_state, "preprocess-exit")
                 return hidden_states, local_tokens, probs, shared_expert_output
 
         hidden_states, local_tokens, probs, shared_expert_output = forward_func(
@@ -602,6 +645,13 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             token_dispatcher._comm_manager.token_probs = probs
 
         dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        router_input = getattr(node.layer_state, "router_input_lifetime_tensor", None)
+        if router_input is not None:
+            node.layer_state.router_input_dispatch_alias = (
+                router_input.untyped_storage().data_ptr()
+                == dispatched_tokens.untyped_storage().data_ptr()
+            )
+        _check_router_input_lifetime(node.layer_state, "dispatch-exit")
 
         # `dispatched_probs` is needed by backward pass of swiglu, therefore it's
         # passed to moe_forward within `layer_state` to avoid the free_input process
@@ -622,6 +672,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             token_dispatcher._comm_manager.dispatched_probs = dispatched_probs
 
         expert_output, _ = layer.mlp.routed_experts_compute(dispatched_tokens, dispatched_probs)
+        _check_router_input_lifetime(node.layer_state, "experts-exit")
 
         # For HybridEP, tokens_per_expert is generated on comm stream, as the input to
         # `routed_experts_compute`, a ref is needed to prevent it from being freed.
@@ -648,6 +699,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         residual = node.layer_state.residual
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
         output = layer.mlp.combine(output)
+        _check_router_input_lifetime(node.layer_state, "combine-exit")
         output = layer.mlp.postprocess(output, shared_expert_output)
 
         mlp_output_with_bias = (output, None)

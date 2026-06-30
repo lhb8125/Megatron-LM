@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from torch.distributed import _coalescing_manager
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
@@ -46,6 +47,7 @@ class _FSDPState:
         self._is_root = True
         self._post_backward_callback_queued = False
         self.enable_cuda_graph: bool = False
+        self.enable_full_iteration_cuda_graph: bool = False
 
 
 @dataclass
@@ -138,6 +140,9 @@ class _FSDPRootContext:
 
     enable_cuda_graph: bool = False
     """Set by enable_cuda_graph() — tells hooks to manage the side stream."""
+
+    enable_full_iteration_cuda_graph: bool = False
+    """True when full-iteration CUDA graph capture needs stable FSDP buffers."""
 
     cuda_graph_stream: Optional[torch.cuda.Stream] = None
     """Side stream for CUDA graph capture/replay.  Created lazily on the
@@ -537,6 +542,7 @@ class FSDPModule:
         enable_async_reduce_grad,
         bucket_allocator: BucketAllocator,
         enable_cuda_graph: bool = False,
+        enable_full_iteration_cuda_graph: bool = False,
     ):
         """Initialize FSDP state and mark nested FSDP modules as non-root.
 
@@ -594,16 +600,22 @@ class FSDPModule:
             unshard_done_events={id(module): None for module in forward_order},
             enable_unshard_prefetch=enable_unshard_prefetch,
             enable_async_reduce_grad=enable_async_reduce_grad,
+            enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
             _reversed_order=list(reversed(forward_order)),
             bucket_allocator=bucket_allocator,
         )
         setattr(self, "_fsdp_state", _FSDPState())
+        self._fsdp_state.enable_full_iteration_cuda_graph = (
+            enable_full_iteration_cuda_graph
+        )
         setattr(self, "_fsdp_root_context", root_context)
 
         module_idx = 0
         for name, module in named_forward_modules:
+            module._fsdp_state.enable_full_iteration_cuda_graph = enable_full_iteration_cuda_graph
             for param_group in module._fsdp_param_groups:
                 param_group.set_allocator(root_context.bucket_allocator)
+                param_group.enable_full_iteration_cuda_graph = enable_full_iteration_cuda_graph
 
             if module is not self:
                 module._fsdp_state._is_root = False
@@ -677,17 +689,47 @@ class FSDPModule:
             if bwd_pass and id(module) in ctx.backward_done_modules:
                 continue  # Skip prefetch for modules whose backward is already done
 
-            # Unshard parameters for this module
-            for param_names, param_group in module._named_param_groups:
-                # Optional NaN checking for debugging
-                if getattr(module, "_enable_nan_checks", False):
-                    for name, dist_param in zip(param_names, param_group.dist_params):
-                        assert not torch.isnan(dist_param._local_tensor).any(), (
-                            f"NaN detected in dist param for parameter {name}"
-                        )
+            # Unshard parameters for this module.  Coalesce consecutive all-gathers
+            # that target the same process group, then run TE post-processing after
+            # the coalesced collective has been queued on the same stream.
+            with torch.cuda.stream(stream):
+                pending_post_unshard = []
+                buffer_runs = []
 
-                with torch.cuda.stream(stream):
-                    param_group.unshard(bwd_pass=bwd_pass)
+                for param_names, param_group in module._named_param_groups:
+                    # Optional NaN checking for debugging
+                    if getattr(module, "_enable_nan_checks", False):
+                        for name, dist_param in zip(
+                            param_names, param_group.dist_params
+                        ):
+                            assert torch.isfinite(dist_param._local_tensor).all(), (
+                                f"Non-finite value detected in dist param for parameter {name}"
+                            )
+
+                    pending_post_unshard.append(param_group)
+                    for weight_buffer in param_group.weight_buffers_for_unshard(
+                        bwd_pass=bwd_pass
+                    ):
+                        if (
+                            buffer_runs
+                            and buffer_runs[-1][0] is weight_buffer.dp_group
+                        ):
+                            buffer_runs[-1][1].append(weight_buffer)
+                        else:
+                            buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
+
+                for dp_group, weight_buffers in buffer_runs:
+                    cm = (
+                        _coalescing_manager(dp_group, async_ops=async_op)
+                        if len(weight_buffers) > 1
+                        else nullcontext()
+                    )
+                    with cm:
+                        for weight_buffer in weight_buffers:
+                            weight_buffer.unshard(bind_params=True)
+
+                for param_group in pending_post_unshard:
+                    param_group.post_unshard(bwd_pass=bwd_pass)
 
             # Record event to track when unshard is done for this module
             if async_op:
@@ -709,8 +751,15 @@ class FSDPModule:
             # Optional NaN checking for debugging
             if getattr(self, "_enable_nan_checks", False):
                 for name, param in zip(param_names, param_group.params):
-                    assert not torch.isnan(param).any(), (
-                        f"NaN detected in parameter {name}"
+                    # MXFP8 backward unshard intentionally refreshes only the
+                    # columnwise payload.  Inspecting the quantized wrapper may
+                    # touch its inactive rowwise view after that view was freed.
+                    if param_group.mp_policy.is_fp8_param(
+                        param
+                    ) or param_group.mp_policy.is_nvfp4_param(param):
+                        continue
+                    assert torch.isfinite(param).all(), (
+                        f"Non-finite value detected in parameter {name}"
                     )
 
         torch.cuda.nvtx.range_pop()
@@ -771,8 +820,8 @@ class FSDPModule:
             if getattr(self, "_enable_nan_checks", False):
                 for name, param in zip(param_names, param_group.params):
                     if param.grad is not None:
-                        assert not torch.isnan(param.grad).any(), (
-                            f"NaN in parameter grad for {name}"
+                        assert torch.isfinite(param.grad).all(), (
+                            f"Non-finite value in parameter grad for {name}"
                         )
 
             # Copy .grad -> main grad buffer on main stream (fast memcpy).
@@ -797,7 +846,10 @@ class FSDPModule:
                     # Under CUDA graph replay only the GPU kernel runs;
                     # we record the flags here and restore them in
                     # the CG replay backward.
-                    if grad_added and self._fsdp_state.enable_cuda_graph:
+                    if grad_added and (
+                        self._fsdp_state.enable_cuda_graph
+                        or self._fsdp_state.enable_full_iteration_cuda_graph
+                    ):
                         setattr(param, "_mfsdp_recorded_te_wgrad", True)
                 elif param.grad is None:
                     main_grad = param.get_main_grad()
@@ -836,6 +888,15 @@ class FSDPModule:
                         continue
                     if param_group.mp_policy.use_decoupled_grad:
                         setattr(dist_param, "decoupled_grad", dist_grad)
+                        if (
+                            param_group.enable_full_iteration_cuda_graph
+                            and dist_grad is not None
+                        ):
+                            setattr(
+                                dist_param,
+                                "_mfsdp_keep_decoupled_grad_for_cuda_graph",
+                                True,
+                            )
                         if dist_param.grad is not None:
                             del dist_param.grad
                     else:
@@ -854,11 +915,12 @@ class FSDPModule:
 
             # NaN check after reduction
             if getattr(self, "_enable_nan_checks", False):
-                for name, dist_grad in zip(param_names, param_group.dist_grads):
-                    if dist_grad is not None:
-                        assert not torch.isnan(dist_grad._local_tensor).any(), (
-                            f"NaN in dist grad for parameter {name}"
-                        )
+                with torch.cuda.stream(stream):
+                    for name, dist_grad in zip(param_names, param_group.dist_grads):
+                        if dist_grad is not None:
+                            assert torch.isfinite(dist_grad._local_tensor).all(), (
+                                f"Non-finite value in dist grad for parameter {name}"
+                            )
 
         torch.cuda.nvtx.range_pop()
 

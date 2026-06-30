@@ -640,6 +640,42 @@ class DataParallelBuffer:
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
 
+    @torch.no_grad()
+    def rebind_unsharded_buffer_to_allocator(self, *, zero: bool = False) -> bool:
+        """Rebind a cached full buffer to the optimized allocator slot.
+
+        During the TracePoolAllocator trace phase, ``fetch_buffer()`` caches the
+        trace bucket in ``_unsharded_buffer``.  Once ``plan()`` switches the
+        allocator to optimized slots, callers that intentionally keep the cached
+        buffer alive (full-iteration CUDA graph) must refresh this reference so
+        capture records the planned stable address instead of the trace bucket.
+        """
+        if not self.is_distributed or self._unsharded_buffer is None:
+            return False
+        if getattr(self.allocator, "phase", None) != "optimized":
+            return False
+
+        old_buffer = self._unsharded_buffer
+        bucket = self.allocator.allocate(
+            key=self.alloc_key,
+            size=self.buffer_index.bucket_meta.size,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        new_buffer = bucket.data
+        self.allocator.free(self.alloc_key)
+
+        if zero:
+            new_buffer.zero_()
+        else:
+            new_buffer.copy_(old_buffer)
+
+        dirty = getattr(old_buffer, "_dirty", None)
+        if dirty is not None:
+            setattr(new_buffer, "_dirty", dirty)
+        self._unsharded_buffer = new_buffer
+        return new_buffer.data_ptr() != old_buffer.data_ptr()
+
     def fetch_buffer(self, *, as_shard: bool = False) -> torch.Tensor:
         """Return the buffer, allocating the full unsharded view if needed.
 

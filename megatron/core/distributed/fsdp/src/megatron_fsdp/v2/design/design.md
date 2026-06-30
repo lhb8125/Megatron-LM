@@ -16,6 +16,18 @@
 
 No changes to `utils.py` are needed for either overlap feature.
 
+### TE Fused GroupedMLP Pre-Hook Forwarding
+
+Transformer Engine's fused GroupedMLP path bypasses the original FC1/FC2
+module calls, so `TEGroupedMLP` explicitly forwards their pre-forward hooks
+before invoking the fused operation. Hook dispatch must preserve PyTorch's
+registration contract: hook IDs listed in `_forward_pre_hooks_with_kwargs`
+receive `(module, args, kwargs)`, while other hooks receive `(module, args)`.
+This is required for Megatron-FSDP v2, whose fine-grained unshard hook is
+registered with `with_kwargs=True`. The fused path passes empty args/kwargs
+because these hooks may trigger parameter all-gathers but may not modify
+inputs; any non-`None` hook return remains an error.
+
 ---
 
 ## `_FSDPRootContext` — Shared Coordination Object
@@ -198,6 +210,15 @@ the NCCL collective, causing convergence divergence.
 **NVTX profiling.** `unshard()`, `reshard()`, and `reduce_grad()` each push/pop a
 `torch.cuda.nvtx` range (`"MFSDP unshard"`, `"MFSDP reshard"`, `"MFSDP reduce_grad"`)
 for profiling visibility in tools like Nsight Systems.
+
+**All-gather coalescing.** `FSDPModule.unshard()` coalesces consecutive weight-buffer
+all-gathers that use the same process group before calling the mixed-precision
+`post_unshard()` hook. This mirrors v1's bucket-group coalescing without changing
+v2's `ParameterGroup` ownership model: each group still owns its buffers and TE
+post-processing, but the module-level loop can submit several buffer all-gathers
+through one NCCL grouped launch. The post-processing step intentionally happens
+after the coalesced all-gather has been queued on the same stream, preserving the
+ordering expected by FP8/NVFP4 rebuild hooks.
 
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
@@ -426,6 +447,12 @@ buffer before compute:
    the updated shards directly into the full replicated compute buffer on every
    rank, then clears the flag. The same call can bind params to `self.data` for
    the current compute phase.
+
+Current Transformer Engine releases perform the FP8/MXFP8 weight conversion,
+including scale and amax metadata updates, through
+`cast_master_weights_to_fp8`. The compatibility path for older TE releases
+retains its existing batched multi-tensor metadata copies; full-iteration CUDA
+graphs do not replace those copies with a separate per-tensor implementation.
 
 The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where

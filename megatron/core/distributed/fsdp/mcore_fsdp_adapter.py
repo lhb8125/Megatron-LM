@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 import random
 from contextlib import nullcontext
 from typing import Dict, List, Optional
@@ -303,6 +304,10 @@ class FullyShardedDataParallel(_BaseDataParallel):
             "skip_backward_callback": config.delay_wgrad_compute,
             "skip_final_backward_callback": config.overlap_moe_expert_parallel_comm,
         }
+        if ddp_config.use_megatron_fsdp:
+            kwargs["enable_full_iteration_cuda_graph"] = (
+                config.cuda_graph_impl == "full_iteration"
+            )
         if config.calculate_per_token_loss:
             gradient_scaling_factor = None
             expert_gradient_scaling_factor = None
@@ -386,11 +391,15 @@ class FullyShardedDataParallel(_BaseDataParallel):
                         if hasattr(param, attr_name):
                             setattr(dist_param, attr_name, getattr(param, attr_name))
 
-        # Per-module NaN checking is disabled by default on the fully_shard
-        # path to avoid the per-parameter synchronization overhead on every
-        # unshard. Enable via a manual call to module._set_nan_check(True).
-        # if ddp_config.check_for_nan_in_grad:
-        #     module._set_nan_check(True)
+        # This fail-fast path intentionally synchronizes per-parameter checks
+        # and is only suitable for short eager debugging runs.
+        if os.environ.get("MCORE_FSDP_V2_NAN_CHECK", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            module._set_nan_check(True)
 
         super().__init__(config=config, module=module)
 

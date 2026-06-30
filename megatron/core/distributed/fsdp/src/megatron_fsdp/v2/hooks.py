@@ -317,6 +317,17 @@ def mfsdp_post_backward_final_callback(root_module: nn.Module):
                         f"module_id={id(m)}, module_name={m._fsdp_module_name}"
                     )
             bucket_alloc.plan()
+            rebound_grad_buffers = 0
+            for module in ctx.forward_order:
+                for param_group in module._fsdp_param_groups:
+                    if param_group.rebind_full_iteration_grad_buffer():
+                        rebound_grad_buffers += 1
+            if rebound_grad_buffers and torch.distributed.get_rank() == 0:
+                logger.debug(
+                    "Rebound %s full-iteration CUDA graph grad buffers to "
+                    "TracePoolAllocator planned slots",
+                    rebound_grad_buffers,
+                )
         elif bucket_alloc.phase != "optimized":
             raise ValueError(
                 f"Unexpected bucket allocator phase: {bucket_alloc.phase}"
@@ -429,7 +440,10 @@ def _pre_backward_setup(
         # buffer and its full unsharded fetch-buffer BEFORE capture so that
         # memory addresses are fixed across replay iterations.  Without this,
         # TE would write to stale or uninitialised buffer addresses on replay.
-        if module._fsdp_state.enable_cuda_graph and param_group.main_grad_buffer is not None:
+        if (
+            module._fsdp_state.enable_cuda_graph
+            or module._fsdp_state.enable_full_iteration_cuda_graph
+        ) and param_group.main_grad_buffer is not None:
             param_group._init_dist_grads()
             param_group.main_grad_buffer.fetch_buffer()
 

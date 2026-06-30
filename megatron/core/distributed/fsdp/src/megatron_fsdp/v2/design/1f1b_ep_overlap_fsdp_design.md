@@ -227,6 +227,8 @@ line 292: b_layer.attn.backward(grad)            ← autograd backward:
                                                    2. TE attn backward (act grads only if delay_wgrad)
                                                    3. autograd post-bwd hook → SKIPPED (delay_wgrad)
 line 301: b_layer.attn.backward_dw()             ← delayed TE attn wgrad
+                                                   → caller stream waits for the
+                                                     attn node's compute stream
                                                    → fires mfsdp_post_backward_hook(layer)
                                                    → layer.reshard() + layer.reduce_grad()
 ```
@@ -268,6 +270,27 @@ manually for the TransformerLayer via `set_fsdp_reshard_hooks` →
 `mfsdp_post_backward_hook`.  Remaining nested modules (e.g., TEGroupedMLP, root)
 are handled by `mfsdp_post_backward_final_callback` (called at
 `combined_1f1b.py:629`), which runs after all `backward_dw()` calls complete.
+
+The explicit layer callback also establishes a producer-to-consumer CUDA
+stream dependency before it reads gradients.  `TransformerLayerNode` queues
+normal backward and delayed wgrad kernels on the node stream, then calls
+`torch.cuda.current_stream().wait_stream(self.stream)` before invoking
+`mfsdp_post_backward_hook`.  Without this dependency, v2 can copy or
+reduce-scatter a router/wgrad tensor while its producer stream is still
+writing it.  The wait is GPU-asynchronous and is used for both delayed and
+inline wgrad callback paths.
+
+Force-balanced performance runs have an additional compatibility fallback.
+When Megatron-FSDP v2 and full-iteration CUDA graphs are combined with forced
+router load balancing, argument validation disables router fusion and auxiliary
+router load-balancing losses with a rank-0 warning.  At full Qwen3 scale, each
+path can independently return non-finite HybridEP/router gradients during the
+eager capture-stream warmup.  The unfused router without auxiliary router loss,
+and the same fused router without full-iteration graphs, produce matching finite
+loss and gradient norms.  Auxiliary router objectives are not meaningful in
+this benchmark mode because `RandomSTE` replaces the learned forward logits.
+The fallback is restricted to forced benchmark routing, so learned router
+training keeps the requested fusion and auxiliary-loss settings.
 
 For EP overlap **without** `delay_wgrad_compute`, the autograd hook fires at
 the right time (all grads are ready inline during backward), so it is
@@ -429,6 +452,47 @@ When `overlap_moe_expert_parallel_comm=True`, the following constraints apply:
 ---
 
 ## 6. Key code locations
+
+### Fail-fast gradient localization
+
+Set `MCORE_FSDP_V2_NAN_CHECK=1` only for short eager debugging runs to enable
+the existing per-parameter checks around unshard and gradient reduction.  The
+post-reduce check executes on the reduce-scatter stream so it observes the
+completed optimizer-facing shard rather than racing that stream.  The checks
+detect both NaN and infinity.  Quantized parameter wrappers are excluded after
+unshard because MXFP8 backward intentionally refreshes only the columnwise
+payload; inspecting the wrapper can dereference the inactive rowwise view.
+The checks perform host-visible assertions and therefore must remain disabled
+for CUDA graph capture and performance measurements.
+
+For failures first observed in `mlp.router.weight.grad`, a short eager run may
+also set `MCORE_MOE_ROUTER_NAN_CHECK=1`.  This installs fail-fast checks on the
+router input, raw gating logits, force-balanced random logits, routing
+probabilities, and their backward gradients.  Like the FSDP checks, these
+hooks synchronize with the host and are debugging-only.
+
+Set `MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK=1` independently to check the
+router gating GEMM's weight-gradient contribution and the leaf parameter's
+post-accumulation `.grad`.  Keeping this separate from the tensor-stage checks
+allows the weight accumulation path to be observed without changing earlier
+router stream timing.
+
+When the weight check is enabled, `RouterGatingLinearFunction.backward` also
+validates its saved input and `grad_output`.  If the TE wgrad GEMM returns a
+non-finite tensor, it computes an FP32 `torch.mm` reference and reports whether
+the same finite operands remain finite in the independent implementation.
+
+Set `MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK=<layer-number>` for a short eager
+combined-1F1B run to retain that layer's router input and compare it against an
+immutable clone at the preprocess, dispatch, expert, combine, and backward
+boundaries.  This pinpoints the first schedule stage that mutates storage still
+owned by `RouterGatingLinearFunction`.  The exact comparisons synchronize with
+the host and retain an extra activation, so the check is debugging-only and is
+not valid during CUDA graph capture or performance measurement.  Run this check
+with `layernorm` excluded from `recompute_modules`: `CheckpointWithoutOutput`
+intentionally releases the pre-MLP layernorm output at the expert boundary and
+restores it during backward, which otherwise appears as an expected
+`combine-exit` storage release rather than a lifetime violation.
 
 | Component | File |
 |---|---|
