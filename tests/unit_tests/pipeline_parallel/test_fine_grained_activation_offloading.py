@@ -151,6 +151,24 @@ def test_chunk_offload_handler_respects_megatron_do_not_offload_on_wrapper_data_
     assert getattr(wrapper.get_data_tensors()[0], "_do_not_offload", False)
 
 
+def test_offload_interface_synchronize_transfer_streams_waits_for_both_streams(monkeypatch):
+    calls = []
+
+    class CurrentStream:
+        def wait_stream(self, stream):
+            calls.append(stream)
+
+    d2h_stream = object()
+    h2d_stream = object()
+    manager = type("Manager", (), {"d2h_stream": d2h_stream, "h2d_stream": h2d_stream})()
+    monkeypatch.setattr(PipelineOffloadManager, "OFFLOAD_MGR", manager)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: CurrentStream())
+
+    off_interface.synchronize_transfer_streams()
+
+    assert calls == [d2h_stream, h2d_stream]
+
+
 def _run_one_iter_and_capture(
     model: GPTModel,
     *,

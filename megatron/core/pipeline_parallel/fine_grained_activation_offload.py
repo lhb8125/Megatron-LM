@@ -1434,6 +1434,14 @@ class FineGrainedActivationOffloadingInterface:
         return FineGrainedOffloadingBackwardRecordFunction.apply(tensor)
 
     @staticmethod
+    def synchronize_transfer_streams():
+        """Join outstanding activation transfers onto the current stream."""
+        mgr = PipelineOffloadManager.get_instance()
+        current_stream = torch.cuda.current_stream()
+        current_stream.wait_stream(mgr.d2h_stream)
+        current_stream.wait_stream(mgr.h2d_stream)
+
+    @staticmethod
     def reset():
         """Reset the chunk handler."""
         PipelineOffloadManager.get_instance().reset()

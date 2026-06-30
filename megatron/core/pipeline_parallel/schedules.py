@@ -45,6 +45,15 @@ from .combined_1f1b import (
 Shape = Union[List[int], torch.Size]
 
 
+def _finalize_fine_grained_activation_offloading(config):
+    """Drain full-iteration graph transfers before resetting offload state."""
+    if not getattr(config, 'fine_grained_activation_offloading', False):
+        return
+    if getattr(config, 'cuda_graph_impl', None) == 'full_iteration':
+        off_interface.synchronize_transfer_streams()
+    off_interface.reset()
+
+
 def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[int] = None):
     """Retrieves the appropriate forward_backward function given the
     configuration of parallel_state.
@@ -745,8 +754,7 @@ def forward_backward_no_pipelining(
             force_all_reduce=force_all_reduce,
         )
 
-    if getattr(config, 'fine_grained_activation_offloading', False):
-        off_interface.reset()
+    _finalize_fine_grained_activation_offloading(config)
     # Reset all_gather_pipeline bucket status before next validation iteration
     if forward_only:
         for model_chunk in [model]:
@@ -2121,8 +2129,7 @@ def forward_backward_pipelining_with_interleaving(
             force_all_reduce=force_all_reduce,
         )
 
-    if getattr(config, 'fine_grained_activation_offloading', False):
-        off_interface.reset()
+    _finalize_fine_grained_activation_offloading(config)
     # Restore config.grad_sync_func and config.param_sync_func.
     if forward_only:
         config.grad_sync_func, config.param_sync_func = grad_sync_func, param_sync_func
@@ -2561,8 +2568,7 @@ def forward_backward_pipelining_without_interleaving(
             force_all_reduce=force_all_reduce,
         )
 
-    if getattr(config, 'fine_grained_activation_offloading', False):
-        off_interface.reset()
+    _finalize_fine_grained_activation_offloading(config)
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
