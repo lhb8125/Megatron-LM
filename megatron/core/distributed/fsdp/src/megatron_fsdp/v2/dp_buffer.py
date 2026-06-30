@@ -442,10 +442,7 @@ class DataParallelBuffer:
         return True
 
     def _move_data_to(
-        self,
-        target_device: torch.device,
-        pin_memory: bool = False,
-        non_blocking: bool = True,
+        self, target_device: torch.device, pin_memory: bool = False, non_blocking: bool = True
     ) -> None:
         """Move ``self.data`` to *target_device*, optionally using pinned memory.
 
@@ -583,10 +580,7 @@ class DataParallelBuffer:
         return False
 
     @torch.no_grad()
-    def unshard(
-        self,
-        bind_params: bool = False,
-    ) -> torch.Tensor:
+    def unshard(self, bind_params: bool = False) -> torch.Tensor:
         """All-gather the full buffer from all shards and bind parameter storage.
 
         For non-distributed buffers self.data is already full, so
@@ -603,9 +597,7 @@ class DataParallelBuffer:
         sm = self.buffer_index.shard_meta
         shard_buffer = self.data[sm.local_data_index : sm.local_data_index + sm.size]
         torch.distributed.all_gather_into_tensor(
-            output_tensor=full_buffer,
-            input_tensor=shard_buffer,
-            group=self.dp_group,
+            output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
         )
         if full_buffer.is_cuda:
             # Temporary all-gather buckets may be released from another stream before
@@ -639,6 +631,18 @@ class DataParallelBuffer:
             return
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
+
+    @torch.no_grad()
+    def release_unsharded_buffer_for_reuse(self) -> None:
+        """End this buffer's allocator lifetime while retaining its tensor view.
+
+        Full-iteration CUDA graphs need the tensor object and its eventual slot
+        address to remain stable through capture. The trace planner still needs
+        the logical free event so non-overlapping buffers can share that slot.
+        """
+        if not self.is_distributed or self._unsharded_buffer is None:
+            return
+        self.allocator.free(self.alloc_key)
 
     @torch.no_grad()
     def rebind_unsharded_buffer_to_allocator(self, *, zero: bool = False) -> bool:
@@ -708,10 +712,7 @@ class DataParallelBuffer:
         return full
 
     @torch.no_grad()
-    def reduce_grad(
-        self,
-        overwrite_grad: bool = False,
-    ):
+    def reduce_grad(self, overwrite_grad: bool = False):
         """Reduce gradients into the optimizer-facing local shard.
 
         For distributed buffers, this reduce-scatters a temporary full gradient

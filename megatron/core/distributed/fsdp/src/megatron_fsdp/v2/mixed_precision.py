@@ -602,9 +602,7 @@ class MixedPrecisionPolicy:
                 if no_shard:
                     start_offset = 0
                 else:
-                    start_offset, _ = model_weight_buffer.buffer_index._get_item_self_range(
-                        item_id
-                    )
+                    start_offset, _ = model_weight_buffer.buffer_index._get_item_self_range(item_id)
                 fp8_params.append(param)
                 main_params.append(main_weight)
                 start_offsets.append(start_offset)

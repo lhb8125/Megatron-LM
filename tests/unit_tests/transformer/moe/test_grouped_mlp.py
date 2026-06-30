@@ -24,24 +24,17 @@ def test_fused_impl_pre_forward_hook_supports_hook_signatures():
     linear_fc2 = nn.Module()
     calls = []
 
-    linear_fc1.register_forward_pre_hook(
-        lambda module, args: calls.append(("args", module, args))
-    )
+    linear_fc1.register_forward_pre_hook(lambda module, args: calls.append(("args", module, args)))
     linear_fc2.register_forward_pre_hook(
         lambda module, args, kwargs: calls.append(("kwargs", module, args, kwargs)),
         with_kwargs=True,
     )
 
-    grouped_mlp = type(
-        "GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2}
-    )()
+    grouped_mlp = type("GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2})()
     hook = TEGroupedMLP._make_fused_impl_pre_forward_hook(grouped_mlp)
     hook(nn.Module())
 
-    assert calls == [
-        ("args", linear_fc1, ()),
-        ("kwargs", linear_fc2, (), {}),
-    ]
+    assert calls == [("args", linear_fc1, ()), ("kwargs", linear_fc2, (), {})]
 
 
 def test_fused_impl_pre_forward_hook_rejects_input_modification():
@@ -51,9 +44,7 @@ def test_fused_impl_pre_forward_hook_rejects_input_modification():
         lambda module, args, kwargs: (args, kwargs), with_kwargs=True
     )
 
-    grouped_mlp = type(
-        "GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2}
-    )()
+    grouped_mlp = type("GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2})()
     hook = TEGroupedMLP._make_fused_impl_pre_forward_hook(grouped_mlp)
 
     with pytest.raises(RuntimeError, match="modifies the input tensor"):

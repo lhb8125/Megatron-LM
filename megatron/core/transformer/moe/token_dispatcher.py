@@ -1123,9 +1123,7 @@ class _HybridEPManager(_DispatchManager):
                 os.environ.get("MCORE_HYBRIDEP_FULLCG_STATIC_BUDGET_FACTOR", "1.2")
             )
             if budget_factor <= 0:
-                raise ValueError(
-                    "MCORE_HYBRIDEP_FULLCG_STATIC_BUDGET_FACTOR must be positive"
-                )
+                raise ValueError("MCORE_HYBRIDEP_FULLCG_STATIC_BUDGET_FACTOR must be positive")
             budget = int(padded_num_tokens * self.config.moe_router_topk * budget_factor)
             if pad_multiple > 0:
                 budget += -budget % pad_multiple
@@ -1150,8 +1148,8 @@ class _HybridEPManager(_DispatchManager):
         """Return actual, unpadded token counts received by each local expert."""
         group_size = self.group.size()
         target_rank = torch.distributed.get_rank(group=self.group)
-        tokens_per_target_expert = self.routing_map.sum(dim=0).to(torch.int64).reshape(
-            group_size, self.num_local_experts
+        tokens_per_target_expert = (
+            self.routing_map.sum(dim=0).to(torch.int64).reshape(group_size, self.num_local_experts)
         )
         torch.distributed.all_reduce(tokens_per_target_expert, group=self.group)
         return tokens_per_target_expert[target_rank]

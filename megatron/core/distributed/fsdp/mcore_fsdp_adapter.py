@@ -42,10 +42,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.distributed.data_parallel_base import _BaseDataParallel
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.ssm.mamba_layer import MambaLayer
-from megatron.core.transformer.moe.router import Router as MoERouter
 from megatron.core.transformer.attention import Attention
+from megatron.core.transformer.moe.router import Router as MoERouter
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
 
@@ -254,8 +254,8 @@ class FullyShardedDataParallel(_BaseDataParallel):
             from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fully_shard
             from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import (
                 FullyShardFP8Policy,
-                MixedPrecisionPolicy,
                 FullyShardNVFP4Policy,
+                MixedPrecisionPolicy,
             )
         else:
             from torch.distributed.fsdp import fully_shard
@@ -305,9 +305,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
             "skip_final_backward_callback": config.overlap_moe_expert_parallel_comm,
         }
         if ddp_config.use_megatron_fsdp:
-            kwargs["enable_full_iteration_cuda_graph"] = (
-                config.cuda_graph_impl == "full_iteration"
-            )
+            kwargs["enable_full_iteration_cuda_graph"] = config.cuda_graph_impl == "full_iteration"
         if config.calculate_per_token_loss:
             gradient_scaling_factor = None
             expert_gradient_scaling_factor = None
@@ -333,17 +331,19 @@ class FullyShardedDataParallel(_BaseDataParallel):
                     grad_sf = gradient_scaling_factor
                     mesh = dp_mesh
 
-                if any([
-                    isinstance(m, MambaLayer) and "mamba" in cuda_graph_on,
-                    isinstance(m, Attention) and "attn" in cuda_graph_on,
-                    isinstance(m, MoERouter) and "moe_router" in cuda_graph_on,
-                ]):
+                if any(
+                    [
+                        isinstance(m, MambaLayer) and "mamba" in cuda_graph_on,
+                        isinstance(m, Attention) and "attn" in cuda_graph_on,
+                        isinstance(m, MoERouter) and "moe_router" in cuda_graph_on,
+                    ]
+                ):
                     fully_shard(
                         m,
                         enable_cuda_graph=True,
                         mesh=mesh,
                         gradient_scaling_factor=grad_sf,
-                        **kwargs
+                        **kwargs,
                     )
                 elif isinstance(m, tuple(fsdp_unit_modules)):
                     fully_shard(
@@ -351,7 +351,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
                         mesh=mesh,
                         gradient_scaling_factor=grad_sf,
                         enable_cuda_graph=False,
-                        **kwargs
+                        **kwargs,
                     )
         fully_shard(module, mesh=dp_mesh, gradient_scaling_factor=gradient_scaling_factor, **kwargs)
 
@@ -393,12 +393,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
 
         # This fail-fast path intentionally synchronizes per-parameter checks
         # and is only suitable for short eager debugging runs.
-        if os.environ.get("MCORE_FSDP_V2_NAN_CHECK", "").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
+        if os.environ.get("MCORE_FSDP_V2_NAN_CHECK", "").lower() in {"1", "true", "yes", "on"}:
             module._set_nan_check(True)
 
         super().__init__(config=config, module=module)

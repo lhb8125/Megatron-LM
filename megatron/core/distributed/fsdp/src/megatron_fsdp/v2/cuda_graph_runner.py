@@ -14,14 +14,13 @@
 
 """CUDA graph capture / replay for individual FSDP modules."""
 
-import inspect
 import gc
+import inspect
 import warnings
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-
 
 # ------------------------------------------------------------------
 # Helpers
@@ -67,12 +66,7 @@ class _ForwardShim(torch.nn.Module):
     restored during replay.
     """
 
-    def __init__(
-        self,
-        module: torch.nn.Module,
-        tensor_param_names: List[str],
-        frozen_kwargs: dict,
-    ):
+    def __init__(self, module: torch.nn.Module, tensor_param_names: List[str], frozen_kwargs: dict):
         super().__init__()
         self.module = module
         self.tensor_param_names = tensor_param_names
@@ -201,10 +195,7 @@ class FSDPCudaGraphRunner:
     """
 
     def __init__(
-        self,
-        fsdp_module: torch.nn.Module,
-        gc_freeze: bool = True,
-        graph_pool: Optional[Any] = None,
+        self, fsdp_module: torch.nn.Module, gc_freeze: bool = True, graph_pool: Optional[Any] = None
     ):
         warnings.warn(
             "FSDPCudaGraphRunner is an experimental feature. The API and "
@@ -234,14 +225,10 @@ class FSDPCudaGraphRunner:
     # 1. Capture
     # ------------------------------------------------------------------
 
-    def capture_forward(
-        self,
-        *sample_args,
-        **sample_kwargs,
-    ) -> None:
-        assert self._module.cuda_graph_compatible, (
-            "CUDA graph capture requires TracePoolAllocator in optimized phase"
-        )
+    def capture_forward(self, *sample_args, **sample_kwargs) -> None:
+        assert (
+            self._module.cuda_graph_compatible
+        ), "CUDA graph capture requires TracePoolAllocator in optimized phase"
 
         # Introspect the module's forward signature
         param_names = _get_forward_param_names(self._module.__class__)
@@ -253,15 +240,9 @@ class FSDPCudaGraphRunner:
                 bound[param_names[i]] = val
         bound.update(sample_kwargs)
 
-        tensor_names = [
-            n for n in param_names if n in bound and isinstance(bound[n], torch.Tensor)
-        ]
-        frozen_kwargs = {
-            n: v for n, v in bound.items() if not isinstance(v, torch.Tensor)
-        }
-        flat_sample = tuple(
-            bound[n].clone().detach().requires_grad_(True) for n in tensor_names
-        )
+        tensor_names = [n for n in param_names if n in bound and isinstance(bound[n], torch.Tensor)]
+        frozen_kwargs = {n: v for n, v in bound.items() if not isinstance(v, torch.Tensor)}
+        flat_sample = tuple(bound[n].clone().detach().requires_grad_(True) for n in tensor_names)
 
         # Build shim (handles None filtering)
         shim = _ForwardShim(self._module, tensor_names, frozen_kwargs)

@@ -74,9 +74,8 @@ def _zero_grad_group_helper(
         grad_attr = "decoupled_grad" if use_decoupled_grad else "grad"
         if hasattr(param, grad_attr) and getattr(param, grad_attr) is not None:
             if set_to_none:
-                if (
-                    grad_attr == "decoupled_grad"
-                    and getattr(param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", False)
+                if grad_attr == "decoupled_grad" and getattr(
+                    param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", False
                 ):
                     _zero_tensor_storage(getattr(param, grad_attr))
                     continue

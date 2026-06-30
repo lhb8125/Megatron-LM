@@ -30,9 +30,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import (
-    MixedPrecisionPolicy,
-)
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.param_group import ParameterGroup
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.utils import ParamGroupIdx
 
@@ -169,8 +167,7 @@ class Ref:
 def test_init_buffers(strategy):
     if strategy not in ("no_shard", "optim_grads_params"):
         pytest.skip(
-            "This test currently covers no_shard and optim_grads_params, "
-            f"skipping {strategy}."
+            "This test currently covers no_shard and optim_grads_params, " f"skipping {strategy}."
         )
 
     groups, originals, dp_group, rank, ws, device = _build_groups(strategy)
@@ -212,8 +209,7 @@ def test_init_buffers(strategy):
 def test_unshard_reshard(strategy):
     if strategy not in ("no_shard", "optim_grads_params"):
         pytest.skip(
-            "This test currently covers no_shard and optim_grads_params, "
-            f"skipping {strategy}."
+            "This test currently covers no_shard and optim_grads_params, " f"skipping {strategy}."
         )
 
     groups, originals, dp_group, rank, ws, device = _build_groups(strategy)
@@ -255,8 +251,7 @@ def test_unshard_reshard(strategy):
 def test_reduce_grad(strategy):
     if strategy not in ("no_shard", "optim_grads_params"):
         pytest.skip(
-            "This test currently covers no_shard and optim_grads_params, "
-            f"skipping {strategy}."
+            "This test currently covers no_shard and optim_grads_params, " f"skipping {strategy}."
         )
 
     groups, _, dp_group, rank, ws, device = _build_groups(strategy)

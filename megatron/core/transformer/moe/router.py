@@ -1,7 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-from abc import ABC, abstractmethod
 import os
+from abc import ABC, abstractmethod
 from typing import Optional, Union
 
 import torch
@@ -29,12 +29,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 def _debug_check_router_tensor(tensor: torch.Tensor, label: str) -> None:
     """Fail fast on a non-finite router value or gradient when explicitly enabled."""
-    if os.environ.get("MCORE_MOE_ROUTER_NAN_CHECK", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    if os.environ.get("MCORE_MOE_ROUTER_NAN_CHECK", "").lower() not in {"1", "true", "yes", "on"}:
         return
 
     with torch.no_grad():
@@ -62,16 +57,14 @@ def _debug_install_router_weight_checks(weight: torch.nn.Parameter, label: str) 
         return
 
     def check_contribution(grad: torch.Tensor) -> torch.Tensor:
-        assert torch.isfinite(grad).all(), (
-            f"Non-finite router weight contribution at {label}"
-        )
+        assert torch.isfinite(grad).all(), f"Non-finite router weight contribution at {label}"
         return grad
 
     def check_accumulated(param: torch.nn.Parameter) -> None:
         assert param.grad is not None
-        assert torch.isfinite(param.grad).all(), (
-            f"Non-finite accumulated router weight gradient at {label}"
-        )
+        assert torch.isfinite(
+            param.grad
+        ).all(), f"Non-finite accumulated router weight gradient at {label}"
 
     weight.register_hook(check_contribution)
     weight.register_post_accumulate_grad_hook(check_accumulated)

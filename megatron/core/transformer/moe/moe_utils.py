@@ -1370,9 +1370,12 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         grad_shape = grad_output.shape
         inp = inp.view(-1, inp_shape[-1])
         grad_output = grad_output.view(-1, grad_shape[-1])
-        debug_router_weight = os.environ.get(
-            "MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK", ""
-        ).lower() in {"1", "true", "yes", "on"}
+        debug_router_weight = os.environ.get("MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if debug_router_weight:
             assert torch.isfinite(inp).all(), "Non-finite saved router gating input"
             assert torch.isfinite(grad_output).all(), "Non-finite router gating grad_output"
@@ -1391,12 +1394,12 @@ class RouterGatingLinearFunction(torch.autograd.Function):
             grad_weight = torch.mm(grad_output.t(), inp.to(ctx.router_dtype)).to(ctx.weight_dtype)
 
         if debug_router_weight and not torch.isfinite(grad_weight).all():
-            reference_grad_weight = torch.mm(
-                grad_output.float().t(), inp.float()
-            ).to(ctx.weight_dtype)
-            assert torch.isfinite(reference_grad_weight).all(), (
-                "Router gating wgrad is non-finite in both TE GEMM and FP32 torch.mm"
+            reference_grad_weight = torch.mm(grad_output.float().t(), inp.float()).to(
+                ctx.weight_dtype
             )
+            assert torch.isfinite(
+                reference_grad_weight
+            ).all(), "Router gating wgrad is non-finite in both TE GEMM and FP32 torch.mm"
             raise AssertionError(
                 "TE router gating wgrad is non-finite while FP32 torch.mm is finite"
             )

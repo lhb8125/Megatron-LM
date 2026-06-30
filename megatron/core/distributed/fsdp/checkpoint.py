@@ -39,8 +39,10 @@ from torch.distributed.tensor import DTensor, Shard
 
 import megatron.core.parallel_state as mpu
 from megatron.core import dist_checkpointing
-from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import copy_chunk_metadata
-from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import get_chunk_meta_source
+from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
+    copy_chunk_metadata,
+    get_chunk_meta_source,
+)
 from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
     get_state_dict as _get_state_dict,
 )
@@ -166,7 +168,10 @@ def handle_experts_in_state_dict(model_state_dict: dict, num_experts: int) -> di
                 "Identity transform for non-local expert key '%s' (expert_index=%d, "
                 "local_expert_start=%d). This expert does not belong to EP rank %d "
                 "but survived in the state dict. Consider removing it instead.",
-                key, expert_index, local_expert_start, ep_rank,
+                key,
+                expert_index,
+                local_expert_start,
+                ep_rank,
             )
         # GroupedMLP: 'mlp.experts.linear_fc1.weight0', 'mlp.experts.linear_fc2.weight0'
         if 'mlp.experts.linear_fc1.weight' in key or 'mlp.experts.linear_fc2.weight' in key:
@@ -399,12 +404,7 @@ def handle_swiglu_in_state_dict_v2(
         return _swiglu_detector(key, dtensor, _model, layer_glu)
 
     return _split_fused_params_v2(
-        model,
-        model_state_dict,
-        optimizer_state_dict,
-        detector,
-        lambda k, s: f"{k}_{s}",
-        "SwiGLU",
+        model, model_state_dict, optimizer_state_dict, detector, lambda k, s: f"{k}_{s}", "SwiGLU"
     )
 
 
@@ -497,7 +497,7 @@ def _mamba_mixer_detector(key, dtensor, model, mixer_map):
             # Strip module. prefix and retry
             alt = prefix
             while alt.startswith(_MODULE_PREFIX):
-                alt = alt[len(_MODULE_PREFIX):]
+                alt = alt[len(_MODULE_PREFIX) :]
                 mixer_module = mixer_map.get(alt)
                 if mixer_module is not None:
                     break
@@ -704,14 +704,12 @@ def _verify_chunk_metadata(flattened_sd: dict) -> None:
 
     if failures:
         logger.error(
-            "[chunk_metadata_verify] %d DTensor(s) have invalid chunk metadata:",
-            len(failures),
+            "[chunk_metadata_verify] %d DTensor(s) have invalid chunk metadata:", len(failures)
         )
         for msg in failures:
             logger.error("  %s", msg)
         raise AssertionError(
-            f"{len(failures)} DTensor(s) have invalid chunk metadata. "
-            "See log above for details."
+            f"{len(failures)} DTensor(s) have invalid chunk metadata. " "See log above for details."
         )
 
 
@@ -1362,11 +1360,7 @@ def _canonicalize_td_key(td_key, *, strip_model_prefix=True):
 
 
 def _load_torch_dist_into_megatron_fsdp_v2(
-    args,
-    checkpoint_name,
-    model,
-    v2_state_dict,
-    strict=True,
+    args, checkpoint_name, model, v2_state_dict, strict=True
 ):
     """Load a torch_dist checkpoint into a Megatron FSDP v2 skeleton via DCP.
 
@@ -1398,7 +1392,6 @@ def _load_torch_dist_into_megatron_fsdp_v2(
     from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
     # ---- Phase 1: Preprocess & verify v2 state dict ----
-
     # Split fused MambaMixer params so that the sub-keys match the
     # torch_dist checkpoint (which stores e.g. ``in_proj.weight.z``).
     if model is not None:

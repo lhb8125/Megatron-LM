@@ -462,6 +462,13 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
      calls `module.reduce_grad()` — copy grads → reduce-scatter → install DTensor grads.
   5. Sets `module.post_backward_issued = True`.
 
+For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
+the allocator `free` event but retains the buffer's tensor/view object. The
+first-microbatch trace can therefore assign one stable physical slot to
+non-overlapping layer buffers. After planning, each retained view is rebound to
+its planned address before graph capture; graph replay keeps that address while
+the recorded kernel order preserves the traced reuse lifetime.
+
 ### 4.5 Gradient sync suppression — `no_sync()`
 
 - **v2 status**: Returns `nullcontext` (no-op).

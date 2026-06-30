@@ -112,11 +112,7 @@ def fully_shard(
             for m in module.modules()
             if isinstance(m, FSDPModule) and m is not module
         )
-    ) and sharding_strategy in (
-        "optim",
-        "optim_grads",
-        "optim_grads_params",
-    )
+    ) and sharding_strategy in ("optim", "optim_grads", "optim_grads_params")
     bucket_allocator = TracePoolAllocator() if use_trace_pool else StorageFreeingBucketAllocator()
 
     module._init_named_param_groups(
@@ -144,9 +140,7 @@ def fully_shard(
     )
     _register_forward_hook(module)
     _register_backward_pre_hook(
-        module,
-        fine_grained=fine_grained_hooks,
-        skip_final_callback=skip_final_backward_callback,
+        module, fine_grained=fine_grained_hooks, skip_final_callback=skip_final_backward_callback
     )
     # When delay_wgrad_compute is enabled, skip the autograd post-backward
     # hook.  Per-layer reshard+reduce_grad still fires via set_fsdp_reshard_hooks

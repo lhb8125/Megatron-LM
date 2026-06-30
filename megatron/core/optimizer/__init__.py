@@ -882,14 +882,13 @@ def _build_megatron_fsdp_v2_muon_optimizer(
     checkpointing, and passing full FSDP buffers to an Adam built over only the
     non-matrix param subset).
     """
-    from .fully_shard_v2_muon import FullyShardV2MuonOptimizer
-
     # Tag params and route non-linear/embedding params to Adam (same mechanism
     # as the non-FSDP emerging path in _get_megatron_emerging_optimizer).
     # _default_param_overrides_factory is defined regardless of whether the
     # emerging_optimizers package is installed (FullyShardV2Muon has a built-in
     # Newton-Schulz fallback), so we don't index _EMERGING_OPTIMIZERS here.
     from .emerging_optimizers import _default_param_overrides_factory
+    from .fully_shard_v2_muon import FullyShardV2MuonOptimizer
 
     for model_chunk in model_chunks:
         for name, param in model_chunk.named_parameters():

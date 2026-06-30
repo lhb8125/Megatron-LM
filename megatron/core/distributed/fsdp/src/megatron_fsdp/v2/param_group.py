@@ -222,9 +222,7 @@ class ParameterGroup:
         return [
             weight_buffer
             for weight_buffer in self.mp_policy.weight_buffers_for_unshard(
-                self.model_weight_buffer,
-                self.transpose_weight_buffer,
-                bwd_pass=bwd_pass,
+                self.model_weight_buffer, self.transpose_weight_buffer, bwd_pass=bwd_pass
             )
             if weight_buffer is not None
         ]
@@ -287,14 +285,14 @@ class ParameterGroup:
         # _grad_buffer_is_fresh is True after zero_grad() or lazy buffer init,
         # so the first reduce_grad after either event overwrites instead of
         # accumulating — no stale data from uninitialised or zeroed buffers.
-        self.main_grad_buffer.reduce_grad(
-            overwrite_grad=self._grad_buffer_is_fresh,
-        )
+        self.main_grad_buffer.reduce_grad(overwrite_grad=self._grad_buffer_is_fresh)
         self._grad_buffer_is_fresh = False
 
     def release_grad_buffer(self):
         """Release the main gradient buffer to free memory."""
         if self.enable_full_iteration_cuda_graph:
+            if self.main_grad_buffer is not None:
+                self.main_grad_buffer.release_unsharded_buffer_for_reuse()
             return
         if self.main_grad_buffer is not None:
             # Drop weight.main_grad views that layers.py stores during gradient-accumulation-fusion
@@ -329,8 +327,8 @@ class ParameterGroup:
         if self.main_grad_buffer is None or self.main_grad_buffer.data is None:
             return
         if any(
-            [getattr(p, "grad", None) is not None for p in self.dist_params] +
-            [getattr(p, "decoupled_grad", None) is not None for p in self.dist_params]
+            [getattr(p, "grad", None) is not None for p in self.dist_params]
+            + [getattr(p, "decoupled_grad", None) is not None for p in self.dist_params]
         ):
             return
         self.main_grad_buffer.data = None
@@ -434,11 +432,13 @@ class ParameterGroup:
             dist_param = self.dist_params[i]
             if dist_param is not None:
                 if self.main_weight_buffer is not None:
-                    data = self.main_weight_buffer.get_item(self.param_idx[param],
-                                                            as_shard=is_param_shard)
+                    data = self.main_weight_buffer.get_item(
+                        self.param_idx[param], as_shard=is_param_shard
+                    )
                 elif self.model_weight_buffer is not None:
-                    data = self.model_weight_buffer.get_item(self.param_idx[param],
-                                                             as_shard=is_param_shard)
+                    data = self.model_weight_buffer.get_item(
+                        self.param_idx[param], as_shard=is_param_shard
+                    )
                 else:
                     continue
                 object.__setattr__(dist_param._local_tensor, 'data', data)
@@ -459,8 +459,12 @@ class ParameterGroup:
         Returns True if any buffer was moved (views were rebuilt).
         """
         moved = False
-        for buf in (self.model_weight_buffer, self.main_weight_buffer,
-                    self.main_grad_buffer, self.transpose_weight_buffer):
+        for buf in (
+            self.model_weight_buffer,
+            self.main_weight_buffer,
+            self.main_grad_buffer,
+            self.transpose_weight_buffer,
+        ):
             if buf is not None and buf._ensure_data_on_gpu():
                 moved = True
         if moved:
@@ -473,9 +477,7 @@ class ParameterGroup:
             if self.main_grad_buffer is not None:
                 if self.main_grad_buffer.data is not None:
                     self.main_grad_buffer.data.zero_()
-                unsharded_grad_buffer = getattr(
-                    self.main_grad_buffer, "_unsharded_buffer", None
-                )
+                unsharded_grad_buffer = getattr(self.main_grad_buffer, "_unsharded_buffer", None)
                 if unsharded_grad_buffer is not None:
                     unsharded_grad_buffer.zero_()
             for dist_param in self.dist_params:

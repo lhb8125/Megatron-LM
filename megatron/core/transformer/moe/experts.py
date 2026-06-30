@@ -511,15 +511,12 @@ class TEGroupedMLP(MegatronModule):
             and getattr(self.config, "moe_token_dispatcher_type", None) == "flex"
             and getattr(self.config, "moe_flex_dispatcher_backend", None) == "hybridep"
         )
-        use_v1_static_budget = (
-            os.environ.get("MCORE_HYBRIDEP_STATIC_BUDGET_MODE", "").lower() in {"v1", "legacy"}
-        )
+        use_v1_static_budget = os.environ.get("MCORE_HYBRIDEP_STATIC_BUDGET_MODE", "").lower() in {
+            "v1",
+            "legacy",
+        }
         tokens_per_expert_needs_device_copy = False
-        if (
-            is_hybridep_full_cg
-            and not use_v1_static_budget
-            and not self.config.moe_paged_stash
-        ):
+        if is_hybridep_full_cg and not use_v1_static_budget and not self.config.moe_paged_stash:
             tokens_per_expert = self._pad_hybridep_static_budget_tokens_per_expert(
                 permuted_local_hidden_states, tokens_per_expert
             )
