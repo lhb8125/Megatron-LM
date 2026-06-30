@@ -81,29 +81,6 @@ class TestFSDP1F1BOverlap:
             offload_modules=offload_modules,
         )
 
-    @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
-    def test_fsdp_v2_1f1b_mxfp8_layernorm_recompute(self):
-        """Cover the production v2 + MXFP8 LayerNorm recompute path."""
-        from megatron.core.enums import Fp8Recipe
-
-        mxfp8_flags = [
-            flag
-            for flag in get_valid_fp8_flags()
-            if flag is not None and flag[1] == Fp8Recipe.mxfp8
-        ]
-        if not mxfp8_flags:
-            pytest.skip("Requires Blackwell with MXFP8 support")
-
-        self._run_test_helper(
-            dispatcher_type="alltoall",
-            fp8_flag=mxfp8_flags[0],
-            sharding_strategy="optim_grads_params",
-            recompute_modules=["layernorm"],
-            use_megatron_fsdp_v2=True,
-            fp8_param_gather=True,
-            test_only_kwargs={"delay_wgrad_compute": True},
-        )
-
     def _run_test_helper(
         self,
         dispatcher_type="alltoall",

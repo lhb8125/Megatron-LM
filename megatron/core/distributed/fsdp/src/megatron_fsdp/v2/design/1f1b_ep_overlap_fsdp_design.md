@@ -530,6 +530,7 @@ restores it during backward, which otherwise appears as an expected
 | M-FSDP v2 EP overlap e2e | `tests/unit_tests/distributed/megatron_fsdp/v2/test_mcore_nd_parallel.py` |
 | delay_wgrad_compute unit test | `tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py` |
 | FSDP 1F1B overlap test | `tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py` |
+| v2 MXFP8 LayerNorm recompute | `tests/unit_tests/a2a_overlap/test_fsdp_v2_layernorm_recompute.py` |
 
 ---
 
