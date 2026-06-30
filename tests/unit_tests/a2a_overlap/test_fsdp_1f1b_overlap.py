@@ -81,6 +81,29 @@ class TestFSDP1F1BOverlap:
             offload_modules=offload_modules,
         )
 
+    @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
+    def test_fsdp_v2_1f1b_mxfp8_layernorm_recompute(self):
+        """Cover the production v2 + MXFP8 LayerNorm recompute path."""
+        from megatron.core.enums import Fp8Recipe
+
+        mxfp8_flags = [
+            flag
+            for flag in get_valid_fp8_flags()
+            if flag is not None and flag[1] == Fp8Recipe.mxfp8
+        ]
+        if not mxfp8_flags:
+            pytest.skip("Requires Blackwell with MXFP8 support")
+
+        self._run_test_helper(
+            dispatcher_type="alltoall",
+            fp8_flag=mxfp8_flags[0],
+            sharding_strategy="optim_grads_params",
+            recompute_modules=["layernorm"],
+            use_megatron_fsdp_v2=True,
+            fp8_param_gather=True,
+            delay_wgrad_compute=True,
+        )
+
     def _run_test_helper(
         self,
         dispatcher_type="alltoall",
@@ -89,6 +112,8 @@ class TestFSDP1F1BOverlap:
         shared_expert_intermediate_size=None,
         recompute_modules=None,
         offload_modules=None,
+        use_megatron_fsdp_v2=False,
+        fp8_param_gather=False,
         **kwargs,
     ):
         """Verify multi-step FSDP training with overlap produces identical
@@ -122,6 +147,8 @@ class TestFSDP1F1BOverlap:
                 overlap_grad_reduce=True,
                 overlap_param_gather=True,
                 megatron_fsdp_main_params_dtype=None,
+                use_megatron_fsdp_v2=use_megatron_fsdp_v2,
+                fp8_param_gather=fp8_param_gather,
             )
 
         with deterministic_mode():
@@ -139,7 +166,8 @@ class TestFSDP1F1BOverlap:
                 fsdp_unit_modules=[TransformerLayer],
             )
             ref_opt = torch.optim.SGD(ref_fsdp.parameters(), lr=LR)
-            ref_opt = fully_shard_optimizer(optimizer=ref_opt)
+            if not use_megatron_fsdp_v2:
+                ref_opt = fully_shard_optimizer(optimizer=ref_opt)
 
             # --- Test: FSDP model with overlap training loop ---
             test_kwargs = {**extra_kwargs, "overlap_moe_expert_parallel_comm": True}
@@ -154,7 +182,8 @@ class TestFSDP1F1BOverlap:
                 fsdp_unit_modules=[TransformerLayer],
             )
             test_opt = torch.optim.SGD(test_fsdp.parameters(), lr=LR)
-            test_opt = fully_shard_optimizer(optimizer=test_opt)
+            if not use_megatron_fsdp_v2:
+                test_opt = fully_shard_optimizer(optimizer=test_opt)
 
             rank = torch.distributed.get_rank()
             for step in range(NUM_STEPS):

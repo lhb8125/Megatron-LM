@@ -309,6 +309,12 @@ produce a non-finite `mlp.router.weight.grad`.
 
 ### 3.6 Hook fire count — what to expect
 
+The FSDP 1F1B overlap regression suite includes a Blackwell-only production
+configuration with v2 FSDP, MXFP8 parameter gather, delayed wgrad, and
+selective pre-MLP LayerNorm recompute. It compares multi-step loss and final
+parameters against the standard v2 FSDP schedule so recompute coverage cannot
+silently fall back to the v1 implementation.
+
 `mfsdp_forward_pre_hook` fires on **every** `Module.__call__()`, not just on
 the FSDP unit modules.  Because the EP overlap schedule invokes sub-modules
 directly, and fine-grained hooks are registered on all sub-modules, the **root
