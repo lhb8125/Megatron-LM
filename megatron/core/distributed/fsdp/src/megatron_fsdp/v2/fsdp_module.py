@@ -34,6 +34,7 @@ from .utils import ParamGroupIdx, _replace_module_parameter
 logger = logging.getLogger(__name__)
 
 _UNSHARDED_WITHOUT_EVENT = object()
+_DEBUG_FP8_GROUPS_LOGGED = False
 
 
 def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None:
@@ -1236,6 +1237,8 @@ def _get_module_fsdp_param_groups(
     Parameters are grouped because they share the same buffer management
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
+    global _DEBUG_FP8_GROUPS_LOGGED
+
     param_groups = {}
     param_to_name = {param: name for name, param in module.named_parameters()}
 
@@ -1253,8 +1256,21 @@ def _get_module_fsdp_param_groups(
 
     # Create ParameterGroup for each group
     fsdp_param_groups = []
+    debug_groups = []
     for i, params in enumerate(param_groups.values()):
         param_names = [param_to_name[param] for param in params]
+        defer_full_param_and_grad_sync = _should_defer_fp8_norm_sync(
+            module, param_names, params, mp_policy, sharding_strategy
+        )
+        debug_groups.append(
+            {
+                "group": i,
+                "names": param_names,
+                "shapes": [tuple(param.shape) for param in params],
+                "dtypes": [str(param.dtype) for param in params],
+                "defer": defer_full_param_and_grad_sync,
+            }
+        )
         fsdp_param_groups.append(
             ParameterGroup(
                 params,
@@ -1263,11 +1279,23 @@ def _get_module_fsdp_param_groups(
                 mp_policy=mp_policy,
                 gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
-                defer_full_param_and_grad_sync=_should_defer_fp8_norm_sync(
-                    module, param_names, params, mp_policy, sharding_strategy
-                ),
+                defer_full_param_and_grad_sync=defer_full_param_and_grad_sync,
             )
         )
+
+    if (
+        not _DEBUG_FP8_GROUPS_LOGGED
+        and torch.distributed.get_rank() == 0
+        and hasattr(module, "layer_number")
+    ):
+        print(
+            "FSDP_FP8_GROUPS "
+            f"module={type(module).__name__} fp8_enabled={mp_policy.fp8.enabled} "
+            f"hidden_size={getattr(getattr(module, 'config', None), 'hidden_size', None)} "
+            f"groups={debug_groups}",
+            flush=True,
+        )
+        _DEBUG_FP8_GROUPS_LOGGED = True
 
     return fsdp_param_groups
 
