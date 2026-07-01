@@ -195,7 +195,7 @@ class Ref:
 # ------------------------------------------------------------------ #
 
 
-def test_singleton_unshard_aliases_persistent_buffer(singleton_group, monkeypatch):
+def test_singleton_unshard_uses_local_copy(singleton_group, monkeypatch):
     buffer = _build_singleton_buffer(singleton_group, "model_weight")
     expected = torch.arange(buffer.data_size, dtype=buffer.dtype, device=buffer.device)
     buffer.init_data(expected.clone())
@@ -206,11 +206,11 @@ def test_singleton_unshard_aliases_persistent_buffer(singleton_group, monkeypatc
     monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", fail_collective)
     actual = buffer.unshard()
 
-    assert actual.data_ptr() == buffer.data.data_ptr()
+    assert actual.data_ptr() != buffer.data.data_ptr()
     assert torch.equal(actual, expected)
 
 
-def test_singleton_reduce_grad_uses_persistent_buffer(singleton_group, monkeypatch):
+def test_singleton_reduce_grad_accumulates_locally(singleton_group, monkeypatch):
     buffer = _build_singleton_buffer(singleton_group, "main_grad")
     buffer.init_data(torch.zeros(buffer.data_size, dtype=buffer.dtype, device=buffer.device))
 
@@ -225,7 +225,7 @@ def test_singleton_reduce_grad_uses_persistent_buffer(singleton_group, monkeypat
 
     buffer.fetch_buffer().fill_(3)
     buffer.reduce_grad()
-    assert torch.equal(buffer.data, torch.full_like(buffer.data, 3))
+    assert torch.equal(buffer.data, torch.full_like(buffer.data, 5))
 
 
 @pytest.mark.parametrize("strategy", ["no_shard", "optim", "optim_grads", "optim_grads_params"])

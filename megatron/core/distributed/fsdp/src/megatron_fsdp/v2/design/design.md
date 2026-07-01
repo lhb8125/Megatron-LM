@@ -343,12 +343,11 @@ The operation is inherently synchronous *within whatever stream is current* when
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
 
-`DataParallelBuffer` preserves the normal sharded DTensor layout for singleton process groups,
-but aliases their full view directly to persistent storage instead of allocating a same-sized
-temporary buffer and launching no-op NCCL collectives. For unfused gradients,
-`FSDPModule.reduce_grad()` uses `_grad_buffer_is_fresh` to copy the first micro-batch and add later
-micro-batches. TE gradient-accumulation fusion receives the same state through
-`overwrite_main_grad`. This preserves accumulation while removing the redundant temporary copy.
+`DataParallelBuffer` preserves the normal sharded layout for singleton process groups, but
+replaces their no-op NCCL collectives with local tensor operations. Weight unshard copies the
+persistent shard into the temporary full buffer. Gradient reduction still copies or accumulates
+the temporary full gradient into the persistent optimizer-facing shard; it skips only the
+size-one reduce-scatter. This distinction is required for correct micro-batch accumulation.
 
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes

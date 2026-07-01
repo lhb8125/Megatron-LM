@@ -421,9 +421,7 @@ class DataParallelBuffer:
         assert data.dtype == self.dtype, f"dtype mismatch: {data.dtype} vs {self.dtype}"
         assert data.numel() == self.data_size, f"size mismatch: {data.numel()} vs {self.data_size}"
         self.data = data
-        if self.buffer_role in ("model_weight", "transpose_weight") and (
-            not self.is_distributed or self.dp_world_size == 1
-        ):
+        if self.buffer_role in ("model_weight", "transpose_weight") and not self.is_distributed:
             self.data._dirty = False
 
     # ------------------------------------------------------------------ #
@@ -577,9 +575,7 @@ class DataParallelBuffer:
 
     def is_unsharded(self) -> bool:
         """Return whether this buffer currently has a full unsharded view."""
-        full_tensor = (
-            self._unsharded_buffer if self.is_distributed and self.dp_world_size > 1 else self.data
-        )
+        full_tensor = self._unsharded_buffer if self.is_distributed else self.data
         if full_tensor is not None and not getattr(full_tensor, "_dirty", True):
             return True
         return False
@@ -594,24 +590,19 @@ class DataParallelBuffer:
         """
         full_buffer = self.fetch_buffer(as_shard=False)
 
-        if (not self.is_distributed or self.dp_world_size == 1) and not getattr(
-            full_buffer, "_dirty", False
-        ):
+        if not self.is_distributed and not getattr(full_buffer, "_dirty", False):
             if bind_params:
                 self._bind_buffer_to_params(full_buffer)
-            return full_buffer
-
-        if self.dp_world_size == 1:
-            if bind_params:
-                self._bind_buffer_to_params(full_buffer)
-            setattr(full_buffer, "_dirty", False)
             return full_buffer
 
         sm = self.buffer_index.shard_meta
         shard_buffer = self.data[sm.local_data_index : sm.local_data_index + sm.size]
-        torch.distributed.all_gather_into_tensor(
-            output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
-        )
+        if self.dp_world_size == 1:
+            full_buffer.copy_(shard_buffer)
+        else:
+            torch.distributed.all_gather_into_tensor(
+                output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
+            )
         if full_buffer.is_cuda:
             # Temporary all-gather buckets may be released from another stream before
             # the collective finishes; record the producer stream for allocator safety.
@@ -640,7 +631,7 @@ class DataParallelBuffer:
     @torch.no_grad()
     def reshard(self) -> None:
         """Release the temporary unsharded buffer allocated by unshard()."""
-        if not self.is_distributed or self.dp_world_size == 1:
+        if not self.is_distributed:
             return
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
@@ -653,7 +644,7 @@ class DataParallelBuffer:
         address to remain stable through capture. The trace planner still needs
         the logical free event so non-overlapping buffers can share that slot.
         """
-        if not self.is_distributed or self.dp_world_size == 1 or self._unsharded_buffer is None:
+        if not self.is_distributed or self._unsharded_buffer is None:
             return
         self.allocator.free(self.alloc_key)
 
@@ -667,7 +658,7 @@ class DataParallelBuffer:
         buffer alive (full-iteration CUDA graph) must refresh this reference so
         capture records the planned stable address instead of the trace bucket.
         """
-        if not self.is_distributed or self.dp_world_size == 1 or self._unsharded_buffer is None:
+        if not self.is_distributed or self._unsharded_buffer is None:
             return False
         if getattr(self.allocator, "phase", None) != "optimized":
             return False
@@ -705,7 +696,7 @@ class DataParallelBuffer:
         Memory allocation always occurs on the default stream for deterministic
         caching-allocator behaviour.
         """
-        if self.is_distributed and self.dp_world_size > 1:
+        if self.is_distributed:
             trace_storage_was_released = (
                 self._unsharded_buffer is not None
                 and getattr(self.allocator, "phase", None) == "trace"
