@@ -62,6 +62,7 @@ class TestFSDPV2LayerNormRecompute:
             "global_overlap_fsdp_sync",
             "defer_bind",
             "retain_weight_storage",
+            "sync_coalescing",
         ],
     )
     def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
@@ -73,6 +74,7 @@ class TestFSDPV2LayerNormRecompute:
             "no_event",
             "defer_bind",
             "retain_weight_storage",
+            "sync_coalescing",
         }
         if diagnostic_mode in no_neighbor_modes:
             monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
@@ -91,6 +93,9 @@ class TestFSDPV2LayerNormRecompute:
         if diagnostic_mode == "retain_weight_storage":
             monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
             monkeypatch.setenv("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "1")
+        if diagnostic_mode == "sync_coalescing":
+            monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
+            monkeypatch.setenv("MCORE_FSDP_SYNC_UNSHARD_COALESCING", "1")
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream

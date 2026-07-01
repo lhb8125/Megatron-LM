@@ -682,6 +682,7 @@ class FSDPModule:
         post_unshard_on_caller = os.environ.get("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "0") == "1"
         disable_unshard_event = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "0") == "1"
         defer_unshard_bind = os.environ.get("MCORE_FSDP_DEFER_UNSHARD_BIND", "0") == "1"
+        sync_unshard_coalescing = os.environ.get("MCORE_FSDP_SYNC_UNSHARD_COALESCING", "0") == "1"
         post_unshard_on_caller = post_unshard_on_caller or defer_unshard_bind
         if async_op and not disable_neighbor_prefetch:
             prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
@@ -722,7 +723,9 @@ class FSDPModule:
 
                 for dp_group, weight_buffers in buffer_runs:
                     cm = (
-                        _coalescing_manager(dp_group, async_ops=async_op)
+                        _coalescing_manager(
+                            dp_group, async_ops=async_op and not sync_unshard_coalescing
+                        )
                         if len(weight_buffers) > 1
                         else nullcontext()
                     )

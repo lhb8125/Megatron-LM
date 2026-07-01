@@ -281,6 +281,12 @@ buckets retain the normal storage-freeing behavior. This tests whether async uns
 storage that an earlier parameter view still consumes. It is not a supported production
 configuration.
 
+`MCORE_FSDP_SYNC_UNSHARD_COALESCING=1` is a temporary no-neighbor diagnostic that preserves
+the side-stream and event control flow but invokes `_coalescing_manager(..., async_ops=False)`
+for multi-buffer unshard runs. Combined with deferred binding, it isolates asynchronous
+coalesced-work completion from wrapper mutation, output storage reuse, and stream placement. It
+is not a supported production configuration.
+
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full
 buffer alive while the consumer kernel runs asynchronously. After readiness,
