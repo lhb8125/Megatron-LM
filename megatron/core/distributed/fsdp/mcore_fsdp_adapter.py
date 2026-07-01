@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_embedding_output_fsdp_units(module: nn.Module) -> List[nn.Module]:
-    """Return disjoint modules that directly own untied embedding/output weights."""
+    """Return multiple disjoint modules that directly own embedding/output weights."""
     units = []
     seen_params = set()
     for candidate in module.modules():
@@ -82,7 +82,9 @@ def _get_embedding_output_fsdp_units(module: nn.Module) -> List[nn.Module]:
             continue
         units.append(candidate)
         seen_params.update(params)
-    return units
+    # A single owner means a tied weight or a pipeline stage with only one
+    # endpoint. There is no concatenated root buffer to split in either case.
+    return units if len(units) > 1 else []
 
 
 class FullyShardedDataParallel(_BaseDataParallel):
@@ -344,7 +346,6 @@ class FullyShardedDataParallel(_BaseDataParallel):
         if (
             ddp_config.use_megatron_fsdp
             and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
-            and getattr(config, "untie_embeddings_and_output_weights", False)
         ):
             standalone_kwargs = dict(kwargs)
             standalone_kwargs["skip_backward_callback"] = False

@@ -155,7 +155,6 @@ class TestFSDPV2LayerNormRecompute:
                     module=recompute_model,
                     fsdp_unit_modules=[TransformerLayer],
                 )
-                assert recompute_config.untie_embeddings_and_output_weights
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
