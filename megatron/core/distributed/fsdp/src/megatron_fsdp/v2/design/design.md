@@ -28,6 +28,22 @@ registered with `with_kwargs=True`. The fused path passes empty args/kwargs
 because these hooks may trigger parameter all-gathers but may not modify
 inputs; any non-`None` hook return remains an error.
 
+### Singleton Expert-DP Parameter Groups
+
+When expert data parallelism has world size one, the default adapter keeps expert parameters
+inside their parent `TransformerLayer` FSDP unit instead of creating a nested expert
+`FSDPModule`. `fully_shard()` accepts per-parameter mesh and gradient-scaling selectors, and
+`FSDPModule` includes their results in the `ParameterGroup` key. Parameters with
+`allreduce=False` therefore retain the expert-DP mesh and expert scaling while dense parameters
+in the same layer use the dense-DP mesh.
+
+Expert model, main-weight, and gradient buffers keep the normal ZeRO-3 layout and collective
+paths, including on a singleton expert mesh. Grouping them with the parent changes only the
+unit boundary and schedule: expert all-gather is launched with parent-layer prefetch and can
+overlap the preceding attention work instead of being launched by a nested module immediately
+before expert compute. This matches the v1 unit boundary without changing expert placement,
+per-microbatch scaling, buffer lifetimes, or full-iteration CUDA graph stream ordering.
+
 ---
 
 ## `_FSDPRootContext` — Shared Coordination Object

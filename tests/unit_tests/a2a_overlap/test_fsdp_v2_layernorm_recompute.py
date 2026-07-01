@@ -14,7 +14,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDP
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-from megatron.core.transformer import TransformerLayer
+from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     build_gpt_model,
@@ -150,14 +150,55 @@ class TestFSDPV2LayerNormRecompute:
                     layer.recompute_pre_mlp_layernorm for layer in recompute_model.decoder.layers
                 )
                 recompute_fsdp = FullyShardedDataParallel(
-                    config=recompute_config,
-                    ddp_config=make_ddp_config(),
-                    module=recompute_model,
-                    fsdp_unit_modules=[TransformerLayer],
+                    config=recompute_config, ddp_config=make_ddp_config(), module=recompute_model
                 )
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
+                expert_units = [
+                    child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
+                ]
+                assert expert_units
+                assert all(not isinstance(child, FSDPModule) for child in expert_units)
+                transformer_layers = list(recompute_model.decoder.layers)
+                assert all(isinstance(layer, FSDPModule) for layer in transformer_layers)
+                expert_param_groups = [
+                    param_group
+                    for layer in transformer_layers
+                    for param_group in layer._fsdp_param_groups
+                    if any(not getattr(param, "allreduce", True) for param in param_group.params)
+                ]
+                dense_param_groups = [
+                    param_group
+                    for layer in transformer_layers
+                    for param_group in layer._fsdp_param_groups
+                    if all(getattr(param, "allreduce", True) for param in param_group.params)
+                ]
+                assert expert_param_groups and dense_param_groups
+                expert_dp_groups = {param_group.dp_group for param_group in expert_param_groups}
+                assert expert_dp_groups
+                assert all(
+                    torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
+                )
+                assert all(
+                    param_group.model_weight_buffer.is_distributed
+                    and param_group.main_grad_buffer.is_distributed
+                    for param_group in expert_param_groups
+                )
+                assert all(
+                    torch.distributed.get_world_size(param_group.dp_group) == 4
+                    for param_group in dense_param_groups
+                )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
+
+                singleton_all_gathers = []
+                original_all_gather = torch.distributed.all_gather_into_tensor
+
+                def track_all_gather(*args, **kwargs):
+                    if kwargs.get("group") in expert_dp_groups:
+                        singleton_all_gathers.append("all_gather")
+                    return original_all_gather(*args, **kwargs)
+
+                monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", track_all_gather)
 
                 rank = torch.distributed.get_rank()
                 recompute_loss = overlap_train_step(
@@ -180,6 +221,7 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
+                assert singleton_all_gathers
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

@@ -57,6 +57,8 @@ def fully_shard(
     enable_unshard_prefetch: bool = True,
     enable_async_reduce_grad: bool = True,
     gradient_scaling_factor: Optional[float] = None,
+    param_mesh_fn: Optional[Callable[[nn.Parameter], DeviceMesh]] = None,
+    param_gradient_scaling_factor_fn: Optional[Callable[[nn.Parameter], Optional[float]]] = None,
     enable_trace_pool: bool = False,
     sharding_strategy: str = "optim_grads_params",
     enable_cuda_graph: bool = False,
@@ -121,6 +123,8 @@ def fully_shard(
         ignored_params,
         mp_policy=mp_policy,
         gradient_scaling_factor=gradient_scaling_factor,
+        param_mesh_fn=param_mesh_fn,
+        param_gradient_scaling_factor_fn=param_gradient_scaling_factor_fn,
         sharding_strategy=sharding_strategy,
     )
     # ParameterGroup initialization copies values into FSDP-owned buffers and
