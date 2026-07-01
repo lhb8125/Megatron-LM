@@ -1062,9 +1062,10 @@ class CheckpointWithoutOutput(object):
                 assert torch.isfinite(
                     output
                 ).all(), f"Non-finite recompute output at {self.debug_name} output={index}"
-                assert torch.equal(
-                    output, reference
-                ), f"Recompute output differs from forward at {self.debug_name} output={index}"
+                if not self._debug_native_rmsnorm_enabled():
+                    assert torch.equal(
+                        output, reference
+                    ), f"Recompute output differs from forward at {self.debug_name} output={index}"
 
         # Zero-copy: make output's StorageImpl point to recomputation_output's data.
         # This operates at the UntypedStorage level (below TensorImpl), so:
@@ -1077,6 +1078,10 @@ class CheckpointWithoutOutput(object):
 
         if self._debug_recompute_enabled():
             for index, (output, recomputation_output) in enumerate(zip(self.outputs, outputs)):
+                assert torch.isfinite(output).all(), (
+                    f"Restored checkpoint alias is non-finite after share_storage at "
+                    f"{self.debug_name} output={index}"
+                )
                 assert torch.equal(output, recomputation_output), (
                     f"Restored checkpoint alias differs after share_storage at "
                     f"{self.debug_name} output={index}"

@@ -567,7 +567,10 @@ same FSDP pre-forward hook and then uses the same input and parameter object, so
 gradients still flow to the original parameter. It only distinguishes a TE
 reentrant-recompute failure from corruption in the
 checkpoint output-storage restoration. This is a diagnostic substitution, not
-a supported mixed-implementation training mode.
+a supported mixed-implementation training mode. When combined with the broader
+checkpoint check, native output is required to be finite but not bitwise equal
+to the original TE output; alias restoration is still compared bitwise against
+the native recompute result.
 
 Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
 stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
