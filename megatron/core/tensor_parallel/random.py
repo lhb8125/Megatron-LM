@@ -878,6 +878,47 @@ class CheckpointWithoutOutput(object):
             parameter.data = original_data
         self.debug_original_parameter_data = None
 
+    def _check_debug_parameters(self, stage):
+        if not self._debug_recompute_enabled() or self.debug_module is None:
+            return
+        recompute_parameters = tuple(self.debug_module.named_parameters())
+        assert len(recompute_parameters) == len(self.debug_forward_parameters)
+        for (name, parameter), (
+            reference_name,
+            reference_parameter,
+            reference,
+            reference_data_ptr,
+        ) in zip(recompute_parameters, self.debug_forward_parameters):
+            assert name == reference_name
+            assert parameter is reference_parameter, (
+                f"Checkpoint parameter object was not rebound at {self.debug_name} "
+                f"stage={stage} parameter={name}: "
+                f"recompute_type={type(parameter).__name__}, "
+                f"forward_type={type(reference_parameter).__name__}"
+            )
+            required_bytes = (
+                parameter.storage_offset() + parameter.numel()
+            ) * parameter.element_size()
+            storage_bytes = parameter.untyped_storage().size()
+            assert storage_bytes >= required_bytes, (
+                f"Checkpoint parameter storage released at {self.debug_name} "
+                f"stage={stage} parameter={name}: {storage_bytes} < {required_bytes} bytes"
+            )
+            assert torch.isfinite(parameter).all(), (
+                f"Non-finite checkpoint parameter at {self.debug_name} "
+                f"stage={stage} parameter={name}"
+            )
+            if not torch.equal(parameter, reference):
+                max_abs_diff = (parameter.float() - reference.float()).abs().max().item()
+                raise AssertionError(
+                    f"Checkpoint parameter differs from forward at {self.debug_name} "
+                    f"stage={stage} parameter={name}: data_ptr={parameter.data_ptr()}, "
+                    f"forward_data_ptr={reference_data_ptr}, "
+                    f"range=[{parameter.min().item()}, {parameter.max().item()}], "
+                    f"forward_range=[{reference.min().item()}, "
+                    f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
+                )
+
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """
         Checkpoint function.
@@ -1003,6 +1044,7 @@ class CheckpointWithoutOutput(object):
 
                 mfsdp_forward_pre_hook(self.debug_module, inputs, {})
             self._bind_debug_parameter_storage()
+            self._check_debug_parameters("precompute")
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 if self._debug_native_rmsnorm_enabled():
                     assert self.debug_module is not None and len(inputs) == 1
@@ -1022,44 +1064,7 @@ class CheckpointWithoutOutput(object):
             outputs = (outputs,)
 
         if self._debug_recompute_enabled():
-            if self.debug_module is not None:
-                recompute_parameters = tuple(self.debug_module.named_parameters())
-                assert len(recompute_parameters) == len(self.debug_forward_parameters)
-                for (name, parameter), (
-                    reference_name,
-                    reference_parameter,
-                    reference,
-                    reference_data_ptr,
-                ) in zip(recompute_parameters, self.debug_forward_parameters):
-                    assert name == reference_name
-                    assert parameter is reference_parameter, (
-                        f"Checkpoint parameter object was not rebound at {self.debug_name} "
-                        f"parameter={name}: recompute_type={type(parameter).__name__}, "
-                        f"forward_type={type(reference_parameter).__name__}"
-                    )
-                    required_bytes = (
-                        parameter.storage_offset() + parameter.numel()
-                    ) * parameter.element_size()
-                    storage_bytes = parameter.untyped_storage().size()
-                    assert storage_bytes >= required_bytes, (
-                        f"Checkpoint parameter storage released at {self.debug_name} "
-                        f"parameter={name}: {storage_bytes} < {required_bytes} bytes"
-                    )
-                    assert torch.isfinite(
-                        parameter
-                    ).all(), (
-                        f"Non-finite checkpoint parameter at {self.debug_name} parameter={name}"
-                    )
-                    if not torch.equal(parameter, reference):
-                        max_abs_diff = (parameter.float() - reference.float()).abs().max().item()
-                        raise AssertionError(
-                            f"Checkpoint parameter differs from forward at {self.debug_name} "
-                            f"parameter={name}: data_ptr={parameter.data_ptr()}, "
-                            f"forward_data_ptr={reference_data_ptr}, "
-                            f"range=[{parameter.min().item()}, {parameter.max().item()}], "
-                            f"forward_range=[{reference.min().item()}, "
-                            f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
-                        )
+            self._check_debug_parameters("postcompute")
             for index, (output, reference) in enumerate(zip(outputs, self.debug_forward_outputs)):
                 assert torch.isfinite(
                     output

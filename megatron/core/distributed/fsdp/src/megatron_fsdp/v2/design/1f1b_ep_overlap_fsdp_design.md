@@ -537,9 +537,10 @@ with the router weight check to localize a pre-MLP LayerNorm checkpoint failure.
 The selected checkpoint retains immutable copies of its forward output and
 LayerNorm parameters. It verifies, in order, that its saved inputs remain live
 and finite, the recompute-time parameter bindings remain live, finite, and equal
-to the forward values, its recomputed output is finite and equal to the forward
-result, `share_storage()` restores the original output alias, and the router
-still observes that value in backward. This check retains extra tensors and
+to the forward values both immediately before and after the recompute kernel,
+its recomputed output is finite and equal to the forward result,
+`share_storage()` restores the original output alias, and the router still
+observes that value in backward. This check retains extra tensors and
 synchronizes with the host, so it is restricted to short eager diagnostics.
 
 Set `MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK` to the same checkpoint name for a
