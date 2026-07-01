@@ -396,8 +396,11 @@ requirements:
   the capture body exits, then zeros FSDP grad buffers after capture and before
   the first replay so the captured backward does not immediately accumulate on
   top of capture-time gradients.
-- Optimizer zero-grad preserves `decoupled_grad` objects marked by FSDP v2 and
-  zeros their local storage, keeping optimizer-facing DTensor addresses stable.
+- Optimizer zero-grad preserves `decoupled_grad` objects marked by FSDP v2,
+  keeping optimizer-facing DTensor addresses stable. The owning grad-shard
+  buffer is zeroed once; optimizer-facing `decoupled_grad is dist_grad` views
+  do not issue duplicate per-parameter fill kernels, while independent
+  decoupled gradients are still zeroed directly.
 
 Transformer Engine gradient-accumulation fusion is currently disabled by
 argument validation for Megatron-FSDP v2 plus full-iteration CUDA graph.  In the
