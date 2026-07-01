@@ -364,23 +364,21 @@ directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:
   gradients and produce NaN after the first step. This flag tells TE to **overwrite** instead
   of accumulate.
 
-### Sliding Drain: The `i-3` Rule
+### Sliding Drain: The `i-2` Rule
 
-The drain loop ensures at most **3 modules' gradient buffers** are live at any time. MoE layers
-use separate parent and nested-expert FSDP modules, so this keeps roughly one and a half layers of
-reduce-scatter work in flight and better matches v1's capacity-based queue:
+The drain loop ensures at most **2 modules' gradient buffers** are live at any time:
 
 ```
 Backward processing order (reversed forward):
-  module[N]   ← current (i=0): i-3=-3  → no drain
-  module[N-1] ← current (i=1): i-3=-2  → no drain
-  module[N-2] ← current (i=2): i-3=-1  → no drain
-  module[N-3] ← current (i=3): i-3=0   → drain module[N]    (i-3=0)
+  layer[N]   ← current (i=0): i-2=-2  → no drain
+  layer[N-1] ← current (i=1): i-2=-1  → no drain
+  layer[N-2] ← current (i=2): i-2=0   → drain layer[N]    (i-2=0)
+  layer[N-3] ← current (i=3): i-2=1   → drain layer[N-1]  (i-2=1)
   ...
 ```
 
-By the time RS for `module[N-3]` starts, `module[N]`'s RS event is expected to be done
-(three backward module steps of compute have elapsed). `event.wait()` makes this explicit and safe
+By the time RS for `layer[N-2]` starts, `layer[N]`'s RS event is expected to be done
+(two backward steps of compute have elapsed). `event.wait()` makes this explicit and safe
 even if the timing estimate is wrong.
 
 ### `_post_backward_final_callback`
