@@ -193,9 +193,48 @@ class TestFSDPV2LayerNormRecompute:
                     torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
                 )
                 assert all(
+                    not param_group.model_weight_buffer.is_distributed
+                    and (
+                        param_group.transpose_weight_buffer is None
+                        or not param_group.transpose_weight_buffer.is_distributed
+                    )
+                    and param_group.main_grad_buffer.is_distributed
+                    for child in expert_units
+                    for param_group in child._fsdp_param_groups
+                    if param_group.requires_grad
+                )
+                assert all(
                     isinstance(layer, FSDPModule) for layer in recompute_model.decoder.layers
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
+
+                for child in expert_units:
+                    for param_group in child._fsdp_param_groups:
+                        model_buffer = param_group.model_weight_buffer
+                        model_data_ptr = model_buffer.data.data_ptr()
+                        transpose_buffer = param_group.transpose_weight_buffer
+                        transpose_data_ptr = (
+                            transpose_buffer.data.data_ptr()
+                            if transpose_buffer is not None
+                            else None
+                        )
+
+                        param_group.reshard()
+                        assert model_buffer.data._dirty
+                        if transpose_buffer is not None:
+                            assert transpose_buffer.data._dirty
+
+                        param_group.unshard(bwd_pass=False)
+                        assert not model_buffer.data._dirty
+                        assert model_buffer.data.data_ptr() == model_data_ptr
+                        assert model_buffer._unsharded_buffer is None
+
+                        if transpose_buffer is not None:
+                            param_group.unshard(bwd_pass=True)
+                            assert not transpose_buffer.data._dirty
+                            assert transpose_buffer.data.data_ptr() == transpose_data_ptr
+                            assert transpose_buffer._unsharded_buffer is None
+                        param_group.reshard()
 
                 singleton_collectives = []
                 original_all_gather = torch.distributed.all_gather_into_tensor

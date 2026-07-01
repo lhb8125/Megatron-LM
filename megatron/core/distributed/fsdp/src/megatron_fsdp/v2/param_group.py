@@ -161,8 +161,8 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
-        shard_main_weights = s != "no_shard"
+        shard_weights = s == "optim_grads_params" and self._dp_world_size > 1
+        shard_main_weights = s != "no_shard" and self._dp_world_size > 1
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
         # Create model weight buffers. The policy owns dtype-sensitive storage
