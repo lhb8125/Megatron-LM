@@ -147,9 +147,7 @@ module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
 ### `FSDPModule.unshard(async_op, bwd_pass)`
 
 ```python
-caller_stream = torch.cuda.current_stream()
-current_stream_unshard = os.environ.get("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "0") == "1"
-stream = ctx.ag_stream if async_op and not current_stream_unshard else caller_stream
+stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
 
 # *** Critical: synchronize ag_stream with current_stream before launching AG ***
 # This ensures main-stream writes to parameter data (e.g. reshard after forward,
@@ -159,13 +157,9 @@ stream = ctx.ag_stream if async_op and not current_stream_unshard else caller_st
 if async_op:
     stream.wait_stream(torch.cuda.current_stream())
 
-# Build the work list: self + (optionally) next module to prefetch.
-# bwd_pass selects the weight-buffer orientation. The lifecycle phase selects
-# traversal direction, since backward recompute also requests forward buffers.
-prefetch_bwd_pass = ctx.backward_phase
-disable_neighbor_prefetch = os.environ.get("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "0") == "1"
-if async_op and not disable_neighbor_prefetch:
-    prefetch = _get_prefetch_next_modules(prefetch_bwd_pass)
+# Build the work list: self + (optionally) next module to prefetch
+if async_op:
+    prefetch = _get_prefetch_next_modules(bwd_pass)   # returns [next_module] or []
 else:
     prefetch = []
 
@@ -192,13 +186,6 @@ for module in [self] + prefetch:
 if ctx.unshard_done_events[id(self)] is not None:
     ctx.unshard_done_events[id(self)].wait()          # main stream waits on ag_stream event
 
-# Keep the full buffers alive until this consumer stream finishes. For the
-# static trace pool this also orders the next user of a shared slot.
-consumer_stream = torch.cuda.current_stream()
-for _, param_group in self._named_param_groups:
-    for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
-        weight_buffer.record_unsharded_buffer_stream(consumer_stream)
-
 # Install full parameter tensors into the nn.Module (safe after event.wait)
 for param_names, param_group in self._named_param_groups:
     for name, param in zip(param_names, param_group.params):
@@ -220,12 +207,6 @@ previous forward, or tensor-parallel slice updates) are fully visible to the all
 kernel. Without this barrier, stale or partially-written parameter shards may be read by
 the NCCL collective, causing convergence divergence.
 
-**Backward recompute prefetch direction.** `bwd_pass` selects which mixed-precision
-weight buffers a module needs, but it does not always identify traversal direction.
-LayerNorm activation recompute runs during backward while requesting the forward-oriented
-rowwise buffer. Prefetch therefore follows `ctx.backward_phase`; otherwise the rowwise
-request walks forward and can re-unshard modules whose backward has already completed.
-
 **NVTX profiling.** `unshard()`, `reshard()`, and `reduce_grad()` each push/pop a
 `torch.cuda.nvtx` range (`"MFSDP unshard"`, `"MFSDP reshard"`, `"MFSDP reduce_grad"`)
 for profiling visibility in tools like Nsight Systems.
@@ -238,71 +219,16 @@ post-processing, but the module-level loop can submit several buffer all-gathers
 through one NCCL grouped launch. The post-processing step intentionally happens
 after the coalesced all-gather has been queued on the same stream, preserving the
 ordering expected by FP8/NVFP4 rebuild hooks. With `async_ops=True`, the
-coalescing manager launches the grouped collective only when its context exits
-and yields a manager that owns the resulting `Work`. The async path must call
+coalescing manager launches the grouped collective when its context exits and
+yields a manager that owns the resulting `Work`. The async path calls
 `manager.wait()` while `ag_stream` is current before recording the module's
-readiness event. For NCCL this inserts the collective completion dependency into
-`ag_stream` without turning off overlap; otherwise the readiness event can run
-before the backend NCCL stream finishes writing the gathered buffers.
+readiness event. This inserts the NCCL completion dependency into `ag_stream`;
+otherwise the readiness event can run before the backend stream finishes
+writing the gathered buffers.
 
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
-
-`MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH=1` is a temporary diagnostic switch that preserves
-the current module's asynchronous all-gather on `ag_stream` and its event wait while removing
-only the adjacent-module lookahead. It isolates current-module async unshard from neighbor
-prefetch and is not a supported production configuration.
-
-Two additional temporary diagnostics split the current-module path. With neighbor prefetch
-disabled, `MCORE_FSDP_POST_UNSHARD_ON_CALLER=1` leaves the all-gather on `ag_stream` but waits
-for its event before running TE post-unshard processing on the caller stream, matching v1's
-ordering. `MCORE_FSDP_CURRENT_STREAM_UNSHARD=1` keeps the async/event control flow but dispatches
-the whole current unshard on the caller stream. Neither switch is a supported production
-configuration.
-
-`MCORE_FSDP_DISABLE_UNSHARD_EVENT=1` is a final temporary split used together with
-current-stream unshard and disabled neighbor prefetch. It leaves `async_op=True` at the hook
-boundary but skips event creation and persistence, making the event lifecycle the only
-remaining difference under test. It is not a supported production configuration.
-
-At the adapter boundary, the mutually exclusive temporary diagnostics
-`MCORE_FSDP_FORCE_UNSHARD_PREFETCH=1` and `MCORE_FSDP_DISABLE_UNSHARD_PREFETCH=1` override
-only the `enable_unshard_prefetch` argument passed to v2 `fully_shard()`. They leave the global
-`ddp_config.overlap_param_gather` value unchanged, allowing a two-way isolation of v2 unshard
-overlap from optimizer and training-loop uses of the global flag. They are not supported
-production configurations.
-
-`MCORE_FSDP_DEFER_UNSHARD_BIND=1` is a temporary no-neighbor diagnostic that leaves the
-current module's all-gather on `ag_stream`, but calls `unshard(bind_params=False)`. After the
-current module's event wait, the caller stream binds the materialized full buffers and runs
-post-unshard processing. This tests whether mutating parameter wrappers before collective
-readiness is the corruption point. It is not a supported production configuration.
-
-`MCORE_FSDP_RETAIN_WEIGHT_STORAGE=1` is a temporary eager-only diagnostic for the
-`StorageFreeingBucketAllocator`. On free, model and transpose weight buckets are removed from
-the allocator without resizing their storage to zero. Existing parameter views therefore keep
-the old generation alive while the next all-gather writes a distinct allocation. Gradient
-buckets retain the normal storage-freeing behavior. This tests whether async unshard overwrites
-storage that an earlier parameter view still consumes. It is not a supported production
-configuration.
-
-`MCORE_FSDP_SYNC_UNSHARD_COALESCING=1` is a temporary no-neighbor diagnostic that preserves
-the side-stream and event control flow but invokes `_coalescing_manager(..., async_ops=False)`
-for multi-buffer unshard runs. Combined with deferred binding, it isolates asynchronous
-coalesced-work completion from wrapper mutation, output storage reuse, and stream placement. It
-is not a supported production configuration.
-
-**Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
-producer-to-consumer ordering, but does not by itself keep the temporary full
-buffer alive while the consumer kernel runs asynchronously. After readiness,
-`FSDPModule.unshard()` records every required full weight buffer on the current
-consumer stream. Storage-backed allocators use `Tensor.record_stream()` so a
-later `reshard()` cannot return the storage to CUDA too early. In optimized
-`TracePoolAllocator` mode, `free()` transfers the recorded streams to the
-physical slot, and the next `allocate()` of that slot inserts `wait_stream()`
-dependencies before another key can overwrite it. Producer streams are recorded
-through the same path for all-gather and reduce-scatter buffers.
 
 ### `_get_prefetch_next_modules(bwd_pass)`
 

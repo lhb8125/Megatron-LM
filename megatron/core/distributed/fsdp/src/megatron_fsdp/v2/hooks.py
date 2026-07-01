@@ -16,7 +16,6 @@
 
 import functools
 import logging
-import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -80,12 +79,6 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
 
     ctx = target._fsdp_root_context
     assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
-    debug_name = getattr(hook_module, "_mcore_checkpoint_debug_name", None)
-    force_recompute_unshard = (
-        ctx.backward_phase
-        and debug_name is not None
-        and os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_FORCE_UNSHARD") == debug_name
-    )
 
     # ---- root: forward-phase setup (once per micro-batch) ------------------
     if target._fsdp_state._is_root:
@@ -97,20 +90,9 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
         ctx.backward_phase = False
 
     # ---- unshard parameters for this module -------------------------------
-    if force_recompute_unshard:
-        target.reshard()
-        target.unshard(async_op=False, bwd_pass=True)
-        target.unshard(async_op=False, bwd_pass=False)
-    else:
-        if ctx.backward_phase:
-            target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
-        target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
-    if (
-        ctx.backward_phase
-        and debug_name is not None
-        and os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM") == debug_name
-    ):
-        torch.cuda.current_stream().wait_stream(ctx.ag_stream)
+    if ctx.backward_phase:
+        target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
+    target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
 
     # ---- free stale grad data (safe to repeat, idempotent) ----------------
     for param_group in target._fsdp_param_groups:

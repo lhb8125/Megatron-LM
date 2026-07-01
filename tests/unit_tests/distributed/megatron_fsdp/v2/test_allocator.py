@@ -158,37 +158,6 @@ class TestTracePoolFullIterationGradBuffers:
         assert second.rebind_unsharded_buffer_to_allocator(zero=True)
         assert first._unsharded_buffer.data_ptr() != second._unsharded_buffer.data_ptr()
 
-    def test_shared_slot_waits_for_previous_consumer_stream(self, monkeypatch):
-        allocator = TracePoolAllocator()
-        first_key = (0, "model_weight")
-        second_key = (1, "model_weight")
-
-        allocator.allocate(key=first_key, size=16, dtype=torch.float32, device=torch.device("cpu"))
-        allocator.free(first_key)
-        allocator.allocate(key=second_key, size=16, dtype=torch.float32, device=torch.device("cpu"))
-        allocator.free(second_key)
-        allocator.plan()
-
-        assert allocator._key_to_slot[first_key] == allocator._key_to_slot[second_key]
-
-        allocator.allocate(key=first_key, size=16, dtype=torch.float32, device=torch.device("cpu"))
-        consumer_stream = object()
-        allocator.record_stream(first_key, consumer_stream)
-        allocator.free(first_key)
-
-        waited_streams = []
-
-        class RecordingStream:
-            def wait_stream(self, stream):
-                waited_streams.append(stream)
-
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: RecordingStream())
-        allocator.allocate(
-            key=second_key, size=16, dtype=torch.float32, device=torch.device("cuda")
-        )
-
-        assert waited_streams == [consumer_stream]
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

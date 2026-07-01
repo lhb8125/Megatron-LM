@@ -10,11 +10,6 @@ import torch
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as fsdp_module_impl
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.allocator import (
-    StorageFreeingBucketAllocator,
-)
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import _FSDPRootContext
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
@@ -62,11 +57,7 @@ def test_async_coalesced_unshard_waits_for_work(monkeypatch):
 
     monkeypatch.setattr(fsdp_module_impl, "_coalescing_manager", fake_coalescing_manager)
     fsdp_module_impl._unshard_weight_buffers(
-        dp_group,
-        [FakeWeightBuffer("a"), FakeWeightBuffer("b")],
-        async_op=True,
-        coalescing_async_op=True,
-        bind_params=True,
+        dp_group, [FakeWeightBuffer("a"), FakeWeightBuffer("b")], async_op=True
     )
 
     assert order == ["unshard:a", "unshard:b", "launch", "wait"]
@@ -87,86 +78,24 @@ class TestFSDPV2LayerNormRecompute:
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
-    @pytest.mark.parametrize(
-        "diagnostic_mode",
-        [
-            "default",
-            "no_neighbor",
-            "post_unshard_caller",
-            "current_stream",
-            "no_event",
-            "global_sync_fsdp_async",
-            "global_overlap_fsdp_sync",
-            "defer_bind",
-            "retain_weight_storage",
-            "sync_coalescing",
-        ],
-    )
-    def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
-        monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
-        no_neighbor_modes = {
-            "no_neighbor",
-            "post_unshard_caller",
-            "current_stream",
-            "no_event",
-            "defer_bind",
-            "retain_weight_storage",
-            "sync_coalescing",
-        }
-        if diagnostic_mode in no_neighbor_modes:
-            monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
-        if diagnostic_mode == "post_unshard_caller":
-            monkeypatch.setenv("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "1")
-        if diagnostic_mode in ("current_stream", "no_event"):
-            monkeypatch.setenv("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "1")
-        if diagnostic_mode == "no_event":
-            monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "1")
-        if diagnostic_mode == "global_sync_fsdp_async":
-            monkeypatch.setenv("MCORE_FSDP_FORCE_UNSHARD_PREFETCH", "1")
-        if diagnostic_mode == "global_overlap_fsdp_sync":
-            monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_PREFETCH", "1")
-        if diagnostic_mode == "defer_bind":
-            monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
-        if diagnostic_mode == "retain_weight_storage":
-            monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
-            monkeypatch.setenv("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "1")
-        if diagnostic_mode == "sync_coalescing":
-            monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
-            monkeypatch.setenv("MCORE_FSDP_SYNC_UNSHARD_COALESCING", "1")
+    def test_mxfp8_layernorm_recompute(self, monkeypatch):
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
-        original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
-        original_get_prefetch = _FSDPRootContext.get_prefetch_next_modules
         recompute_stream_pairs = []
-        recorded_consumer_streams = []
-        prefetch_directions = []
 
         def checkpoint_with_stream(checkpoint, *args, **kwargs):
-            if checkpoint.debug_name is not None:
-                checkpoint._test_forward_stream = torch.cuda.current_stream()
+            checkpoint._test_forward_stream = torch.cuda.current_stream()
             return original_checkpoint(checkpoint, *args, **kwargs)
 
         def recompute_with_stream_check(checkpoint, grad):
-            if checkpoint.debug_name is not None:
+            if hasattr(checkpoint, "_test_forward_stream"):
                 recompute_stream_pairs.append(
                     (checkpoint._test_forward_stream, torch.cuda.current_stream())
                 )
             return original_recompute(checkpoint, grad)
 
-        def record_stream_with_check(buffer, stream):
-            recorded_consumer_streams.append(stream)
-            return original_record_stream(buffer, stream)
-
-        def get_prefetch_with_check(ctx, module, bwd_pass=False):
-            prefetch_directions.append((ctx.backward_phase, bwd_pass))
-            return original_get_prefetch(ctx, module, bwd_pass=bwd_pass)
-
         monkeypatch.setattr(CheckpointWithoutOutput, "checkpoint", checkpoint_with_stream)
         monkeypatch.setattr(CheckpointWithoutOutput, "_recompute", recompute_with_stream_check)
-        monkeypatch.setattr(
-            DataParallelBuffer, "record_unsharded_buffer_stream", record_stream_with_check
-        )
-        monkeypatch.setattr(_FSDPRootContext, "get_prefetch_next_modules", get_prefetch_with_check)
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -199,7 +128,7 @@ class TestFSDPV2LayerNormRecompute:
                 use_megatron_fsdp_v2=True,
                 data_parallel_sharding_strategy="optim_grads_params",
                 overlap_grad_reduce=True,
-                overlap_param_gather=diagnostic_mode != "global_sync_fsdp_async",
+                overlap_param_gather=True,
                 fp8_param_gather=True,
                 megatron_fsdp_main_params_dtype=None,
             )
@@ -248,54 +177,10 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
-                assert recorded_consumer_streams
-                assert all(
-                    recompute_stream in recorded_consumer_streams
-                    for _, recompute_stream in recompute_stream_pairs
-                ), "LayerNorm recompute stream must own the unsharded weight-buffer lifetime"
-                if (
-                    diagnostic_mode in no_neighbor_modes
-                    or diagnostic_mode == "global_overlap_fsdp_sync"
-                ):
-                    assert not prefetch_directions
-                else:
-                    assert any(backward_phase for backward_phase, _ in prefetch_directions)
-                    assert all(
-                        prefetch_bwd_pass
-                        for backward_phase, prefetch_bwd_pass in prefetch_directions
-                        if backward_phase
-                    ), "Every backward-phase prefetch must follow backward module order"
+
                 del recompute_fsdp, recompute_opt
                 gc.collect()
                 torch.cuda.empty_cache()
         except Exception:
             traceback.print_exc()
             raise
-
-    def test_retain_weight_storage_uses_distinct_generation(self, monkeypatch):
-        monkeypatch.setenv("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "1")
-        allocator = StorageFreeingBucketAllocator()
-        device = torch.device("cuda", torch.cuda.current_device())
-        size = 1024
-
-        weight_key = ((0, 0), "model_weight")
-        old_weight = allocator.allocate(
-            key=weight_key, size=size, dtype=torch.uint8, device=device
-        ).data
-        old_weight_view = old_weight[:]
-        old_weight_ptr = old_weight.data_ptr()
-        allocator.free(weight_key)
-        assert old_weight_view._typed_storage()._size() == size
-
-        new_weight = allocator.allocate(
-            key=weight_key, size=size, dtype=torch.uint8, device=device
-        ).data
-        assert new_weight.data_ptr() != old_weight_ptr
-
-        grad_key = ((0, 0), "main_grad")
-        old_grad = allocator.allocate(
-            key=grad_key, size=size, dtype=torch.bfloat16, device=device
-        ).data
-        old_grad_view = old_grad[:]
-        allocator.free(grad_key)
-        assert old_grad_view._typed_storage()._size() == 0

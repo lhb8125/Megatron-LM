@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import os
 import random
 from contextlib import nullcontext
 from typing import Dict, List, Optional
@@ -294,18 +293,9 @@ class FullyShardedDataParallel(_BaseDataParallel):
                 enabled=ddp_config.fp4_param_gather, recipe=config.fp4_recipe
             ),
         )
-        force_unshard_prefetch = os.environ.get("MCORE_FSDP_FORCE_UNSHARD_PREFETCH", "0") == "1"
-        disable_unshard_prefetch = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_PREFETCH", "0") == "1"
-        if force_unshard_prefetch and disable_unshard_prefetch:
-            raise ValueError("FSDP unshard prefetch cannot be both forced and disabled")
-        enable_unshard_prefetch = ddp_config.overlap_param_gather
-        if force_unshard_prefetch:
-            enable_unshard_prefetch = True
-        elif disable_unshard_prefetch:
-            enable_unshard_prefetch = False
         kwargs = {
             "mp_policy": fully_shard_mp_policy,
-            "enable_unshard_prefetch": enable_unshard_prefetch,
+            "enable_unshard_prefetch": ddp_config.overlap_param_gather,
             "enable_async_reduce_grad": ddp_config.overlap_grad_reduce,
             "enable_trace_pool": ddp_config.fsdp_double_buffer or ddp_config.fsdp_trace_pool,
             "sharding_strategy": ddp_config.data_parallel_sharding_strategy,
@@ -399,11 +389,6 @@ class FullyShardedDataParallel(_BaseDataParallel):
                     ]:
                         if hasattr(param, attr_name):
                             setattr(dist_param, attr_name, getattr(param, attr_name))
-
-        # This fail-fast path intentionally synchronizes per-parameter checks
-        # and is only suitable for short eager debugging runs.
-        if os.environ.get("MCORE_FSDP_V2_NAN_CHECK", "").lower() in {"1", "true", "yes", "on"}:
-            module._set_nan_check(True)
 
         super().__init__(config=config, module=module)
 

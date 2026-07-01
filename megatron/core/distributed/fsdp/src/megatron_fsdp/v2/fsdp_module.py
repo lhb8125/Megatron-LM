@@ -15,9 +15,8 @@
 """FSDPModule implementation for Megatron-FSDP2."""
 
 import logging
-import os
 import weakref
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,18 +34,16 @@ from .utils import ParamGroupIdx, _replace_module_parameter
 logger = logging.getLogger(__name__)
 
 
-def _unshard_weight_buffers(
-    dp_group, weight_buffers, *, async_op: bool, coalescing_async_op: bool, bind_params: bool
-) -> None:
+def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None:
     """Unshard one same-process-group buffer run and order async completion."""
     cm = (
-        _coalescing_manager(dp_group, async_ops=coalescing_async_op)
+        _coalescing_manager(dp_group, async_ops=async_op)
         if len(weight_buffers) > 1
         else nullcontext()
     )
     with cm as coalescing_event:
         for weight_buffer in weight_buffers:
-            weight_buffer.unshard(bind_params=bind_params)
+            weight_buffer.unshard(bind_params=True)
     if async_op and coalescing_event is not None:
         coalescing_event.wait()
 
@@ -673,46 +670,27 @@ class FSDPModule:
         """
         torch.cuda.nvtx.range_push("MFSDP unshard")
         ctx = self._fsdp_root_context
-        caller_stream = torch.cuda.current_stream()
-        current_stream_unshard = os.environ.get("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "0") == "1"
-        stream = ctx.ag_stream if async_op and not current_stream_unshard else caller_stream
+        stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
 
         if async_op:
             # Synchronize ag_stream with current_stream to guarantee that main-stream
             # writes to parameter data are visible before the all-gather kernel reads them
             # on ag_stream. Without this barrier, stale or partially-written parameter
             # shards may be gathered, causing convergence divergence.
-            stream.wait_stream(caller_stream)
+            stream.wait_stream(torch.cuda.current_stream())
 
-        # Buffer orientation and traversal direction are independent during
-        # activation recompute: backward may need a forward-oriented weight
-        # buffer, but the next module is still the previous layer in forward
-        # order. Derive traversal from the lifecycle phase, not bwd_pass.
-        prefetch_bwd_pass = ctx.backward_phase
-
-        # Unshard this module and optionally prefetch the next module in the
-        # active forward/backward traversal.
-        disable_neighbor_prefetch = (
-            os.environ.get("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "0") == "1"
-        )
-        post_unshard_on_caller = os.environ.get("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "0") == "1"
-        disable_unshard_event = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "0") == "1"
-        defer_unshard_bind = os.environ.get("MCORE_FSDP_DEFER_UNSHARD_BIND", "0") == "1"
-        sync_unshard_coalescing = os.environ.get("MCORE_FSDP_SYNC_UNSHARD_COALESCING", "0") == "1"
-        post_unshard_on_caller = post_unshard_on_caller or defer_unshard_bind
-        if async_op and not disable_neighbor_prefetch:
-            prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
+        # Unshard this module and optionally prefetch next modules in the forward/backward pass
+        if async_op:
+            prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=bwd_pass)
         else:
             prefetch_modules = []
-        self_post_unshard = []
-        self_bind_buffers = []
         for module in [self] + prefetch_modules:
             if all(
                 param_group.has_unsharded_weight_buffers(bwd_pass=bwd_pass)
                 for param_group in module._fsdp_param_groups
             ):
                 continue
-            if prefetch_bwd_pass and id(module) in ctx.backward_done_modules:
+            if bwd_pass and id(module) in ctx.backward_done_modules:
                 continue  # Skip prefetch for modules whose backward is already done
 
             # Unshard parameters for this module.  Coalesce consecutive all-gathers
@@ -738,25 +716,13 @@ class FSDPModule:
                             buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
 
                 for dp_group, weight_buffers in buffer_runs:
-                    bind_params = not (defer_unshard_bind and module is self)
-                    _unshard_weight_buffers(
-                        dp_group,
-                        weight_buffers,
-                        async_op=async_op,
-                        coalescing_async_op=async_op and not sync_unshard_coalescing,
-                        bind_params=bind_params,
-                    )
-                    if not bind_params:
-                        self_bind_buffers.extend(weight_buffers)
+                    _unshard_weight_buffers(dp_group, weight_buffers, async_op=async_op)
 
-                if post_unshard_on_caller and module is self:
-                    self_post_unshard.extend(pending_post_unshard)
-                else:
-                    for param_group in pending_post_unshard:
-                        param_group.post_unshard(bwd_pass=bwd_pass)
+                for param_group in pending_post_unshard:
+                    param_group.post_unshard(bwd_pass=bwd_pass)
 
             # Record event to track when unshard is done for this module
-            if async_op and not disable_unshard_event:
+            if async_op:
                 event = stream.record_event()
                 ctx.unshard_done_events[id(module)] = event
 
@@ -766,22 +732,6 @@ class FSDPModule:
         # all-gathers during activation recompute and prefetch re-entry.
         if ctx.unshard_done_events[id(self)] is not None:
             ctx.unshard_done_events[id(self)].wait()
-
-        # Diagnostic parity with v1: wait for the current module's all-gather,
-        # then run TE post-processing on the caller stream.
-        for weight_buffer in self_bind_buffers:
-            weight_buffer.bind_unsharded_buffer_to_params()
-        for param_group in self_post_unshard:
-            param_group.post_unshard(bwd_pass=bwd_pass)
-
-        # The all-gather event makes the weights ready on this stream, but it
-        # does not tell either the CUDA caching allocator or TracePoolAllocator
-        # that the stream will keep reading them. Record the consumer before
-        # reshard() can release or recycle the full buffers.
-        consumer_stream = caller_stream
-        for _, param_group in self._named_param_groups:
-            for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
-                weight_buffer.record_unsharded_buffer_stream(consumer_stream)
 
         # Replace module parameters with unsharded versions
         for param_names, param_group in self._named_param_groups:

@@ -1,7 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import functools
 import math
-import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -1335,9 +1334,6 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         ctx.router_dtype = router_dtype
         ctx.input_dtype = inp.dtype
         ctx.weight_dtype = weight.dtype
-        ctx.router_layer_number = getattr(inp, "_mcore_router_layer_number", None)
-        ctx.checkpoint_debug_name = getattr(inp, "_mcore_checkpoint_debug_name", None)
-        ctx.checkpoint_forward_reference = getattr(inp, "_mcore_checkpoint_forward_reference", None)
         inp_shape = inp.shape
         inp = inp.view(-1, inp_shape[-1])
 
@@ -1373,22 +1369,6 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         grad_shape = grad_output.shape
         inp = inp.view(-1, inp_shape[-1])
         grad_output = grad_output.view(-1, grad_shape[-1])
-        debug_router_weight = os.environ.get("MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK", "").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        if debug_router_weight:
-            location = f" at layer={ctx.router_layer_number}"
-            if ctx.checkpoint_forward_reference is not None:
-                assert torch.equal(inp, ctx.checkpoint_forward_reference), (
-                    f"Restored checkpoint alias changed before router gating backward{location}; "
-                    f"checkpoint={ctx.checkpoint_debug_name}"
-                )
-            assert torch.isfinite(inp).all(), f"Non-finite saved router gating input{location}"
-            assert torch.isfinite(grad_output).all(), "Non-finite router gating grad_output"
-
         if te_general_gemm is not None and ctx.router_dtype != torch.float64:
             grad_input = te_general_gemm(
                 weight.to(ctx.router_dtype), grad_output, ctx.router_dtype, layout="NN", grad=True
@@ -1401,17 +1381,6 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         else:
             grad_input = torch.mm(grad_output, weight.to(ctx.router_dtype)).to(ctx.input_dtype)
             grad_weight = torch.mm(grad_output.t(), inp.to(ctx.router_dtype)).to(ctx.weight_dtype)
-
-        if debug_router_weight and not torch.isfinite(grad_weight).all():
-            reference_grad_weight = torch.mm(grad_output.float().t(), inp.float()).to(
-                ctx.weight_dtype
-            )
-            assert torch.isfinite(
-                reference_grad_weight
-            ).all(), "Router gating wgrad is non-finite in both TE GEMM and FP32 torch.mm"
-            raise AssertionError(
-                "TE router gating wgrad is non-finite while FP32 torch.mm is finite"
-            )
 
         grad_bias = grad_output.sum(dim=0).to(ctx.weight_dtype) if bias is not None else None
         grad_input = grad_input.view(*inp_shape)

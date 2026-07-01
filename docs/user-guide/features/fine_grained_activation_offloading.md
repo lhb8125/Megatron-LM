@@ -50,11 +50,10 @@ TransformerConfig.fine_grained_offloading_max_inflight_offloads caps, per offloa
 
 With full-iteration CUDA graphs (`--cuda-graph-impl full_iteration`) and fine-grained activation offloading enabled, set it to a non-None integer: that path does not rely on record_stream, so explicit joins are required.
 
-Before resetting the offload manager, the full-iteration schedule joins both
-the D2H and H2D streams onto the current stream. The per-group inflight limit
-bounds D2H work during the iteration, but its final event for each group has no
-later group to trigger a join. The iteration-boundary join prevents those final
-copies, or a trailing H2D reload, from crossing the reset and capture boundary.
+The full-iteration schedule does not add a global D2H/H2D stream barrier before
+resetting the offload manager. D2H work is bounded by the per-group inflight
+limit above, while H2D reloads join the compute stream at their backward group
+boundaries.
 
 ## Transformer Engine quantized tensors
 

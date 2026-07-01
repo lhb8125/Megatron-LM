@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
@@ -735,7 +734,6 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         # the CheckpointWithoutOutput object is passed in, then it can access the saved input
         # tensors later for recomputation
         checkpoint_without_output_obj.ctx = ctx
-        ctx.checkpoint_without_output_obj = checkpoint_without_output_obj
         return outputs
 
     @staticmethod
@@ -746,12 +744,7 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         # This is to avoid double-reloading the inputs in CPU offloading scenario.
         inputs = ctx.inputs
         outputs = ctx.outputs
-        try:
-            torch.autograd.backward(outputs, args)
-        finally:
-            checkpoint_without_output_obj = getattr(ctx, "checkpoint_without_output_obj", None)
-            if checkpoint_without_output_obj is not None:
-                checkpoint_without_output_obj._restore_debug_parameter_storage()
+        torch.autograd.backward(outputs, args)
         ctx.outputs = None
         ctx.inputs = None
         grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else None for inp in inputs)
@@ -818,7 +811,7 @@ class CheckpointWithoutOutput(object):
     discarded output tensors are directly saved in the following modules for backward computation.
     """
 
-    def __init__(self, fp8=False, ckpt_manager=None, debug_name=None, debug_module=None):
+    def __init__(self, fp8=False, ckpt_manager=None):
         """
         Initialize CheckpointWithoutOutput.
 
@@ -828,8 +821,6 @@ class CheckpointWithoutOutput(object):
                          checkpoint() will auto-register to the manager, and
                          discard_output_and_register_recompute() will only discard
                          output without registering individual hooks.
-            debug_name: Optional name used by the opt-in recompute lifetime checker.
-            debug_module: Optional module whose parameters are checked during recomputation.
         """
         self.fp8 = bool(fp8)
         self.ckpt_manager = ckpt_manager
@@ -839,85 +830,6 @@ class CheckpointWithoutOutput(object):
         self.fwd_cuda_rng_state_tracker = None
         self.ctx = None
         self.outputs = None
-        self.debug_name = debug_name
-        self.debug_module = debug_module
-        self.debug_forward_inputs = None
-        self.debug_forward_outputs = None
-        self.debug_forward_parameters = None
-        self.debug_original_parameter_data = None
-
-    def _debug_recompute_enabled(self):
-        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_CHECK")
-        return self.debug_name is not None and target in {"1", "all", self.debug_name}
-
-    def _debug_input_lifetime_enabled(self):
-        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK")
-        return self.debug_name is not None and target in {"1", "all", self.debug_name}
-
-    def _debug_stable_parameter_enabled(self):
-        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER")
-        return self.debug_name is not None and target in {"1", "all", self.debug_name}
-
-    def _debug_native_rmsnorm_enabled(self):
-        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_NATIVE_RMSNORM")
-        return self.debug_name is not None and target in {"1", "all", self.debug_name}
-
-    def _bind_debug_parameter_storage(self):
-        if not self._debug_stable_parameter_enabled() or self.debug_module is None:
-            return
-        self.debug_original_parameter_data = tuple(
-            (parameter, parameter.data) for parameter in self.debug_module.parameters()
-        )
-        for parameter, _ in self.debug_original_parameter_data:
-            parameter.data = parameter.data.clone()
-
-    def _restore_debug_parameter_storage(self):
-        if self.debug_original_parameter_data is None:
-            return
-        for parameter, original_data in self.debug_original_parameter_data:
-            parameter.data = original_data
-        self.debug_original_parameter_data = None
-
-    def _check_debug_parameters(self, stage):
-        if not self._debug_recompute_enabled() or self.debug_module is None:
-            return
-        recompute_parameters = tuple(self.debug_module.named_parameters())
-        assert len(recompute_parameters) == len(self.debug_forward_parameters)
-        for (name, parameter), (
-            reference_name,
-            reference_parameter,
-            reference,
-            reference_data_ptr,
-        ) in zip(recompute_parameters, self.debug_forward_parameters):
-            assert name == reference_name
-            assert parameter is reference_parameter, (
-                f"Checkpoint parameter object was not rebound at {self.debug_name} "
-                f"stage={stage} parameter={name}: "
-                f"recompute_type={type(parameter).__name__}, "
-                f"forward_type={type(reference_parameter).__name__}"
-            )
-            required_bytes = (
-                parameter.storage_offset() + parameter.numel()
-            ) * parameter.element_size()
-            storage_bytes = parameter.untyped_storage().size()
-            assert storage_bytes >= required_bytes, (
-                f"Checkpoint parameter storage released at {self.debug_name} "
-                f"stage={stage} parameter={name}: {storage_bytes} < {required_bytes} bytes"
-            )
-            assert torch.isfinite(parameter).all(), (
-                f"Non-finite checkpoint parameter at {self.debug_name} "
-                f"stage={stage} parameter={name}"
-            )
-            if not torch.equal(parameter, reference):
-                max_abs_diff = (parameter.float() - reference.float()).abs().max().item()
-                raise AssertionError(
-                    f"Checkpoint parameter differs from forward at {self.debug_name} "
-                    f"stage={stage} parameter={name}: data_ptr={parameter.data_ptr()}, "
-                    f"forward_data_ptr={reference_data_ptr}, "
-                    f"range=[{parameter.min().item()}, {parameter.max().item()}], "
-                    f"forward_range=[{reference.min().item()}, "
-                    f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
-                )
 
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """
@@ -938,28 +850,10 @@ class CheckpointWithoutOutput(object):
 
         self.rng_states = _get_all_rng_states()
 
-        if self._debug_input_lifetime_enabled():
-            self.debug_forward_inputs = tuple(
-                (index, arg.detach().clone(), arg.data_ptr())
-                for index, arg in enumerate(args)
-                if isinstance(arg, torch.Tensor)
-            )
-
         outputs = CheckpointWithoutOutputFunction.apply(run_function, self, *args)
         self.outputs = outputs
         if isinstance(self.outputs, torch.Tensor):
             self.outputs = (self.outputs,)
-
-        if self._debug_recompute_enabled():
-            self.debug_forward_outputs = tuple(output.detach().clone() for output in self.outputs)
-            if self.debug_module is not None:
-                self.debug_forward_parameters = tuple(
-                    (name, parameter, parameter.detach().clone(), parameter.data_ptr())
-                    for name, parameter in self.debug_module.named_parameters()
-                )
-            for output, reference in zip(self.outputs, self.debug_forward_outputs):
-                output._mcore_checkpoint_debug_name = self.debug_name
-                output._mcore_checkpoint_forward_reference = reference
 
         # Auto-register to manager if provided
         if self.ckpt_manager is not None:
@@ -997,82 +891,14 @@ class CheckpointWithoutOutput(object):
 
             # Reconstruct full args list from saved ctx
             inputs = _load_args_from_ctx(self.ctx)
-            if self._debug_input_lifetime_enabled():
-                for index, reference, reference_data_ptr in self.debug_forward_inputs:
-                    input_ = inputs[index]
-                    required_bytes = (
-                        input_.storage_offset() + input_.numel()
-                    ) * input_.element_size()
-                    storage_bytes = input_.untyped_storage().size()
-                    assert storage_bytes >= required_bytes, (
-                        f"Checkpoint input storage released at {self.debug_name} input={index}: "
-                        f"{storage_bytes} < {required_bytes} bytes"
-                    )
-                    assert torch.isfinite(
-                        input_
-                    ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
-                    if not torch.equal(input_, reference):
-                        max_abs_diff = (input_.float() - reference.float()).abs().max().item()
-                        raise AssertionError(
-                            f"Checkpoint input differs from forward at {self.debug_name} "
-                            f"input={index}: data_ptr={input_.data_ptr()}, "
-                            f"forward_data_ptr={reference_data_ptr}, "
-                            f"range=[{input_.min().item()}, {input_.max().item()}], "
-                            f"forward_range=[{reference.min().item()}, "
-                            f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
-                        )
-            if self._debug_recompute_enabled():
-                for index, input_ in enumerate(inputs):
-                    if not isinstance(input_, torch.Tensor):
-                        continue
-                    required_bytes = (
-                        input_.storage_offset() + input_.numel()
-                    ) * input_.element_size()
-                    storage_bytes = input_.untyped_storage().size()
-                    assert storage_bytes >= required_bytes, (
-                        f"Checkpoint input storage released at {self.debug_name} input={index}: "
-                        f"{storage_bytes} < {required_bytes} bytes"
-                    )
-                    assert torch.isfinite(
-                        input_
-                    ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
-            if self._debug_native_rmsnorm_enabled() or self._debug_stable_parameter_enabled():
-                assert self.debug_module is not None
-                from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
-                    mfsdp_forward_pre_hook,
-                )
-
-                mfsdp_forward_pre_hook(self.debug_module, inputs, {})
-            self._bind_debug_parameter_storage()
-            self._check_debug_parameters("precompute")
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
-                if self._debug_native_rmsnorm_enabled():
-                    assert self.debug_module is not None and len(inputs) == 1
-                    weight = self.debug_module.weight
-                    if getattr(self.debug_module, "zero_centered_gamma", False):
-                        weight = weight + 1
-                    outputs = torch.nn.functional.rms_norm(
-                        inputs[0], tuple(weight.shape), weight, self.debug_module.eps
-                    )
-                else:
-                    outputs = self.run_function(*inputs)
+                outputs = self.run_function(*inputs)
 
         self.run_function = None
         self.rng_states = None
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
-
-        if self._debug_recompute_enabled():
-            self._check_debug_parameters("postcompute")
-            for index, (output, reference) in enumerate(zip(outputs, self.debug_forward_outputs)):
-                assert torch.isfinite(
-                    output
-                ).all(), f"Non-finite recompute output at {self.debug_name} output={index}"
-                if not self._debug_native_rmsnorm_enabled():
-                    assert torch.equal(
-                        output, reference
-                    ), f"Recompute output differs from forward at {self.debug_name} output={index}"
 
         # Zero-copy: make output's StorageImpl point to recomputation_output's data.
         # This operates at the UntypedStorage level (below TensorImpl), so:
@@ -1082,17 +908,6 @@ class CheckpointWithoutOutput(object):
         share_storage = _get_share_storage()
         for output, recomputation_output in zip(self.outputs, outputs):
             share_storage(output, recomputation_output)
-
-        if self._debug_recompute_enabled():
-            for index, (output, recomputation_output) in enumerate(zip(self.outputs, outputs)):
-                assert torch.isfinite(output).all(), (
-                    f"Restored checkpoint alias is non-finite after share_storage at "
-                    f"{self.debug_name} output={index}"
-                )
-                assert torch.equal(output, recomputation_output), (
-                    f"Restored checkpoint alias differs after share_storage at "
-                    f"{self.debug_name} output={index}"
-                )
 
         self.ctx.outputs = outputs
         self.ctx.inputs = inputs

@@ -439,9 +439,7 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
   3. Drains pending async reduce-grad events (`event.wait()` + release buffers).
   4. Resets root/context state (`backward_phase = False`, clears
      `backward_done_modules`, `_fsdp_pre_backward_done` flags).
-  5. Transitions the bucket allocator from trace to the optimized plan for
-     hook-managed schedules. The externally managed combined 1F1B schedule
-     defers this transition until its final backward-only phase completes.
+  5. Transitions bucket allocator from trace → optimized plan (first micro-batch).
 
 ### 4.3 Per-layer post-forward (reshard only) — `mfsdp_post_forward_hook`
 
@@ -505,103 +503,6 @@ When `overlap_moe_expert_parallel_comm=True`, the following constraints apply:
 ---
 
 ## 6. Key code locations
-
-### Fail-fast gradient localization
-
-Set `MCORE_FSDP_V2_NAN_CHECK=1` only for short eager debugging runs to enable
-the existing per-parameter checks around unshard and gradient reduction.  The
-post-reduce check executes on the reduce-scatter stream so it observes the
-completed optimizer-facing shard rather than racing that stream.  The checks
-detect both NaN and infinity.  Quantized parameter wrappers are excluded after
-unshard because MXFP8 backward intentionally refreshes only the columnwise
-payload; inspecting the wrapper can dereference the inactive rowwise view.
-The checks perform host-visible assertions and therefore must remain disabled
-for CUDA graph capture and performance measurements.
-
-For failures first observed in `mlp.router.weight.grad`, a short eager run may
-also set `MCORE_MOE_ROUTER_NAN_CHECK=1`.  This installs fail-fast checks on the
-router input, raw gating logits, force-balanced random logits, routing
-probabilities, and their backward gradients.  Like the FSDP checks, these
-hooks synchronize with the host and are debugging-only.
-
-Set `MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK=1` independently to check the
-router gating GEMM's weight-gradient contribution and the leaf parameter's
-post-accumulation `.grad`.  Keeping this separate from the tensor-stage checks
-allows the weight accumulation path to be observed without changing earlier
-router stream timing.
-
-When the weight check is enabled, `RouterGatingLinearFunction.backward` also
-validates its saved input and `grad_output`.  If the TE wgrad GEMM returns a
-non-finite tensor, it computes an FP32 `torch.mm` reference and reports whether
-the same finite operands remain finite in the independent implementation.
-The saved-input failure includes the router layer number.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_CHECK=pre_mlp_layernorm:<layer-number>` together
-with the router weight check to localize a pre-MLP LayerNorm checkpoint failure.
-The selected checkpoint retains immutable copies of its forward output and
-LayerNorm parameters. It verifies, in order, that its saved inputs remain live
-and finite, the recompute-time parameter bindings remain live, finite, and equal
-to the forward values both immediately before and after the recompute kernel,
-its recomputed output is finite and equal to the forward result,
-`share_storage()` restores the original output alias, and the router still
-observes that value in backward. This check retains extra tensors and
-synchronizes with the host, so it is restricted to short eager diagnostics.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK` to the same checkpoint name for a
-narrower saved-input lifetime check. The selected checkpoint clones each tensor
-input before its original forward, then verifies immediately before recompute
-that the restored input storage is live, finite, and bitwise equal to that
-forward value. This separates a finite-but-corrupted activation reload from a
-LayerNorm parameter or kernel failure without retaining the output and parameter
-references used by the broader check. It is also host-synchronizing and intended
-only for short eager diagnostics.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER` to the checkpoint name for a
-parameter-storage lifetime ablation. Immediately before recompute, the selected
-module first runs its FSDP pre-forward hook, then rebinds its parameters to
-independent clones that remain bound through
-the checkpoint's nested backward; the original FSDP-managed storage is restored
-afterward. If this removes the failure, the parameter values were valid when
-inspected but their backing storage did not remain valid for the asynchronous TE
-forward/backward kernels. This deliberately changes memory use and synchronization
-timing and is not a production fix.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_NATIVE_RMSNORM` to the checkpoint name to keep
-the original forward on Transformer Engine while recomputing the selected
-RMSNorm with `torch.nn.functional.rms_norm`. The native operation first runs the
-same FSDP pre-forward hook and then uses the same input and parameter object, so
-gradients still flow to the original parameter. It only distinguishes a TE
-reentrant-recompute failure from corruption in the
-checkpoint output-storage restoration. This is a diagnostic substitution, not
-a supported mixed-implementation training mode. When combined with the broader
-checkpoint check, native output is required to be finite but not bitwise equal
-to the original TE output; alias restoration is still compared bitwise against
-the native recompute result.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
-stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
-its consumer stream wait for the parameter all-gather stream after unshard.
-This deliberately waits for all earlier work on that stream and is therefore a
-diagnostic, not the final fine-grained dependency implementation.
-
-Set `MCORE_CHECKPOINT_RECOMPUTE_FORCE_UNSHARD` to the checkpoint name for a
-stronger readiness/lifetime ablation. Before the selected LayerNorm recompute,
-the owning FSDP layer discards its cached unsharded state and performs fresh
-synchronous backward- and forward-phase unshards on the consumer stream. This
-is intentionally expensive and exists only to distinguish stale module-global
-unshard state from a LayerNorm or checkpoint-storage failure.
-
-Set `MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK=<layer-number>` for a short eager
-combined-1F1B run to retain that layer's router input and compare it against an
-immutable clone at the preprocess, dispatch, expert, combine, and backward
-boundaries.  This pinpoints the first schedule stage that mutates storage still
-owned by `RouterGatingLinearFunction`.  The exact comparisons synchronize with
-the host and retain an extra activation, so the check is debugging-only and is
-not valid during CUDA graph capture or performance measurement.  Run this check
-with `layernorm` excluded from `recompute_modules`: `CheckpointWithoutOutput`
-intentionally releases the pre-MLP layernorm output at the expert boundary and
-restores it during backward, which otherwise appears as an expected
-`combine-exit` storage release rather than a lifetime violation.
 
 | Component | File |
 |---|---|
