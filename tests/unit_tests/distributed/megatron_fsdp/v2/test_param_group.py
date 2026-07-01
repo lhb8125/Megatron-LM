@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.param_group import ParameterGroup
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.utils import ParamGroupIdx
@@ -50,6 +51,15 @@ def dist_env():
     yield
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+@pytest.fixture(scope="session")
+def singleton_group(dist_env):
+    """Return this rank's singleton NCCL group, created in global rank order."""
+    groups = [torch.distributed.new_group(ranks=[rank]) for rank in range(_world_size())]
+    group = groups[torch.distributed.get_rank()]
+    yield group
+    torch.distributed.destroy_process_group(group)
 
 
 # ------------------------------------------------------------------ #
@@ -115,6 +125,28 @@ def _build_groups(strategy):
     return groups, originals, dp_group, rank, torch.distributed.get_world_size(), device
 
 
+def _world_size():
+    return torch.distributed.get_world_size()
+
+
+def _build_singleton_buffer(singleton_group, buffer_role):
+    device = torch.device(f"cuda:{torch.distributed.get_rank() % torch.cuda.device_count()}")
+    param = nn.Parameter(torch.arange(16, dtype=torch.bfloat16, device=device))
+    buffer = DataParallelBuffer(
+        params=[param],
+        param_idx={param: 0},
+        dtype=torch.bfloat16,
+        device=device,
+        dp_group=singleton_group,
+        param_group_id=ParamGroupIdx(1, 0),
+        mp_policy=MixedPrecisionPolicy(),
+        buffer_role=buffer_role,
+        is_distributed=True,
+        sharding_strategy="optim_grads_params",
+    )
+    return buffer
+
+
 def _flags(s):
     """Return (has_model_weight_buf, has_grad_buf, weight_distributed, grad_distributed).
 
@@ -161,6 +193,39 @@ class Ref:
 # ------------------------------------------------------------------ #
 #  Part 1: init_buffers — verify buffer creation and shard correctness
 # ------------------------------------------------------------------ #
+
+
+def test_singleton_unshard_uses_local_copy(singleton_group, monkeypatch):
+    buffer = _build_singleton_buffer(singleton_group, "model_weight")
+    expected = torch.arange(buffer.data_size, dtype=buffer.dtype, device=buffer.device)
+    buffer.init_data(expected.clone())
+
+    def fail_collective(*args, **kwargs):
+        raise AssertionError("singleton unshard must not launch all-gather")
+
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", fail_collective)
+    actual = buffer.unshard()
+
+    assert actual.data_ptr() != buffer.data.data_ptr()
+    assert torch.equal(actual, expected)
+
+
+def test_singleton_reduce_grad_accumulates_locally(singleton_group, monkeypatch):
+    buffer = _build_singleton_buffer(singleton_group, "main_grad")
+    buffer.init_data(torch.zeros(buffer.data_size, dtype=buffer.dtype, device=buffer.device))
+
+    def fail_collective(*args, **kwargs):
+        raise AssertionError("singleton reduce_grad must not launch reduce-scatter")
+
+    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", fail_collective)
+
+    buffer.fetch_buffer().fill_(2)
+    buffer.reduce_grad()
+    assert torch.equal(buffer.data, torch.full_like(buffer.data, 2))
+
+    buffer.fetch_buffer().fill_(3)
+    buffer.reduce_grad()
+    assert torch.equal(buffer.data, torch.full_like(buffer.data, 5))
 
 
 @pytest.mark.parametrize("strategy", ["no_shard", "optim", "optim_grads", "optim_grads_params"])
