@@ -75,12 +75,21 @@ def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
 
 
 def _select_param_group_sharding_strategy(
-    params, *, mp_policy: MixedPrecisionPolicy, requested_sharding_strategy: str
+    params, param_names, *, mp_policy: MixedPrecisionPolicy, requested_sharding_strategy: str
 ) -> str:
     """Keep small non-quantized 1D state resident beside FP8 module weights."""
+    assert len(params) == len(param_names)
     if requested_sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
         return requested_sharding_strategy
-    if all(param.ndim <= 1 and not mp_policy.is_fp8_param(param) for param in params):
+
+    def is_normalization_param_name(name: str) -> bool:
+        normalized_name = name.lower().replace("_", "")
+        return "layernorm" in normalized_name or "rmsnorm" in normalized_name
+
+    if all(
+        param.ndim <= 1 and not mp_policy.is_fp8_param(param) and is_normalization_param_name(name)
+        for param, name in zip(params, param_names)
+    ):
         return "optim"
     return requested_sharding_strategy
 
@@ -1235,6 +1244,7 @@ def _get_module_fsdp_param_groups(
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
     param_groups = {}
+    param_names = {param: name for name, param in module.named_parameters()}
     managed_params = [
         param
         for param in module.parameters()
@@ -1253,7 +1263,10 @@ def _get_module_fsdp_param_groups(
     fsdp_param_groups = []
     for i, params in enumerate(param_groups.values()):
         param_group_sharding_strategy = _select_param_group_sharding_strategy(
-            params, mp_policy=mp_policy, requested_sharding_strategy=sharding_strategy
+            params,
+            [param_names[param] for param in params],
+            mp_policy=mp_policy,
+            requested_sharding_strategy=sharding_strategy,
         )
         fsdp_param_groups.append(
             ParameterGroup(

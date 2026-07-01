@@ -128,11 +128,23 @@ def test_singleton_reduce_grad_detection(world_size, expected):
 @pytest.mark.parametrize(
     ("requested", "fp8_enabled", "group_specs", "expected"),
     [
-        ("optim_grads_params", True, [(1, False), (0, False)], "optim"),
-        ("optim_grads_params", True, [(2, False)], "optim_grads_params"),
-        ("optim_grads_params", True, [(1, True)], "optim_grads_params"),
-        ("optim_grads_params", False, [(1, False)], "optim_grads_params"),
-        ("optim_grads", True, [(1, False)], "optim_grads"),
+        (
+            "optim_grads_params",
+            True,
+            [(1, False, "input_layernorm.weight"), (0, False, "layer_norm_bias")],
+            "optim",
+        ),
+        (
+            "optim_grads_params",
+            True,
+            [(1, False, "self_attention.linear_qkv.layer_norm_weight")],
+            "optim",
+        ),
+        ("optim_grads_params", True, [(2, False, "input_layernorm.weight")], "optim_grads_params"),
+        ("optim_grads_params", True, [(1, False, "mlp.linear_fc1.weight")], "optim_grads_params"),
+        ("optim_grads_params", True, [(1, True, "input_layernorm.weight")], "optim_grads_params"),
+        ("optim_grads_params", False, [(1, False, "input_layernorm.weight")], "optim_grads_params"),
+        ("optim_grads", True, [(1, False, "input_layernorm.weight")], "optim_grads"),
     ],
 )
 def test_fp8_module_1d_param_group_sharding_strategy(requested, fp8_enabled, group_specs, expected):
@@ -148,10 +160,11 @@ def test_fp8_module_1d_param_group_sharding_strategy(requested, fp8_enabled, gro
         def is_fp8_param(param):
             return param.is_fp8
 
-    params = [FakeParam(ndim, is_fp8) for ndim, is_fp8 in group_specs]
+    params = [FakeParam(ndim, is_fp8) for ndim, is_fp8, _ in group_specs]
+    param_names = [name for _, _, name in group_specs]
     assert (
         fsdp_module_impl._select_param_group_sharding_strategy(
-            params, mp_policy=FakePolicy(), requested_sharding_strategy=requested
+            params, param_names, mp_policy=FakePolicy(), requested_sharding_strategy=requested
         )
         == expected
     )
