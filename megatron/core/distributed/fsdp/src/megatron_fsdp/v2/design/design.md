@@ -237,7 +237,13 @@ v2's `ParameterGroup` ownership model: each group still owns its buffers and TE
 post-processing, but the module-level loop can submit several buffer all-gathers
 through one NCCL grouped launch. The post-processing step intentionally happens
 after the coalesced all-gather has been queued on the same stream, preserving the
-ordering expected by FP8/NVFP4 rebuild hooks.
+ordering expected by FP8/NVFP4 rebuild hooks. With `async_ops=True`, the
+coalescing manager launches the grouped collective only when its context exits
+and yields a manager that owns the resulting `Work`. The async path must call
+`manager.wait()` while `ag_stream` is current before recording the module's
+readiness event. For NCCL this inserts the collective completion dependency into
+`ag_stream` without turning off overlap; otherwise the readiness event can run
+before the backend NCCL stream finishes writing the gathered buffers.
 
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched

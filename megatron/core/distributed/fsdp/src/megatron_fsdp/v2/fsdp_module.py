@@ -729,12 +729,14 @@ class FSDPModule:
                         if len(weight_buffers) > 1
                         else nullcontext()
                     )
-                    with cm:
+                    with cm as coalescing_event:
                         for weight_buffer in weight_buffers:
                             bind_params = not (defer_unshard_bind and module is self)
                             weight_buffer.unshard(bind_params=bind_params)
                             if not bind_params:
                                 self_bind_buffers.append(weight_buffer)
+                    if async_op and coalescing_event is not None:
+                        coalescing_event.wait()
 
                 if post_unshard_on_caller and module is self:
                     self_post_unshard.extend(pending_post_unshard)
