@@ -756,7 +756,11 @@ class DataParallelBuffer:
             )
             if prescale:
                 comm_input.mul_(self.gradient_scaling_factor)
-            torch.distributed.all_reduce(comm_input, group=self.dp_group, op=op)
+            if self._dp_world_size == 1:
+                if not prescale and self.gradient_scaling_factor not in (None, 1.0):
+                    comm_input.mul_(self.gradient_scaling_factor)
+            else:
+                torch.distributed.all_reduce(comm_input, group=self.dp_group, op=op)
             if grad_comm_dtype != self.dtype:
                 self.data.copy_(comm_input.to(self.dtype))
             return
@@ -784,9 +788,13 @@ class DataParallelBuffer:
             comm_input.mul_(self.gradient_scaling_factor)
         reduced_grad_shard = comm_input[output_offset : output_offset + sm.size]
 
-        torch.distributed.reduce_scatter_tensor(
-            output=reduced_grad_shard, input=comm_input, group=self.dp_group, op=op
-        )
+        if self._dp_world_size == 1:
+            if not prescale and self.gradient_scaling_factor not in (None, 1.0):
+                reduced_grad_shard.mul_(self.gradient_scaling_factor)
+        else:
+            torch.distributed.reduce_scatter_tensor(
+                output=reduced_grad_shard, input=comm_input, group=self.dp_group, op=op
+            )
 
         # If the reduced shard is already in the local grad buffer, skip copy/accumulation.
         if local_grad_shard.data_ptr() == reduced_grad_shard.data_ptr():

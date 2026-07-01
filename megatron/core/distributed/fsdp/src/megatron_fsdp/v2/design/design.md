@@ -250,6 +250,12 @@ same prefetch/reshard state machine without adding cross-stream event nodes to a
 full-iteration CUDA graph. Modules with any DP group larger than one retain the
 normal AG-stream collective and readiness event.
 
+The gradient path applies the same rule per parameter group. A world-size-one
+gradient buffer performs local scaling and shard accumulation on the caller
+stream, releases its temporary full buffer immediately, and does not append an
+RS event to `reduce_grad_buckets`. Real multi-rank reductions retain the normal
+RS-stream overlap and delayed release behavior.
+
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.

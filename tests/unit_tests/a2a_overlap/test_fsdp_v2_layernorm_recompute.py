@@ -115,6 +115,16 @@ def test_singleton_unshard_detection(world_sizes, expected):
     assert fsdp_module_impl._uses_singleton_dp_for_unshard(module, bwd_pass=True) is expected
 
 
+@pytest.mark.parametrize(("world_size", "expected"), [(1, True), (2, False), (None, False)])
+def test_singleton_reduce_grad_detection(world_size, expected):
+    grad_buffer = None
+    if world_size is not None:
+        grad_buffer = type("FakeGradBuffer", (), {"_dp_world_size": world_size})()
+    param_group = type("FakeParamGroup", (), {"main_grad_buffer": grad_buffer})()
+
+    assert fsdp_module_impl._uses_singleton_dp_for_reduce_grad(param_group) is expected
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 

@@ -414,7 +414,7 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
-### 3.9 Singleton expert-DP unshard
+### 3.9 Singleton expert-DP communication
 
 Expert modules remain independent FSDP units on the expert-DP mesh even when expert DP is one.
 For those units, parameter unshard is a local shard copy rather than a collective. The copy and
@@ -423,6 +423,10 @@ non-event state sentinel instead of an AG-stream CUDA event. This preserves modu
 allocator lifetime, and reshard behavior while removing cross-stream dependencies that cannot
 hide communication in a singleton process group. Dense-DP units continue to use the normal
 AG-stream prefetch and event ordering.
+
+The corresponding gradient reduction also stays on the caller stream: it applies local
+scaling/accumulation, releases the temporary full gradient immediately, and creates no RS event.
+Multi-rank expert-DP groups continue through the standard RS-stream overlap path.
 
 ---
 

@@ -68,6 +68,12 @@ def _uses_singleton_dp_for_unshard(module, *, bwd_pass: bool) -> bool:
     )
 
 
+def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
+    """Return whether this param group's gradient reduction is process-local."""
+    grad_buffer = param_group.main_grad_buffer
+    return grad_buffer is not None and getattr(grad_buffer, "_dp_world_size", 2) == 1
+
+
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -820,7 +826,8 @@ class FSDPModule:
         """
         torch.cuda.nvtx.range_push("MFSDP reduce_grad")
         ctx = self._fsdp_root_context
-        stream = ctx.rs_stream if async_op else torch.cuda.current_stream()
+        caller_stream = torch.cuda.current_stream()
+        stream = ctx.rs_stream if async_op else caller_stream
 
         # Handle pending reduce events before this module to release buffers promptly.
         self._wait_for_previous_async_reduce_grad()
@@ -832,6 +839,8 @@ class FSDPModule:
 
             # Initialize main gradient buffer and param -> main_grad mapping if not already done.
             param_group._init_dist_grads()
+            singleton_dp = async_op and _uses_singleton_dp_for_reduce_grad(param_group)
+            param_stream = caller_stream if singleton_dp else stream
 
             # NaN check before reduction
             if getattr(self, "_enable_nan_checks", False):
@@ -881,7 +890,7 @@ class FSDPModule:
                     main_grad.copy_(param.grad.detach())
                     del param.grad
 
-            if async_op:
+            if async_op and not singleton_dp:
                 # ---- Overlapped path ----
                 # Switch to rs_stream for the reduce-scatter kernel
                 stream.wait_stream(torch.cuda.current_stream())
@@ -894,7 +903,7 @@ class FSDPModule:
                 param_group.release_grad_buffer()
 
             # Install reduced gradients to distributed parameters
-            with torch.cuda.stream(stream):
+            with torch.cuda.stream(param_stream):
                 for name, param, dist_param, dist_grad in zip(
                     param_names, param_group.params, param_group.dist_params, param_group.dist_grads
                 ):
@@ -914,13 +923,13 @@ class FSDPModule:
                         if hasattr(dist_param, "decoupled_grad"):
                             dist_param.decoupled_grad = None
 
-            if async_op:
-                event = stream.record_event()
+            if async_op and not singleton_dp:
+                event = param_stream.record_event()
                 ctx.reduce_grad_buckets[id(self)].append((event, param_group))
 
             # NaN check after reduction
             if getattr(self, "_enable_nan_checks", False):
-                with torch.cuda.stream(stream):
+                with torch.cuda.stream(param_stream):
                     for name, dist_grad in zip(param_names, param_group.dist_grads):
                         if dist_grad is not None:
                             assert torch.isfinite(
