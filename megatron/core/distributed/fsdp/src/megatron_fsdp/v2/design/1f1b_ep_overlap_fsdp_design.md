@@ -414,6 +414,16 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
+### 3.9 Singleton expert FSDP units
+
+The default v2 wrapping policy omits nested `TEGroupedMLP` and `SequentialMLP` units when both
+the dense DP and expert DP meshes have size one. Their parameters are then owned by the parent
+`TransformerLayer`, whose fine-grained hooks still unshard them before direct attention/MLP
+schedule calls. Since both placements and both gradient-scaling factors are identical at
+world size one, this preserves optimizer semantics while removing redundant nested-unit
+all-gather and reduce-scatter collectives. Multi-rank DP or expert-DP configurations retain
+the separate expert units and expert mesh.
+
 ---
 
 ## 4. Hook behavior — v2 implementation

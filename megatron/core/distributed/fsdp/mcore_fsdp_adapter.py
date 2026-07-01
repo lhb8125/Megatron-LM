@@ -278,17 +278,23 @@ class FullyShardedDataParallel(_BaseDataParallel):
         else:
             from torch.distributed.fsdp import fully_shard
 
-        if (
-            fsdp_unit_modules is None
-            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
-        ):
-            fsdp_unit_modules = [TransformerLayer, MambaLayer, TEGroupedMLP, SequentialMLP]
-
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         edp_mesh = _init_dp_mesh(pg_collection, edp=True)
         dp_mesh = _init_dp_mesh(pg_collection, edp=False)
+
+        if (
+            fsdp_unit_modules is None
+            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
+        ):
+            fsdp_unit_modules = [TransformerLayer, MambaLayer]
+            # When both meshes are singleton, the parent TransformerLayer can own
+            # expert and dense parameters without changing placement or gradient
+            # scaling. Avoiding a nested expert unit removes redundant size-one
+            # collectives and matches the v1 FSDP unit boundary.
+            if dp_mesh.size() > 1 or edp_mesh.size() > 1:
+                fsdp_unit_modules.extend([TEGroupedMLP, SequentialMLP])
 
         fully_shard_mp_policy = MixedPrecisionPolicy(
             main_params_dtype=ddp_config.megatron_fsdp_main_params_dtype,
