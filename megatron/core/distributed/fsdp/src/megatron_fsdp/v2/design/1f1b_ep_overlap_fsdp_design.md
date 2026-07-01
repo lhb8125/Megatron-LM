@@ -562,9 +562,10 @@ timing and is not a production fix.
 
 Set `MCORE_CHECKPOINT_RECOMPUTE_NATIVE_RMSNORM` to the checkpoint name to keep
 the original forward on Transformer Engine while recomputing the selected
-RMSNorm with `torch.nn.functional.rms_norm`. The native operation uses the same
-input and parameter object, so gradients still flow to the original parameter;
-it only distinguishes a TE reentrant-recompute failure from corruption in the
+RMSNorm with `torch.nn.functional.rms_norm`. The native operation first runs the
+same FSDP pre-forward hook and then uses the same input and parameter object, so
+gradients still flow to the original parameter. It only distinguishes a TE
+reentrant-recompute failure from corruption in the
 checkpoint output-storage restoration. This is a diagnostic substitution, not
 a supported mixed-implementation training mode.
 

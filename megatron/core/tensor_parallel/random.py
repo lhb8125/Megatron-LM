@@ -999,6 +999,11 @@ class CheckpointWithoutOutput(object):
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 if self._debug_native_rmsnorm_enabled():
                     assert self.debug_module is not None and len(inputs) == 1
+                    from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
+                        mfsdp_forward_pre_hook,
+                    )
+
+                    mfsdp_forward_pre_hook(self.debug_module, inputs, {})
                     weight = self.debug_module.weight
                     if getattr(self.debug_module, "zero_centered_gamma", False):
                         weight = weight + 1
