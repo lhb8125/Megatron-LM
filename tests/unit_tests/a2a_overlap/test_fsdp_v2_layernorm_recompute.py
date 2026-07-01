@@ -3,6 +3,7 @@
 import gc
 import traceback
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,7 +11,10 @@ import torch
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as fsdp_module_impl
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDPModule
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import (
+    FSDPModule,
+    _should_defer_fp8_norm_sync,
+)
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
@@ -125,6 +129,45 @@ def test_singleton_reduce_grad_detection(world_size, expected):
     assert fsdp_module_impl._uses_singleton_dp_for_reduce_grad(param_group) is expected
 
 
+def test_fp8_norm_sync_selector_is_narrow():
+    class FakePolicy:
+        fp8 = SimpleNamespace(enabled=True)
+
+        @staticmethod
+        def is_fp8_param(param):
+            return False
+
+        @staticmethod
+        def is_nvfp4_param(param):
+            return False
+
+    module = torch.nn.Module()
+    module.config = SimpleNamespace(hidden_size=16)
+    params = [torch.nn.Parameter(torch.ones(16)), torch.nn.Parameter(torch.ones(16))]
+
+    assert _should_defer_fp8_norm_sync(
+        module,
+        ["input_layernorm.weight", "pre_mlp_layernorm.weight"],
+        params,
+        FakePolicy(),
+        "optim_grads_params",
+    )
+    assert not _should_defer_fp8_norm_sync(
+        module,
+        ["input_layernorm.weight", "router.weight"],
+        params,
+        FakePolicy(),
+        "optim_grads_params",
+    )
+    assert not _should_defer_fp8_norm_sync(
+        module,
+        ["input_layernorm.weight", "pre_mlp_layernorm.weight"],
+        params,
+        FakePolicy(),
+        "optim_grads",
+    )
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 
@@ -216,6 +259,20 @@ class TestFSDPV2LayerNormRecompute:
                     module=recompute_model,
                     fsdp_unit_modules=[TransformerLayer],
                 )
+                deferred_groups = []
+                for fsdp_module in recompute_fsdp.modules():
+                    if not isinstance(fsdp_module, FSDPModule):
+                        continue
+                    for param_names, param_group in fsdp_module._named_param_groups:
+                        assert param_group.sharding_strategy == "optim_grads_params"
+                        if param_group.defer_full_param_and_grad_sync:
+                            deferred_groups.append((param_names, param_group))
+                            assert all(
+                                "layernorm" in name.lower().replace("_", "")
+                                or "rmsnorm" in name.lower().replace("_", "")
+                                for name in param_names
+                            )
+                assert deferred_groups
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
@@ -241,6 +298,11 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
+                assert all(
+                    not param_group._deferred_grad_accumulated
+                    and not param_group.model_weight_buffer.is_unsharded()
+                    for _, param_group in deferred_groups
+                )
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

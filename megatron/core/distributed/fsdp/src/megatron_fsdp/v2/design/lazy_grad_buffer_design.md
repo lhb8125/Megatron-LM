@@ -187,6 +187,13 @@ After the first call, `_init_dist_grads()` is a no-op. Subsequent calls just
 do the reduce as before. `overwrite_grad=False` ensures proper accumulation
 across micro-batches.
 
+FP8 ZeRO-3 normalization-only groups are a narrow exception to the usual
+per-micro-batch reduce-scatter schedule. Their temporary full grad buffer is
+zeroed before the first backward, accumulates local gradients across
+micro-batches, and is reduce-scattered once by `finish_grad_sync()`. The
+persistent optimizer-facing shard remains lazy and `_grad_buffer_is_fresh`
+still makes that one reduce-scatter overwrite stale shard storage.
+
 ### Full-iteration CUDA graph
 
 `cuda_graph_impl="full_iteration"` is an explicit exception to the normal lazy

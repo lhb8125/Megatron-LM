@@ -494,6 +494,33 @@ The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where
 `weight_buffers_for_unshard(..., bwd_pass=True)` selects it.
 
+### FP8 normalization groups with iteration-delayed synchronization
+
+Under FP8 parameter gather, Transformer-layer normalization parameters stay
+in BF16 while matrix weights use quantized storage. For a ZeRO-3 parameter
+group containing only one-dimensional LayerNorm/RMSNorm parameters bounded by
+the module hidden size, v2 keeps the ZeRO-3 ownership model but delays its
+temporary full-buffer synchronization to the iteration boundary:
+
+1. The first micro-batch all-gathers the full normalization weights. Normal
+   post-forward/post-backward reshard calls reinstall optimizer-facing
+   DTensors in the module but retain this small full weight buffer.
+2. Backward gradients accumulate in the temporary full gradient buffer across
+   micro-batches. TE fused accumulation keeps `overwrite_main_grad=False` for
+   this group; ordinary `.grad` tensors use `copy_` on the first micro-batch
+   and `add_` afterwards.
+3. `finish_grad_sync()` performs one reduce-scatter into the persistent local
+   grad shard, releases the full grad buffer, and force-reshards the cached
+   full weight buffer. The next iteration therefore gathers optimizer-updated
+   shards rather than reusing stale weights.
+
+The group's declared strategy remains `optim_grads_params`: model weights,
+main weights, persistent gradients, and optimizer state are all still sharded.
+Only the small temporary full weight/gradient buffers span the micro-batches.
+The selector requires an enabled FP8 policy and exact normalization-only
+groups, so BF16 training, quantized matrix weights, and mixed groups retain the
+standard per-micro-batch ZeRO-3 lifecycle.
+
 ---
 
 ## Feature 3: Activation Recomputation (Gradient Checkpointing)

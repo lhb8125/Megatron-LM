@@ -739,6 +739,11 @@ class FSDPModule:
 
                     pending_post_unshard.append(param_group)
                     for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
+                        if (
+                            param_group.defer_full_param_and_grad_sync
+                            and weight_buffer.is_unsharded()
+                        ):
+                            continue
                         if buffer_runs and buffer_runs[-1][0] is weight_buffer.dp_group:
                             buffer_runs[-1][1].append(weight_buffer)
                         else:
@@ -815,7 +820,7 @@ class FSDPModule:
             if module is self:
                 break
 
-    def reduce_grad(self, async_op: bool = False):
+    def reduce_grad(self, async_op: bool = False, finish_grad_sync_only: bool = False):
         """
         Reduce gradients across data-parallel ranks.
 
@@ -836,6 +841,17 @@ class FSDPModule:
         for param_names, param_group in self._named_param_groups:
             if not param_group.requires_grad:
                 continue
+
+            defer_sync = param_group.defer_full_param_and_grad_sync
+            delayed_sync_group = defer_sync or param_group.sharding_strategy in (
+                "no_shard",
+                "optim",
+            )
+            if finish_grad_sync_only:
+                if not delayed_sync_group:
+                    continue
+                if defer_sync and not param_group._deferred_grad_accumulated:
+                    continue
 
             # Initialize main gradient buffer and param -> main_grad mapping if not already done.
             param_group._init_dist_grads()
@@ -860,35 +876,45 @@ class FSDPModule:
             # the Python-side ``setattr(param, "grad_added_to_main_grad", True)`` that
             # accompanies the eager backward is captured away.  We record the per-param
             # flag during the trace micro-batch and restore it here.
-            for name, param in zip(param_names, param_group.params):
-                grad_added = getattr(param, "grad_added_to_main_grad", False)
-                recorded = getattr(param, "_mfsdp_recorded_te_wgrad", False)
-                if grad_added or recorded:
-                    if param.grad is not None:
+            if not (finish_grad_sync_only and defer_sync):
+                first_deferred_grad = defer_sync and not param_group._deferred_grad_accumulated
+                for name, param in zip(param_names, param_group.params):
+                    grad_added = getattr(param, "grad_added_to_main_grad", False)
+                    recorded = getattr(param, "_mfsdp_recorded_te_wgrad", False)
+                    if grad_added or recorded:
+                        if param.grad is not None:
+                            del param.grad
+                        # Record TE wgrad-fusion flags for CUDA graph restore.
+                        # The trace backward ran eagerly, so TE set
+                        # grad_added_to_main_grad on each param it wrote to.
+                        # Under CUDA graph replay only the GPU kernel runs;
+                        # we record the flags here and restore them in
+                        # the CG replay backward.
+                        if grad_added and (
+                            self._fsdp_state.enable_cuda_graph
+                            or self._fsdp_state.enable_full_iteration_cuda_graph
+                        ):
+                            setattr(param, "_mfsdp_recorded_te_wgrad", True)
+                    elif param.grad is None:
+                        if not defer_sync or first_deferred_grad:
+                            main_grad = param.get_main_grad()
+                            param_main_grad = getattr(param, "main_grad", None)
+                            if (
+                                param_main_grad is None
+                                or param_main_grad.data_ptr() != main_grad.data_ptr()
+                            ):
+                                main_grad.zero_()
+                    else:
+                        main_grad = param.get_main_grad()
+                        if defer_sync and not first_deferred_grad:
+                            main_grad.add_(param.grad.detach())
+                        else:
+                            main_grad.copy_(param.grad.detach())
                         del param.grad
-                    # Record TE wgrad-fusion flags for CUDA graph restore.
-                    # The trace backward ran eagerly, so TE set
-                    # grad_added_to_main_grad on each param it wrote to.
-                    # Under CUDA graph replay only the GPU kernel runs;
-                    # we record the flags here and restore them in
-                    # the CG replay backward.
-                    if grad_added and (
-                        self._fsdp_state.enable_cuda_graph
-                        or self._fsdp_state.enable_full_iteration_cuda_graph
-                    ):
-                        setattr(param, "_mfsdp_recorded_te_wgrad", True)
-                elif param.grad is None:
-                    main_grad = param.get_main_grad()
-                    param_main_grad = getattr(param, "main_grad", None)
-                    if (
-                        param_main_grad is None
-                        or param_main_grad.data_ptr() != main_grad.data_ptr()
-                    ):
-                        main_grad.zero_()
-                else:
-                    main_grad = param.get_main_grad()
-                    main_grad.copy_(param.grad.detach())
-                    del param.grad
+
+            if defer_sync and not finish_grad_sync_only:
+                param_group._deferred_grad_accumulated = True
+                continue
 
             if async_op and not singleton_dp:
                 # ---- Overlapped path ----
@@ -901,6 +927,9 @@ class FSDPModule:
                 # Reduce gradients immediately and release grad buffer
                 param_group.reduce_grad()
                 param_group.release_grad_buffer()
+
+            if defer_sync:
+                param_group._deferred_grad_accumulated = False
 
             # Install reduced gradients to distributed parameters
             with torch.cuda.stream(param_stream):
@@ -948,13 +977,16 @@ class FSDPModule:
                 continue
             if any(
                 param_group.sharding_strategy in ("no_shard", "optim")
+                or param_group.defer_full_param_and_grad_sync
                 for param_group in child._fsdp_param_groups
             ):
-                # no_shard and ZeRO-1 keep gradients replicated during backward.
-                # Sync them once at the iteration grad-sync boundary: no_shard
-                # all-reduces full grads, ZeRO-1 reduce-scatters virtual shards.
-                child.reduce_grad(async_op=False)
+                # no_shard, ZeRO-1, and selected FP8 norm groups keep full
+                # gradients during backward. Sync only those groups once at
+                # the iteration grad-sync boundary.
+                child.reduce_grad(async_op=False, finish_grad_sync_only=True)
             for param_group in child._fsdp_param_groups:
+                if param_group.defer_full_param_and_grad_sync:
+                    param_group.reshard(force=True)
                 for param, dist_grad in zip(param_group.params, param_group.dist_grads):
                     if param.requires_grad:
                         # v1 replaces module params with optimizer-facing distributed
@@ -1127,7 +1159,8 @@ class FSDPModule:
                 lines.append(
                     f"- {module_name} #{group_idx} dp={dp_size} "
                     f"strategy={param_group.sharding_strategy} "
-                    f"chunk_factor={param_group.chunk_size_factor}"
+                    f"chunk_factor={param_group.chunk_size_factor} "
+                    f"defer_sync={param_group.defer_full_param_and_grad_sync}"
                 )
                 lines.append(
                     f"  {numel:,} elems x {_fmt_dtype(param_group.dtype)} "
@@ -1204,6 +1237,7 @@ def _get_module_fsdp_param_groups(
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
     param_groups = {}
+    param_to_name = {param: name for name, param in module.named_parameters()}
 
     for param in module.parameters():
         if ignored_params is not None and param in ignored_params:
@@ -1220,6 +1254,7 @@ def _get_module_fsdp_param_groups(
     # Create ParameterGroup for each group
     fsdp_param_groups = []
     for i, params in enumerate(param_groups.values()):
+        param_names = [param_to_name[param] for param in params]
         fsdp_param_groups.append(
             ParameterGroup(
                 params,
@@ -1228,7 +1263,36 @@ def _get_module_fsdp_param_groups(
                 mp_policy=mp_policy,
                 gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
+                defer_full_param_and_grad_sync=_should_defer_fp8_norm_sync(
+                    module, param_names, params, mp_policy, sharding_strategy
+                ),
             )
         )
 
     return fsdp_param_groups
+
+
+def _should_defer_fp8_norm_sync(
+    module: nn.Module,
+    param_names: List[str],
+    params: List[nn.Parameter],
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Select small non-quantized normalization groups in an FP8 ZeRO-3 module."""
+    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+        return False
+
+    hidden_size = getattr(getattr(module, "config", None), "hidden_size", None)
+    if not isinstance(hidden_size, int) or hidden_size <= 0 or not params:
+        return False
+
+    normalized_names = [name.lower().replace("_", "") for name in param_names]
+    return all(
+        ("layernorm" in name or "rmsnorm" in name)
+        and not mp_policy.is_fp8_param(param)
+        and not mp_policy.is_nvfp4_param(param)
+        and param.ndim <= 1
+        and param.numel() <= hidden_size
+        for name, param in zip(normalized_names, params)
+    )
