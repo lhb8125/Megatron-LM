@@ -210,11 +210,8 @@ When `enable_full_iteration_cuda_graph=True`:
 - `_maybe_free_grad_data()` keeps optimizer-facing gradient storage alive.
 - `zero_grad()` clears existing storage in place and marks the grad buffer fresh
   instead of setting storage to `None`.
-- Optimizer zero-grad keeps marked `decoupled_grad` DTensors. It zeros the
-  owning gradient-shard buffer once; when `decoupled_grad is dist_grad`, that
-  buffer-wide write already covers the DTensor local view, so zero-grad skips a
-  redundant per-parameter fill. Independent decoupled gradients are still
-  cleared directly.
+- Optimizer zero-grad keeps marked `decoupled_grad` DTensors and zeroes their
+  local storage.
 
 This trades away the forward-memory saving of lazy grad buffers only for the
 full-iteration CUDA graph path.  The eager and per-module CUDA graph paths keep

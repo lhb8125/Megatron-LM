@@ -474,21 +474,18 @@ class ParameterGroup:
     def zero_grad(self, set_to_none: bool = True):
         """Zero the main gradient buffer and mark grads as zeroed."""
         if self.enable_full_iteration_cuda_graph:
-            grad_shard_was_zeroed = False
             if self.main_grad_buffer is not None:
                 if self.main_grad_buffer.data is not None:
                     self.main_grad_buffer.data.zero_()
-                    grad_shard_was_zeroed = True
                 unsharded_grad_buffer = getattr(self.main_grad_buffer, "_unsharded_buffer", None)
                 if unsharded_grad_buffer is not None:
                     unsharded_grad_buffer.zero_()
-            for dist_param, dist_grad in zip(self.dist_params, self.dist_grads):
+            for dist_param in self.dist_params:
                 if dist_param.grad is not None:
                     dist_param.grad = None
                 decoupled_grad = getattr(dist_param, "decoupled_grad", None)
                 if decoupled_grad is not None:
-                    if not (grad_shard_was_zeroed and decoupled_grad is dist_grad):
-                        _zero_tensor_storage(decoupled_grad)
+                    _zero_tensor_storage(decoupled_grad)
                     setattr(dist_param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", True)
             self._grad_buffer_is_fresh = True
             return

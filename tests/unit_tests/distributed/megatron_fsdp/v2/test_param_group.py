@@ -30,7 +30,6 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import param_group as param_group_module
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.param_group import ParameterGroup
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.utils import ParamGroupIdx
@@ -296,51 +295,5 @@ def test_reduce_grad(strategy):
             sm = gbuf.buffer_index.shard_meta
             actual = gbuf.data[sm.local_data_index : sm.local_data_index + sm.size]
             assert torch.equal(actual, ref_shard)
-
-    torch.distributed.barrier()
-
-
-def test_full_iteration_zero_grad_deduplicates_decoupled_grad(monkeypatch):
-    """Buffer-wide zeroing should cover optimizer-facing grad shard views."""
-    groups, _, _, _, _, device = _build_groups("optim_grads_params")
-    calls = []
-    original_zero_tensor_storage = param_group_module._zero_tensor_storage
-
-    def track_zero_tensor_storage(tensor):
-        calls.append(tensor)
-        original_zero_tensor_storage(tensor)
-
-    monkeypatch.setattr(param_group_module, "_zero_tensor_storage", track_zero_tensor_storage)
-
-    for param_group in groups:
-        param_group._init_dist_grads()
-        if param_group.main_grad_buffer is None:
-            continue
-
-        param_group.enable_full_iteration_cuda_graph = True
-        param_group.main_grad_buffer.data.fill_(3)
-        unsharded_grad_buffer = param_group.main_grad_buffer.fetch_buffer()
-        unsharded_grad_buffer.fill_(5)
-
-        grad_pairs = [
-            (dist_param, dist_grad)
-            for dist_param, dist_grad in zip(param_group.dist_params, param_group.dist_grads)
-            if dist_grad is not None
-        ]
-        for dist_param, dist_grad in grad_pairs:
-            dist_param.decoupled_grad = dist_grad
-
-        independent_grad = torch.ones(1, dtype=torch.bfloat16, device=device)
-        grad_pairs[0][0].decoupled_grad = independent_grad
-
-        param_group.zero_grad(set_to_none=True)
-
-        assert torch.count_nonzero(param_group.main_grad_buffer.data) == 0
-        assert torch.count_nonzero(unsharded_grad_buffer) == 0
-        assert torch.count_nonzero(independent_grad) == 0
-        assert calls == [independent_grad]
-        for dist_param, dist_grad in grad_pairs[1:]:
-            assert dist_param.decoupled_grad is dist_grad
-            assert dist_param._mfsdp_keep_decoupled_grad_for_cuda_graph
 
     torch.distributed.barrier()
