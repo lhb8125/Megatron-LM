@@ -412,7 +412,13 @@ def _pre_backward_setup(module: FSDPModule, skip_final_callback: bool = False):
         for param in param_group.params:
             param.grad_added_to_main_grad = False
             if param_group.sharding_strategy in ("optim_grads_params", "optim_grads"):
-                param.overwrite_main_grad = True
+                singleton_local_grad = (
+                    param_group.main_grad_buffer is not None
+                    and param_group.main_grad_buffer.dp_world_size == 1
+                )
+                param.overwrite_main_grad = (
+                    not singleton_local_grad or param_group._grad_buffer_is_fresh
+                )
         # CUDA graph + TE wgrad fusion: during graph capture the eager backward
         # runs once and TE sets grad_added_to_main_grad=True on each param it
         # writes to.  Under replay only the GPU kernel runs — the Python-side

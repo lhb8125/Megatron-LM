@@ -851,7 +851,13 @@ class FSDPModule:
                         main_grad.zero_()
                 else:
                     main_grad = param.get_main_grad()
-                    main_grad.copy_(param.grad.detach())
+                    if (
+                        param_group.main_grad_buffer.dp_world_size == 1
+                        and not param_group._grad_buffer_is_fresh
+                    ):
+                        main_grad.add_(param.grad.detach())
+                    else:
+                        main_grad.copy_(param.grad.detach())
                     del param.grad
 
             if async_op:
