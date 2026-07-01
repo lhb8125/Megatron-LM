@@ -169,21 +169,26 @@ class TestFSDPV2LayerNormRecompute:
                     torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
                 )
                 assert all(
+                    not param_group.model_weight_buffer.is_distributed
+                    and param_group.main_grad_buffer.is_distributed
+                    for child in expert_units
+                    for param_group in child._fsdp_param_groups
+                    if param_group.requires_grad
+                )
+                assert all(
                     isinstance(layer, FSDPModule) for layer in recompute_model.decoder.layers
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
-                singleton_collectives = []
-                original_reduce_scatter = torch.distributed.reduce_scatter_tensor
+                singleton_all_gathers = []
+                original_all_gather = torch.distributed.all_gather_into_tensor
 
-                def track_reduce_scatter(*args, **kwargs):
+                def track_all_gather(*args, **kwargs):
                     if kwargs.get("group") in expert_dp_groups:
-                        singleton_collectives.append("reduce_scatter")
-                    return original_reduce_scatter(*args, **kwargs)
+                        singleton_all_gathers.append("all_gather")
+                    return original_all_gather(*args, **kwargs)
 
-                monkeypatch.setattr(
-                    torch.distributed, "reduce_scatter_tensor", track_reduce_scatter
-                )
+                monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", track_all_gather)
 
                 rank = torch.distributed.get_rank()
                 recompute_loss = overlap_train_step(
@@ -206,7 +211,7 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
-                assert not singleton_collectives
+                assert not singleton_all_gathers
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

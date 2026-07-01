@@ -420,11 +420,11 @@ Expert modules always remain independent FSDP units on the expert-DP mesh. This 
 EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameters into the
 parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
 
-When the expert-DP process group has world size one, `DataParallelBuffer` preserves the normal
-unsharded and optimizer-facing buffers but implements gradient reduce-scatter as local scaling
-and accumulation. Weight unshard keeps its normal all-gather path for full-iteration CUDA graph
-stream and buffer-lifetime compatibility. The gradient fast path removes redundant NCCL kernels
-without changing the FSDP unit boundary, allocator lifetime, or accumulation semantics.
+When the expert-DP process group has world size one, expert model and main weights use complete
+persistent buffers while their DTensors keep the logical expert-mesh placement. Fine-grained
+unshard and reshard therefore become local no-ops and issue no all-gather. Expert gradient
+buffers retain the normal ZeRO-3 full-gradient and optimizer-shard layout plus reduce-scatter,
+so per-microbatch scaling, accumulation, and full-CG side-stream ordering are unchanged.
 
 ---
 

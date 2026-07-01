@@ -590,9 +590,12 @@ class DataParallelBuffer:
         """
         full_buffer = self.fetch_buffer(as_shard=False)
 
-        if not self.is_distributed and not getattr(full_buffer, "_dirty", False):
+        if not self.is_distributed and (
+            self._dp_world_size == 1 or not getattr(full_buffer, "_dirty", False)
+        ):
             if bind_params:
                 self._bind_buffer_to_params(full_buffer)
+            setattr(full_buffer, "_dirty", False)
             return full_buffer
 
         sm = self.buffer_index.shard_meta
@@ -753,11 +756,7 @@ class DataParallelBuffer:
             )
             if prescale:
                 comm_input.mul_(self.gradient_scaling_factor)
-            if self._dp_world_size == 1:
-                if not prescale and self.gradient_scaling_factor not in (None, 1.0):
-                    comm_input.mul_(self.gradient_scaling_factor)
-            else:
-                torch.distributed.all_reduce(comm_input, group=self.dp_group, op=op)
+            torch.distributed.all_reduce(comm_input, group=self.dp_group, op=op)
             if grad_comm_dtype != self.dtype:
                 self.data.copy_(comm_input.to(self.dtype))
             return
@@ -785,13 +784,9 @@ class DataParallelBuffer:
             comm_input.mul_(self.gradient_scaling_factor)
         reduced_grad_shard = comm_input[output_offset : output_offset + sm.size]
 
-        if self._dp_world_size == 1:
-            if not prescale and self.gradient_scaling_factor not in (None, 1.0):
-                reduced_grad_shard.mul_(self.gradient_scaling_factor)
-        else:
-            torch.distributed.reduce_scatter_tensor(
-                output=reduced_grad_shard, input=comm_input, group=self.dp_group, op=op
-            )
+        torch.distributed.reduce_scatter_tensor(
+            output=reduced_grad_shard, input=comm_input, group=self.dp_group, op=op
+        )
 
         # If the reduced shard is already in the local grad buffer, skip copy/accumulation.
         if local_grad_shard.data_ptr() == reduced_grad_shard.data_ptr():
