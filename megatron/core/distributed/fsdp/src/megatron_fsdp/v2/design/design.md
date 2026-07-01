@@ -267,6 +267,12 @@ only the `enable_unshard_prefetch` argument passed to v2 `fully_shard()`. They l
 overlap from optimizer and training-loop uses of the global flag. They are not supported
 production configurations.
 
+`MCORE_FSDP_DEFER_UNSHARD_BIND=1` is a temporary no-neighbor diagnostic that leaves the
+current module's all-gather on `ag_stream`, but calls `unshard(bind_params=False)`. After the
+current module's event wait, the caller stream binds the materialized full buffers and runs
+post-unshard processing. This tests whether mutating parameter wrappers before collective
+readiness is the corruption point. It is not a supported production configuration.
+
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full
 buffer alive while the consumer kernel runs asynchronously. After readiness,

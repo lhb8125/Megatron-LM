@@ -681,11 +681,14 @@ class FSDPModule:
         )
         post_unshard_on_caller = os.environ.get("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "0") == "1"
         disable_unshard_event = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "0") == "1"
+        defer_unshard_bind = os.environ.get("MCORE_FSDP_DEFER_UNSHARD_BIND", "0") == "1"
+        post_unshard_on_caller = post_unshard_on_caller or defer_unshard_bind
         if async_op and not disable_neighbor_prefetch:
             prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
         else:
             prefetch_modules = []
         self_post_unshard = []
+        self_bind_buffers = []
         for module in [self] + prefetch_modules:
             if all(
                 param_group.has_unsharded_weight_buffers(bwd_pass=bwd_pass)
@@ -725,7 +728,10 @@ class FSDPModule:
                     )
                     with cm:
                         for weight_buffer in weight_buffers:
-                            weight_buffer.unshard(bind_params=True)
+                            bind_params = not (defer_unshard_bind and module is self)
+                            weight_buffer.unshard(bind_params=bind_params)
+                            if not bind_params:
+                                self_bind_buffers.append(weight_buffer)
 
                 if post_unshard_on_caller and module is self:
                     self_post_unshard.extend(pending_post_unshard)
@@ -747,6 +753,8 @@ class FSDPModule:
 
         # Diagnostic parity with v1: wait for the current module's all-gather,
         # then run TE post-processing on the caller stream.
+        for weight_buffer in self_bind_buffers:
+            weight_buffer.bind_unsharded_buffer_to_params()
         for param_group in self_post_unshard:
             param_group.post_unshard(bwd_pass=bwd_pass)
 

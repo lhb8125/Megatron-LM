@@ -588,6 +588,13 @@ class DataParallelBuffer:
         if self.is_distributed:
             self.allocator.record_stream(self.alloc_key, stream)
 
+    def bind_unsharded_buffer_to_params(self) -> None:
+        """Bind the currently materialized full buffer to this buffer's parameters."""
+        full_buffer = self._unsharded_buffer if self.is_distributed else self.data
+        if full_buffer is None:
+            raise RuntimeError("Cannot bind parameters before the full buffer is materialized")
+        self._bind_buffer_to_params(full_buffer)
+
     @torch.no_grad()
     def unshard(self, bind_params: bool = False) -> torch.Tensor:
         """All-gather the full buffer from all shards and bind parameter storage.
