@@ -175,17 +175,6 @@ class FullyShardNVFP4Policy:
     recipe: Optional[str] = None
 
 
-@dataclass
-class FP8WeightUpdate:
-    """One parameter group's deferred FP8 main-to-model weight update."""
-
-    model_params: List[torch.Tensor]
-    main_params: List[Optional[torch.Tensor]]
-    start_offsets: List[Optional[int]]
-    data_parallel_group: torch.distributed.ProcessGroup
-    fsdp_shard_model_params: List[Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]]
-
-
 @dataclass(frozen=True)
 class MixedPrecisionPolicy:
     """Mixed precision policy owned by the v2 ``fully_shard`` path."""
@@ -557,7 +546,6 @@ class MixedPrecisionPolicy:
         model_weight_buffer,
         main_weight_buffer,
         transpose_weight_buffer=None,
-        fp8_weight_updates: Optional[List[FP8WeightUpdate]] = None,
     ) -> None:
         """Install optimized main weights into model compute weights."""
         if main_weight_buffer is None:
@@ -620,13 +608,9 @@ class MixedPrecisionPolicy:
                 start_offsets.append(start_offset)
                 model_param_shards.append((model_shard, transpose_shard))
 
-            update = FP8WeightUpdate(
+            quantize_main_weights_to_fp8(
                 fp8_params, main_params, start_offsets, data_parallel_group, model_param_shards
             )
-            if fp8_weight_updates is None:
-                apply_fp8_weight_updates([update])
-            else:
-                fp8_weight_updates.append(update)
 
         # ZeRO-1/2 refresh only this rank's slice; gather before next compute.
         def mark_dirty(buffer):
@@ -636,36 +620,6 @@ class MixedPrecisionPolicy:
         if model_weight_buffer.sharding_strategy != "no_shard":
             mark_dirty(model_weight_buffer)
             mark_dirty(transpose_weight_buffer)
-
-
-def apply_fp8_weight_updates(updates: List[FP8WeightUpdate]) -> None:
-    """Apply deferred FP8 updates, batching requests that share a DP process group."""
-    batches: List[FP8WeightUpdate] = []
-    for update in updates:
-        batch = next(
-            (
-                candidate
-                for candidate in batches
-                if candidate.data_parallel_group is update.data_parallel_group
-            ),
-            None,
-        )
-        if batch is None:
-            batch = FP8WeightUpdate([], [], [], update.data_parallel_group, [])
-            batches.append(batch)
-        batch.model_params.extend(update.model_params)
-        batch.main_params.extend(update.main_params)
-        batch.start_offsets.extend(update.start_offsets)
-        batch.fsdp_shard_model_params.extend(update.fsdp_shard_model_params)
-
-    for batch in batches:
-        quantize_main_weights_to_fp8(
-            batch.model_params,
-            batch.main_params,
-            batch.start_offsets,
-            batch.data_parallel_group,
-            batch.fsdp_shard_model_params,
-        )
 
 
 def is_fp8_param(tensor: torch.Tensor) -> bool:
