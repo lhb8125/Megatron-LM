@@ -316,16 +316,20 @@ at the routed-expert boundary. FSDP v2's allocator can reuse that released
 storage while HybridEP still owns the dispatch lifetime, corrupting the router
 path seen during backward.
 
-The overlap path now matches `TransformerLayer._forward_post_mlp()`: it waits for
-MoE combine and postprocess to produce the complete MLP output, then discards the
-checkpoint output immediately before BDA. The recompute hook is registered on
-that final MoE output, so recomputation still runs before combine, expert, and
-router backward consume the restored LayerNorm activation.
+The overlap path now waits for MoE combine and postprocess to produce the
+complete MLP output, then discards the checkpoint output immediately before
+BDA. Storage release and hook placement are intentionally separate: the hook is
+registered on the routed-expert output retained by the per-plan state. It fires
+with MLP backward on the compute stream, after combine backward and before
+dispatch/router backward. This preserves HybridEP's forward lifetime without
+running LayerNorm recompute from the combine node's communication stream.
 
 The Blackwell regression in
 `tests/unit_tests/a2a_overlap/test_fsdp_v2_layernorm_recompute.py` covers four
 interleaved microbatches with HybridEP, `topk=8`, MXFP8 parameter gather,
-delayed wgrad, and combined `moe_act` + `layernorm` recomputation.
+delayed wgrad, and combined `moe_act` + `layernorm` recomputation. It also
+asserts that each LayerNorm recompute runs on the same compute stream as its
+original forward.
 
 ### 3.7 Hook fire count — what to expect
 

@@ -677,6 +677,11 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         expert_output, _ = layer.mlp.routed_experts_compute(dispatched_tokens, dispatched_probs)
         _check_router_input_lifetime(node.layer_state, "experts-exit")
 
+        if layer.recompute_pre_mlp_layernorm:
+            # Keep the compute-stream tensor so recompute runs with MLP backward rather than
+            # from the combine node's communication stream.
+            node.layer_state.pre_mlp_recompute_hook_tensor = expert_output
+
         # For HybridEP, tokens_per_expert is generated on comm stream, as the input to
         # `routed_experts_compute`, a ref is needed to prevent it from being freed.
         if enable_hybridep:
@@ -705,8 +710,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             # a view of the layernorm output. Match the regular TransformerLayer path by waiting
             # until the complete MLP output exists before releasing the checkpoint output.
             pre_mlp_norm_checkpoint = node.layer_state.pre_mlp_norm_checkpoint
-            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(output)
+            recompute_hook_tensor = node.layer_state.pre_mlp_recompute_hook_tensor
+            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(recompute_hook_tensor)
             node.layer_state.pre_mlp_norm_checkpoint = None
+            node.layer_state.pre_mlp_recompute_hook_tensor = None
             if getattr(node.layer_state, "router_input_lifetime_tensor", None) is not None:
                 node.layer_state.router_input_lifetime_tensor = None
                 node.layer_state.router_input_lifetime_reference = None

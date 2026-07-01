@@ -10,6 +10,7 @@ from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
+from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
 from megatron.core.transformer import TransformerLayer
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
@@ -46,6 +47,24 @@ class TestFSDPV2LayerNormRecompute:
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     def test_mxfp8_layernorm_recompute(self, monkeypatch):
         monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
+        original_checkpoint = CheckpointWithoutOutput.checkpoint
+        original_recompute = CheckpointWithoutOutput._recompute
+        recompute_stream_pairs = []
+
+        def checkpoint_with_stream(checkpoint, *args, **kwargs):
+            if checkpoint.debug_name is not None:
+                checkpoint._test_forward_stream = torch.cuda.current_stream()
+            return original_checkpoint(checkpoint, *args, **kwargs)
+
+        def recompute_with_stream_check(checkpoint, grad):
+            if checkpoint.debug_name is not None:
+                recompute_stream_pairs.append(
+                    (checkpoint._test_forward_stream, torch.cuda.current_stream())
+                )
+            return original_recompute(checkpoint, grad)
+
+        monkeypatch.setattr(CheckpointWithoutOutput, "checkpoint", checkpoint_with_stream)
+        monkeypatch.setattr(CheckpointWithoutOutput, "_recompute", recompute_with_stream_check)
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -122,6 +141,11 @@ class TestFSDPV2LayerNormRecompute:
                         assert torch.isfinite(
                             param.grad
                         ).all(), f"[rank {rank}] Non-finite gradient: {name}"
+                assert recompute_stream_pairs
+                assert all(
+                    forward_stream == recompute_stream
+                    for forward_stream, recompute_stream in recompute_stream_pairs
+                ), "LayerNorm recompute must run on its original compute stream"
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()
