@@ -735,6 +735,7 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         # the CheckpointWithoutOutput object is passed in, then it can access the saved input
         # tensors later for recomputation
         checkpoint_without_output_obj.ctx = ctx
+        ctx.checkpoint_without_output_obj = checkpoint_without_output_obj
         return outputs
 
     @staticmethod
@@ -745,7 +746,12 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         # This is to avoid double-reloading the inputs in CPU offloading scenario.
         inputs = ctx.inputs
         outputs = ctx.outputs
-        torch.autograd.backward(outputs, args)
+        try:
+            torch.autograd.backward(outputs, args)
+        finally:
+            checkpoint_without_output_obj = getattr(ctx, "checkpoint_without_output_obj", None)
+            if checkpoint_without_output_obj is not None:
+                checkpoint_without_output_obj._restore_debug_parameter_storage()
         ctx.outputs = None
         ctx.inputs = None
         grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else None for inp in inputs)
@@ -838,6 +844,7 @@ class CheckpointWithoutOutput(object):
         self.debug_forward_inputs = None
         self.debug_forward_outputs = None
         self.debug_forward_parameters = None
+        self.debug_original_parameter_data = None
 
     def _debug_recompute_enabled(self):
         target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_CHECK")
@@ -846,6 +853,26 @@ class CheckpointWithoutOutput(object):
     def _debug_input_lifetime_enabled(self):
         target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK")
         return self.debug_name is not None and target in {"1", "all", self.debug_name}
+
+    def _debug_stable_parameter_enabled(self):
+        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER")
+        return self.debug_name is not None and target in {"1", "all", self.debug_name}
+
+    def _bind_debug_parameter_storage(self):
+        if not self._debug_stable_parameter_enabled() or self.debug_module is None:
+            return
+        self.debug_original_parameter_data = tuple(
+            (parameter, parameter.data) for parameter in self.debug_module.parameters()
+        )
+        for parameter, _ in self.debug_original_parameter_data:
+            parameter.data = parameter.data.clone()
+
+    def _restore_debug_parameter_storage(self):
+        if self.debug_original_parameter_data is None:
+            return
+        for parameter, original_data in self.debug_original_parameter_data:
+            parameter.data = original_data
+        self.debug_original_parameter_data = None
 
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """
@@ -964,6 +991,7 @@ class CheckpointWithoutOutput(object):
                     assert torch.isfinite(
                         input_
                     ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
+            self._bind_debug_parameter_storage()
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 outputs = self.run_function(*inputs)
 

@@ -551,6 +551,15 @@ LayerNorm parameter or kernel failure without retaining the output and parameter
 references used by the broader check. It is also host-synchronizing and intended
 only for short eager diagnostics.
 
+Set `MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER` to the checkpoint name for a
+parameter-storage lifetime ablation. Immediately before recompute, the selected
+module's parameters are rebound to independent clones and remain bound through
+the checkpoint's nested backward; the original FSDP-managed storage is restored
+afterward. If this removes the failure, the parameter values were valid when
+inspected but their backing storage did not remain valid for the asynchronous TE
+forward/backward kernels. This deliberately changes memory use and synchronization
+timing and is not a production fix.
+
 Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
 stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
 its consumer stream wait for the parameter all-gather stream after unshard.
