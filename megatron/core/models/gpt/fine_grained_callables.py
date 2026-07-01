@@ -578,9 +578,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_norm_manager = off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm")
                 node.layer_state.mlp_norm_manager = mlp_norm_manager
                 if layer.recompute_pre_mlp_layernorm:
+                    checkpoint_debug_name = f"pre_mlp_layernorm:{layer.layer_number}"
+                    layer.pre_mlp_layernorm._mcore_checkpoint_debug_name = checkpoint_debug_name
                     pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput(
-                        debug_name=f"pre_mlp_layernorm:{layer.layer_number}",
-                        debug_module=layer.pre_mlp_layernorm,
+                        debug_name=checkpoint_debug_name, debug_module=layer.pre_mlp_layernorm
                     )
                     node.layer_state.pre_mlp_norm_checkpoint = pre_mlp_norm_checkpoint
                     with mlp_norm_manager as hidden_states:

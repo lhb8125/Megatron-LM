@@ -542,6 +542,12 @@ result, `share_storage()` restores the original output alias, and the router
 still observes that value in backward. This check retains extra tensors and
 synchronizes with the host, so it is restricted to short eager diagnostics.
 
+Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
+stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
+its consumer stream wait for the parameter all-gather stream after unshard.
+This deliberately waits for all earlier work on that stream and is therefore a
+diagnostic, not the final fine-grained dependency implementation.
+
 Set `MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK=<layer-number>` for a short eager
 combined-1F1B run to retain that layer's router input and compare it against an
 immutable clone at the preprocess, dispatch, expert, combine, and backward

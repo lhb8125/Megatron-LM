@@ -16,6 +16,7 @@
 
 import functools
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -93,6 +94,13 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
     if ctx.backward_phase:
         target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
     target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
+    debug_name = getattr(hook_module, "_mcore_checkpoint_debug_name", None)
+    if (
+        ctx.backward_phase
+        and debug_name is not None
+        and os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM") == debug_name
+    ):
+        torch.cuda.current_stream().wait_stream(ctx.ag_stream)
 
     # ---- free stale grad data (safe to repeat, idempotent) ----------------
     for param_group in target._fsdp_param_groups:
