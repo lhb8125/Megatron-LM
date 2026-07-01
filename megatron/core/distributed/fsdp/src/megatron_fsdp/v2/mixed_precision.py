@@ -614,7 +614,7 @@ class MixedPrecisionPolicy:
 
         # ZeRO-1/2 refresh only this rank's slice; gather before next compute.
         def mark_dirty(buffer):
-            if buffer is not None and not buffer.is_distributed and buffer.dp_world_size > 1:
+            if buffer is not None and not buffer.is_distributed:
                 buffer.data._dirty = True
 
         if model_weight_buffer.sharding_strategy != "no_shard":

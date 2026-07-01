@@ -296,7 +296,6 @@ class TestFullyShardBasic:
         fully_shard(
             model,
             mesh=_singleton_mesh(),
-            mp_policy=MixedPrecisionPolicy(main_params_dtype=torch.float32),
             sharding_strategy="optim_grads_params",
             enable_async_reduce_grad=False,
         )
@@ -317,7 +316,6 @@ class TestFullyShardBasic:
         monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", unexpected_collective)
         monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", unexpected_collective)
 
-        model._copy_main_weights_to_model_weights()
         x = torch.randn(2, 64, device=_device())
         _forward_backward(model, x)
 

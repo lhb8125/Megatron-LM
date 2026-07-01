@@ -695,9 +695,6 @@ gradient buffers as local buffers even when the logical sharding strategy is
 buffer, and `reduce_grad()` returns without launching NCCL. DTensor placements
 and the logical sharding strategy stay unchanged, so optimizer-facing behavior
 is identical while no-op all-gather and reduce-scatter kernels are removed.
-After copying optimized main weights back, the local model and transpose
-buffers remain clean: the rank's size-one "shard" covered the complete buffer,
-so the next unshard also stays on the local fast path.
 
 ---
 
