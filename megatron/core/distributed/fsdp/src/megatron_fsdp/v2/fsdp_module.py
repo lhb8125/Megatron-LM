@@ -48,14 +48,6 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
         coalescing_event.wait()
 
 
-def _reduce_grad_param_groups(dp_group, param_groups) -> None:
-    """Submit one same-process-group run under a single NCCL group."""
-    cm = _coalescing_manager(dp_group) if len(param_groups) > 1 else nullcontext()
-    with cm:
-        for param_group in param_groups:
-            param_group.reduce_grad()
-
-
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -806,7 +798,7 @@ class FSDPModule:
         # Handle pending reduce events before this module to release buffers promptly.
         self._wait_for_previous_async_reduce_grad()
 
-        prepared_groups = []
+        # Perform reduction for this module
         for param_names, param_group in self._named_param_groups:
             if not param_group.requires_grad:
                 continue
@@ -862,69 +854,51 @@ class FSDPModule:
                     main_grad.copy_(param.grad.detach())
                     del param.grad
 
-            prepared_groups.append((param_names, param_group))
-
-        # Coalesce consecutive parameter groups that use the same DP process
-        # group. This matches v1's bucket-group submission while preserving
-        # each ParameterGroup's independent storage and lifetime.
-        group_runs = []
-        for param_names, param_group in prepared_groups:
-            if group_runs and group_runs[-1][0] is param_group.dp_group:
-                group_runs[-1][1].append((param_names, param_group))
-            else:
-                group_runs.append((param_group.dp_group, [(param_names, param_group)]))
-
-        for dp_group, group_items in group_runs:
             if async_op:
+                # ---- Overlapped path ----
+                # Switch to rs_stream for the reduce-scatter kernel
                 stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    param_group.reduce_grad()
+            else:
+                # ---- Non-overlapped path ----
+                # Reduce gradients immediately and release grad buffer
+                param_group.reduce_grad()
+                param_group.release_grad_buffer()
+
+            # Install reduced gradients to distributed parameters
             with torch.cuda.stream(stream):
-                _reduce_grad_param_groups(dp_group, [param_group for _, param_group in group_items])
-
-                for param_names, param_group in group_items:
-                    # Install reduced gradients to distributed parameters.
-                    for name, param, dist_param, dist_grad in zip(
-                        param_names,
-                        param_group.params,
-                        param_group.dist_params,
-                        param_group.dist_grads,
-                    ):
-                        if not param.requires_grad:
-                            continue
-                        if param_group.mp_policy.use_decoupled_grad:
-                            setattr(dist_param, "decoupled_grad", dist_grad)
-                            if (
-                                param_group.enable_full_iteration_cuda_graph
-                                and dist_grad is not None
-                            ):
-                                setattr(
-                                    dist_param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", True
-                                )
-                            if dist_param.grad is not None:
-                                del dist_param.grad
-                        else:
-                            assert dist_grad is None or dist_param.dtype == dist_grad.dtype, (
-                                f"{name} Dist param dtype {dist_param.dtype} does not match "
-                                f"dist grad dtype {dist_grad.dtype}"
-                            )
-                            setattr(dist_param, "grad", dist_grad)
-                            if hasattr(dist_param, "decoupled_grad"):
-                                dist_param.decoupled_grad = None
-
-                    # NaN check after reduction.
-                    if getattr(self, "_enable_nan_checks", False):
-                        for name, dist_grad in zip(param_names, param_group.dist_grads):
-                            if dist_grad is not None:
-                                assert torch.isfinite(
-                                    dist_grad._local_tensor
-                                ).all(), f"Non-finite value in dist grad for parameter {name}"
+                for name, param, dist_param, dist_grad in zip(
+                    param_names, param_group.params, param_group.dist_params, param_group.dist_grads
+                ):
+                    if not param.requires_grad:
+                        continue
+                    if param_group.mp_policy.use_decoupled_grad:
+                        setattr(dist_param, "decoupled_grad", dist_grad)
+                        if param_group.enable_full_iteration_cuda_graph and dist_grad is not None:
+                            setattr(dist_param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", True)
+                        if dist_param.grad is not None:
+                            del dist_param.grad
+                    else:
+                        assert (
+                            dist_grad is None or dist_param.dtype == dist_grad.dtype
+                        ), f"{name} Dist param dtype {dist_param.dtype} does not match dist grad dtype {dist_grad.dtype}"
+                        setattr(dist_param, "grad", dist_grad)
+                        if hasattr(dist_param, "decoupled_grad"):
+                            dist_param.decoupled_grad = None
 
             if async_op:
                 event = stream.record_event()
-                for _, param_group in group_items:
-                    ctx.reduce_grad_buckets[id(self)].append((event, param_group))
-            else:
-                for _, param_group in group_items:
-                    param_group.release_grad_buffer()
+                ctx.reduce_grad_buckets[id(self)].append((event, param_group))
+
+            # NaN check after reduction
+            if getattr(self, "_enable_nan_checks", False):
+                with torch.cuda.stream(stream):
+                    for name, dist_grad in zip(param_names, param_group.dist_grads):
+                        if dist_grad is not None:
+                            assert torch.isfinite(
+                                dist_grad._local_tensor
+                            ).all(), f"Non-finite value in dist grad for parameter {name}"
 
         torch.cuda.nvtx.range_pop()
 

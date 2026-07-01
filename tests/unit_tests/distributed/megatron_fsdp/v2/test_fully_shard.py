@@ -52,7 +52,6 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
     get_state_dict,
     preprocess_state_dict_for_uneven_dtensor,
 )
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDPModule
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fully_shard import fully_shard
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
@@ -219,29 +218,6 @@ def _count_fsdp_modules(module):
 
 
 class TestFullyShardBasic:
-    def test_reduce_grad_param_groups_use_one_coalescing_manager(self, monkeypatch):
-        events = []
-
-        class FakeParamGroup:
-            def reduce_grad(self):
-                events.append("reduce")
-
-        class FakeCoalescingManager:
-            def __enter__(self):
-                events.append("enter")
-
-            def __exit__(self, exc_type, exc_value, traceback):
-                events.append("exit")
-
-        monkeypatch.setattr(
-            fsdp_module, "_coalescing_manager", lambda group: FakeCoalescingManager()
-        )
-        fsdp_module._reduce_grad_param_groups(
-            object(), [FakeParamGroup(), FakeParamGroup(), FakeParamGroup()]
-        )
-
-        assert events == ["enter", "reduce", "reduce", "reduce", "exit"]
-
     def test_reclaims_original_parameter_cache_after_buffer_init(self, monkeypatch):
         events = []
         real_collect = gc.collect
