@@ -64,6 +64,57 @@ def test_async_coalesced_unshard_waits_for_work(monkeypatch):
     assert order == ["unshard:a", "unshard:b", "launch", "wait"]
 
 
+def test_singleton_unshard_skips_coalescing_manager(monkeypatch):
+    order = []
+
+    class FakeWeightBuffer:
+        _dp_world_size = 1
+
+        def __init__(self, name):
+            self.name = name
+
+        def unshard(self, bind_params=False):
+            assert bind_params
+            order.append(self.name)
+
+    def unexpected_coalescing_manager(*args, **kwargs):
+        raise AssertionError("Singleton unshard must not enter a coalescing manager")
+
+    monkeypatch.setattr(fsdp_module_impl, "_coalescing_manager", unexpected_coalescing_manager)
+    fsdp_module_impl._unshard_weight_buffers(
+        object(), [FakeWeightBuffer("a"), FakeWeightBuffer("b")], async_op=False
+    )
+
+    assert order == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("world_sizes", "expected"), [([1], True), ([1, 1], True), ([1, 2], False), ([], False)]
+)
+def test_singleton_unshard_detection(world_sizes, expected):
+    class FakeWeightBuffer:
+        def __init__(self, world_size):
+            self._dp_world_size = world_size
+
+    class FakePolicy:
+        @staticmethod
+        def weight_buffers_for_unshard(model_weight, transpose_weight, *, bwd_pass):
+            assert bwd_pass
+            return [model_weight, transpose_weight]
+
+    class FakeParamGroup:
+        mp_policy = FakePolicy()
+
+        def __init__(self, buffers):
+            self.model_weight_buffer = buffers[0] if buffers else None
+            self.transpose_weight_buffer = buffers[1] if len(buffers) > 1 else None
+
+    buffers = [FakeWeightBuffer(world_size) for world_size in world_sizes]
+    module = type("FakeModule", (), {"_fsdp_param_groups": [FakeParamGroup(buffers)]})()
+
+    assert fsdp_module_impl._uses_singleton_dp_for_unshard(module, bwd_pass=True) is expected
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 

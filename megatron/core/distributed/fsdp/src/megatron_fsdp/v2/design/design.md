@@ -56,7 +56,8 @@ class _FSDPRootContext:
     # --- Unshard prefetch tracking ---
     unshard_done_events: Dict[int, Optional[torch.cuda.Event]]
     # module_id -> Event: signals when that module's all-gather is complete.
-    # None means "not yet launched" or "already consumed by a wait".
+    # A private sentinel records singleton-DP unshards completed on the caller
+    # stream without creating an event. None means "not yet launched".
 
     # --- Reduce-scatter grad overlap tracking ---
     reduce_grad_buckets: Dict[int, List[Tuple[torch.cuda.Event, ParameterGroup]]]
@@ -240,6 +241,14 @@ yields a manager that owns the resulting `Work`. The async path calls
 readiness event. This inserts the NCCL completion dependency into `ag_stream`;
 otherwise the readiness event can run before the backend stream finishes
 writing the gathered buffers.
+
+When every weight buffer in a module belongs to a world-size-one DP group, no
+communication can overlap with compute. That path copies the local shard on the
+caller stream, skips the coalescing manager and AG-stream synchronization, and
+stores a non-event sentinel in `unshard_done_events`. The sentinel preserves the
+same prefetch/reshard state machine without adding cross-stream event nodes to a
+full-iteration CUDA graph. Modules with any DP group larger than one retain the
+normal AG-stream collective and readiness event.
 
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched

@@ -381,6 +381,7 @@ class DataParallelBuffer:
 
         dp_rank = torch.distributed.get_rank(dp_group)
         dp_world_size = torch.distributed.get_world_size(dp_group)
+        self._dp_world_size = dp_world_size
 
         # Always build layout with logical shapes and shared chunk_size_factor
         # so that all buffers share the same proportional item-offset mapping.
@@ -596,9 +597,12 @@ class DataParallelBuffer:
 
         sm = self.buffer_index.shard_meta
         shard_buffer = self.data[sm.local_data_index : sm.local_data_index + sm.size]
-        torch.distributed.all_gather_into_tensor(
-            output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
-        )
+        if self._dp_world_size == 1:
+            full_buffer.copy_(shard_buffer)
+        else:
+            torch.distributed.all_gather_into_tensor(
+                output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
+            )
         if full_buffer.is_cuda:
             # Temporary all-gather buckets may be released from another stream before
             # the collective finishes; record the producer stream for allocator safety.
