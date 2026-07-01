@@ -451,6 +451,27 @@ optimizer-facing DTensor shards through `dist_params`.
    `copy_main_weights_to_model_weights()`, the next forward refreshes the
    replicated compute weights from those updated shards.
 
+### Mixed FP8 module parameter groups
+
+An FP8 transformer layer commonly creates a quantized matrix-weight group and
+a separate BF16 one-dimensional group for normalization weights. With a
+module-wide `optim_grads_params` strategy, the small BF16 group otherwise adds
+one independent parameter all-gather and gradient reduce-scatter per layer and
+per micro-batch. `_get_module_fsdp_param_groups()` therefore assigns `optim`
+only to non-FP8 groups whose parameters are all one-dimensional (or scalar)
+when the same managed module also contains FP8 parameters. Matrix weights and
+modules without FP8 parameters retain the requested strategy.
+
+Mixed-strategy modules still enter the post-backward reduction path because
+their ZeRO-3 group needs an immediate reduce-scatter. `FSDPModule.reduce_grad()`
+filters groups by lifecycle: `optim_grads`/`optim_grads_params` reduce after
+each backward, while `optim`/`no_shard` accumulate their local full gradients
+across micro-batches. `finish_grad_sync()` then calls `reduce_grad()` with an
+explicit delayed-strategy filter so it cannot reduce the ZeRO-2/3 groups a
+second time. This changes the small one-dimensional group from one AG/RS pair
+per micro-batch to one refresh/reduction pair per iteration while preserving
+sharded optimizer state.
+
 ### ZeRO-2 (`optim_grads`)
 
 1. Forward and backward also read replicated `model_weight_buffer`; no parameter

@@ -125,6 +125,41 @@ def test_singleton_reduce_grad_detection(world_size, expected):
     assert fsdp_module_impl._uses_singleton_dp_for_reduce_grad(param_group) is expected
 
 
+@pytest.mark.parametrize(
+    ("requested", "module_has_fp8", "group_specs", "expected"),
+    [
+        ("optim_grads_params", True, [(1, False), (0, False)], "optim"),
+        ("optim_grads_params", True, [(2, False)], "optim_grads_params"),
+        ("optim_grads_params", True, [(1, True)], "optim_grads_params"),
+        ("optim_grads_params", False, [(1, False)], "optim_grads_params"),
+        ("optim_grads", True, [(1, False)], "optim_grads"),
+    ],
+)
+def test_fp8_module_1d_param_group_sharding_strategy(
+    requested, module_has_fp8, group_specs, expected
+):
+    class FakeParam:
+        def __init__(self, ndim, is_fp8):
+            self.ndim = ndim
+            self.is_fp8 = is_fp8
+
+    class FakePolicy:
+        @staticmethod
+        def is_fp8_param(param):
+            return param.is_fp8
+
+    params = [FakeParam(ndim, is_fp8) for ndim, is_fp8 in group_specs]
+    assert (
+        fsdp_module_impl._select_param_group_sharding_strategy(
+            params,
+            module_has_fp8_params=module_has_fp8,
+            mp_policy=FakePolicy(),
+            requested_sharding_strategy=requested,
+        )
+        == expected
+    )
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 
@@ -216,6 +251,14 @@ class TestFSDPV2LayerNormRecompute:
                     module=recompute_model,
                     fsdp_unit_modules=[TransformerLayer],
                 )
+                strategies = {
+                    param_group.sharding_strategy
+                    for child in recompute_fsdp.modules()
+                    if isinstance(child, FSDPModule)
+                    for param_group in child._fsdp_param_groups
+                }
+                assert "optim" in strategies
+                assert "optim_grads_params" in strategies
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
