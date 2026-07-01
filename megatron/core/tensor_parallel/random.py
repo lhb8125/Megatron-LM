@@ -812,7 +812,7 @@ class CheckpointWithoutOutput(object):
     discarded output tensors are directly saved in the following modules for backward computation.
     """
 
-    def __init__(self, fp8=False, ckpt_manager=None, debug_name=None):
+    def __init__(self, fp8=False, ckpt_manager=None, debug_name=None, debug_module=None):
         """
         Initialize CheckpointWithoutOutput.
 
@@ -823,6 +823,7 @@ class CheckpointWithoutOutput(object):
                          discard_output_and_register_recompute() will only discard
                          output without registering individual hooks.
             debug_name: Optional name used by the opt-in recompute lifetime checker.
+            debug_module: Optional module whose parameters are checked during recomputation.
         """
         self.fp8 = bool(fp8)
         self.ckpt_manager = ckpt_manager
@@ -833,7 +834,9 @@ class CheckpointWithoutOutput(object):
         self.ctx = None
         self.outputs = None
         self.debug_name = debug_name
+        self.debug_module = debug_module
         self.debug_forward_outputs = None
+        self.debug_forward_parameters = None
 
     def _debug_recompute_enabled(self):
         target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_CHECK")
@@ -865,6 +868,11 @@ class CheckpointWithoutOutput(object):
 
         if self._debug_recompute_enabled():
             self.debug_forward_outputs = tuple(output.detach().clone() for output in self.outputs)
+            if self.debug_module is not None:
+                self.debug_forward_parameters = tuple(
+                    (name, parameter.detach().clone())
+                    for name, parameter in self.debug_module.named_parameters()
+                )
             for output, reference in zip(self.outputs, self.debug_forward_outputs):
                 output._mcore_checkpoint_debug_name = self.debug_name
                 output._mcore_checkpoint_forward_reference = reference
@@ -930,6 +938,30 @@ class CheckpointWithoutOutput(object):
             outputs = (outputs,)
 
         if self._debug_recompute_enabled():
+            if self.debug_module is not None:
+                recompute_parameters = tuple(self.debug_module.named_parameters())
+                assert len(recompute_parameters) == len(self.debug_forward_parameters)
+                for (name, parameter), (reference_name, reference) in zip(
+                    recompute_parameters, self.debug_forward_parameters
+                ):
+                    assert name == reference_name
+                    required_bytes = (
+                        parameter.storage_offset() + parameter.numel()
+                    ) * parameter.element_size()
+                    storage_bytes = parameter.untyped_storage().size()
+                    assert storage_bytes >= required_bytes, (
+                        f"Checkpoint parameter storage released at {self.debug_name} "
+                        f"parameter={name}: {storage_bytes} < {required_bytes} bytes"
+                    )
+                    assert torch.isfinite(
+                        parameter
+                    ).all(), (
+                        f"Non-finite checkpoint parameter at {self.debug_name} parameter={name}"
+                    )
+                    assert torch.equal(parameter, reference), (
+                        f"Checkpoint parameter differs from forward at {self.debug_name} "
+                        f"parameter={name}"
+                    )
             for index, (output, reference) in enumerate(zip(outputs, self.debug_forward_outputs)):
                 assert torch.isfinite(
                     output

@@ -534,12 +534,13 @@ The saved-input failure includes the router layer number.
 
 Set `MCORE_CHECKPOINT_RECOMPUTE_CHECK=pre_mlp_layernorm:<layer-number>` together
 with the router weight check to localize a pre-MLP LayerNorm checkpoint failure.
-The selected checkpoint retains one immutable forward output and verifies, in
-order, that its saved inputs remain live and finite, its recomputed output is
-finite and equal to the forward result, `share_storage()` restores the original
-output alias, and the router still observes that value in backward.  This check
-retains an extra activation and synchronizes with the host, so it is restricted
-to short eager diagnostics.
+The selected checkpoint retains immutable copies of its forward output and
+LayerNorm parameters. It verifies, in order, that its saved inputs remain live
+and finite, the recompute-time parameter bindings remain live, finite, and equal
+to the forward values, its recomputed output is finite and equal to the forward
+result, `share_storage()` restores the original output alias, and the router
+still observes that value in backward. This check retains extra tensors and
+synchronizes with the host, so it is restricted to short eager diagnostics.
 
 Set `MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK=<layer-number>` for a short eager
 combined-1F1B run to retain that layer's router input and compare it against an
