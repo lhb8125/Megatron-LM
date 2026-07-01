@@ -773,8 +773,8 @@ class FSDPModule:
 
         backward_order = list(reversed(ctx.forward_order))
         for i, module in enumerate(backward_order):
-            if i - 2 >= 0:
-                buckets = ctx.reduce_grad_buckets[id(backward_order[i - 2])]
+            if i - 3 >= 0:
+                buckets = ctx.reduce_grad_buckets[id(backward_order[i - 3])]
                 while len(buckets) > 0:
                     event, param_group = buckets.pop()
                     event.wait()
