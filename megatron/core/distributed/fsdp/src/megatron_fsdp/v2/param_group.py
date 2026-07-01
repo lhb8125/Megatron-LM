@@ -273,31 +273,6 @@ class ParameterGroup:
             self.transpose_weight_buffer,
         )
 
-    def can_batch_fp8_main_weight_update(self) -> bool:
-        """Return whether this group can join a process-group FP8 refresh batch."""
-        return (
-            self.main_weight_buffer is not None
-            and bool(self.params)
-            and self.mp_policy.is_fp8_param(self.params[0])
-        )
-
-    def prepare_fp8_main_weight_update(self) -> tuple[list, list, list, list]:
-        """Return direct tensor views consumed by the batched TE refresh."""
-        self._ensure_buffers_on_gpu()
-        return self.mp_policy.prepare_fp8_main_weight_update(
-            self.params,
-            self.param_idx,
-            self.model_weight_buffer,
-            self.main_weight_buffer,
-            self.transpose_weight_buffer,
-        )
-
-    def mark_model_weight_buffers_dirty(self) -> None:
-        """Mark replicated FP8 compute buffers stale after a batched refresh."""
-        self.mp_policy.mark_model_weight_buffers_dirty(
-            self.model_weight_buffer, self.transpose_weight_buffer
-        )
-
     def reduce_grad(self):
         """
         Reduce gradients across DP ranks.

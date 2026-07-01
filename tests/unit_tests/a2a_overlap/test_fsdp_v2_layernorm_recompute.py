@@ -125,53 +125,6 @@ def test_singleton_reduce_grad_detection(world_size, expected):
     assert fsdp_module_impl._uses_singleton_dp_for_reduce_grad(param_group) is expected
 
 
-def test_fp8_main_weight_refresh_batches_by_process_group(monkeypatch):
-    group_a = object()
-    group_b = object()
-    calls = []
-
-    class FakeParamGroup:
-        def __init__(self, name, dp_group, batchable=True):
-            self.name = name
-            self.dp_group = dp_group
-            self.batchable = batchable
-            self.copied = False
-            self.marked = False
-
-        def can_batch_fp8_main_weight_update(self):
-            return self.batchable
-
-        def prepare_fp8_main_weight_update(self):
-            return ([self.name], [f"main:{self.name}"], [0], [f"shard:{self.name}"])
-
-        def copy_main_weights_to_model_weights(self):
-            self.copied = True
-
-        def mark_model_weight_buffers_dirty(self):
-            self.marked = True
-
-    def fake_quantize(fp8_params, main_params, start_offsets, dp_group, model_param_shards):
-        calls.append((dp_group, fp8_params, main_params, start_offsets, model_param_shards))
-
-    monkeypatch.setattr(fsdp_module_impl, "quantize_main_weights_to_fp8", fake_quantize)
-    groups = [
-        FakeParamGroup("a0", group_a),
-        FakeParamGroup("a1", group_a),
-        FakeParamGroup("b0", group_b),
-        FakeParamGroup("plain", group_a, batchable=False),
-    ]
-
-    fsdp_module_impl._copy_main_weight_param_groups(groups)
-
-    assert len(calls) == 2
-    assert calls[0][0] is group_a
-    assert calls[0][1] == ["a0", "a1"]
-    assert calls[1][0] is group_b
-    assert calls[1][1] == ["b0"]
-    assert all(group.marked for group in groups[:3])
-    assert groups[3].copied
-
-
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 
