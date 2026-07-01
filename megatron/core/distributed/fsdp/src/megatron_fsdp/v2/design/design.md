@@ -161,7 +161,8 @@ if async_op:
 # bwd_pass selects the weight-buffer orientation. The lifecycle phase selects
 # traversal direction, since backward recompute also requests forward buffers.
 prefetch_bwd_pass = ctx.backward_phase
-if async_op:
+disable_neighbor_prefetch = os.environ.get("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "0") == "1"
+if async_op and not disable_neighbor_prefetch:
     prefetch = _get_prefetch_next_modules(prefetch_bwd_pass)
 else:
     prefetch = []
@@ -239,6 +240,11 @@ ordering expected by FP8/NVFP4 rebuild hooks.
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
+
+`MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH=1` is a temporary diagnostic switch that preserves
+the current module's asynchronous all-gather on `ag_stream` and its event wait while removing
+only the adjacent-module lookahead. It isolates current-module async unshard from neighbor
+prefetch and is not a supported production configuration.
 
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full

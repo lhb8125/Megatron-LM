@@ -15,6 +15,7 @@
 """FSDPModule implementation for Megatron-FSDP2."""
 
 import logging
+import os
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -673,7 +674,10 @@ class FSDPModule:
 
         # Unshard this module and optionally prefetch the next module in the
         # active forward/backward traversal.
-        if async_op:
+        disable_neighbor_prefetch = (
+            os.environ.get("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "0") == "1"
+        )
+        if async_op and not disable_neighbor_prefetch:
             prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
         else:
             prefetch_modules = []
