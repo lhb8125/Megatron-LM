@@ -37,6 +37,7 @@ Single-GPU tests:
         -k "test_double_shard_rejected or test_no_params_module"
 """
 
+import copy
 import gc
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import StateDictOptions
 from torch.distributed.checkpoint.state_dict import get_state_dict as torch_get_state_dict
+from torch.distributed.tensor import DeviceMesh
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
@@ -83,6 +85,20 @@ def _world_size():
 
 def _device():
     return torch.device(f"cuda:{_rank() % torch.cuda.device_count()}")
+
+
+def _singleton_mesh():
+    """Create one singleton process group per global rank and return this rank's mesh."""
+    selected_group = None
+    for group_rank in range(_world_size()):
+        group = torch.distributed.new_group(ranks=[group_rank])
+        if group_rank == _rank():
+            selected_group = group
+    assert selected_group is not None
+    mesh = DeviceMesh.from_group(
+        selected_group, device_type="cuda", mesh=[_rank()], mesh_dim_names=("dp",)
+    )
+    return mesh, selected_group
 
 
 # ------------------------------------------------------------------ #
@@ -275,6 +291,38 @@ class TestFullyShardBasic:
         loss = _forward_backward(model, x)
         assert not torch.isnan(torch.tensor(loss)), "Loss is NaN"
         assert not torch.isinf(torch.tensor(loss)), "Loss is Inf"
+
+    def test_singleton_gradient_buffer_accumulates_microbatches(self):
+        """A local singleton grad buffer matches reference accumulation."""
+        torch.manual_seed(42)
+        reference = SimpleMLP(64).to(_device())
+        model = copy.deepcopy(reference)
+        mesh, singleton_group = _singleton_mesh()
+        try:
+            fully_shard(
+                model,
+                mesh=mesh,
+                sharding_strategy="optim_grads_params",
+                enable_async_reduce_grad=False,
+            )
+
+            torch.manual_seed(123)
+            inputs = [torch.randn(2, 64, device=_device()) for _ in range(2)]
+            for x in inputs:
+                reference(x).sum().backward()
+                model(x).sum().backward()
+
+            reference_grads = {name: param.grad for name, param in reference.named_parameters()}
+            for param_names, param_group in model._named_param_groups:
+                assert not param_group.main_grad_buffer.is_distributed
+                for name, dist_grad in zip(param_names, param_group.dist_grads):
+                    assert dist_grad is not None
+                    torch.testing.assert_close(
+                        dist_grad._local_tensor.view_as(reference_grads[name]),
+                        reference_grads[name],
+                    )
+        finally:
+            torch.distributed.destroy_process_group(singleton_group)
 
     def test_no_shard_forward_backward_finish_grad_sync(self):
         """no_shard keeps full replicated buffers and all-reduces at grad sync."""

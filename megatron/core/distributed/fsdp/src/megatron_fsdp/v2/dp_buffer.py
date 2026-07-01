@@ -381,6 +381,7 @@ class DataParallelBuffer:
 
         dp_rank = torch.distributed.get_rank(dp_group)
         dp_world_size = torch.distributed.get_world_size(dp_group)
+        self.dp_world_size = dp_world_size
 
         # Always build layout with logical shapes and shared chunk_size_factor
         # so that all buffers share the same proportional item-offset mapping.
@@ -730,6 +731,12 @@ class DataParallelBuffer:
         """
         if self.sharding_strategy in ("no_shard", "optim"):
             overwrite_grad = True
+
+        # A local gradient buffer on a singleton process group is already the
+        # optimizer-facing result. FSDPModule handles micro-batch accumulation
+        # before this point, so there is no collective or copy left to perform.
+        if not self.is_distributed and self.dp_world_size == 1:
+            return
 
         grad_comm_dtype = self.mp_policy.grad_comm_dtype or self.dtype
 

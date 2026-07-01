@@ -117,6 +117,7 @@ class ParameterGroup:
         self.hsdp_wbuf: Optional[DataParallelBuffer] = None
         self.hsdp_gbuf: Optional[DataParallelBuffer] = None
         self.hsdp_comm_gbuf: Optional[DataParallelBuffer] = None
+        self._grad_buffer_is_fresh = True
         # Initialize buffers and distributed parameters
         self._init_buffers()
 
@@ -163,7 +164,10 @@ class ParameterGroup:
         s = self.sharding_strategy
         shard_weights = s == "optim_grads_params"
         shard_main_weights = s != "no_shard"
-        shard_grads = s in ("optim_grads", "optim_grads_params")
+        # A singleton group already owns the full optimizer-facing gradient.
+        # Keep that buffer local while retaining the logical DTensor sharding
+        # placement (Shard over a size-one mesh).
+        shard_grads = s in ("optim_grads", "optim_grads_params") and self._dp_world_size > 1
 
         # Create model weight buffers. The policy owns dtype-sensitive storage
         # choices and exposes the tensor view that should be packed.

@@ -343,6 +343,13 @@ The operation is inherently synchronous *within whatever stream is current* when
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
 
+**Singleton gradient groups.** A size-one data-parallel group keeps its main-gradient buffer
+local even under `optim_grads` or `optim_grads_params`. The first micro-batch copies into the
+fresh buffer and later micro-batches add in place; Transformer Engine's fused-wgrad path uses the
+same freshness flag to choose overwrite versus accumulate. `reduce_grad()` then has no collective
+or local shard copy to perform. Weight buffers retain the normal sharded lifecycle because MXFP8
+paged-stash execution relies on its existing unshard and reshard schedule.
+
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
 directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:
