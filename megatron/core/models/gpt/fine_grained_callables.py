@@ -362,8 +362,13 @@ class TransformerLayerNode(ScheduleNode):
         """Execute forward pass and corresponding hooks."""
         output = super().forward(*inputs)
         if self.is_layer_last_node:
-            self._post_forward_hook()
+            self._run_post_forward_hook()
         return output
+
+    def _run_post_forward_hook(self):
+        """Run the layer callback after work queued on this node's stream."""
+        torch.cuda.current_stream().wait_stream(self.stream)
+        self._post_forward_hook()
 
     def backward(self, *output_grad):
         """Execute backward pass and corresponding hooks."""

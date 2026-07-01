@@ -6,6 +6,7 @@ import torch
 
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan
+from megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_with_transformer_engine_spec,
@@ -255,6 +256,25 @@ class TestA2AOverlap:
 
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
+
+    def test_post_forward_hook_waits_for_node_stream(self, monkeypatch):
+        """Parameter release must wait for the final forward node's producer stream."""
+        producer_stream = object()
+        call_order = []
+
+        class CurrentStream:
+            def wait_stream(self, stream):
+                assert stream is producer_stream
+                call_order.append("wait")
+
+        node = object.__new__(TransformerLayerNode)
+        node.stream = producer_stream
+        node._post_forward_hook = lambda: call_order.append("hook")
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: CurrentStream())
+
+        node._run_post_forward_hook()
+
+        assert call_order == ["wait", "hook"]
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     def test_transformer_layer_overlap_dense(self):
