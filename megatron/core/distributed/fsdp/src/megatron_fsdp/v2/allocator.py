@@ -106,14 +106,6 @@ class TemporaryBucketAllocator(BucketAllocator):
     ) -> None:
         key = _resolve_key(key, param_group_id)
         if key in self.buckets:
-            retain_weight_storage = (
-                os.environ.get("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "0") == "1"
-                and isinstance(key, tuple)
-                and key[-1] in ("model_weight", "transpose_weight")
-            )
-            if retain_weight_storage:
-                del self.buckets[key]
-                return
             _free_storage(self.buckets[key].data)
             del self.buckets[key]
 
@@ -147,6 +139,14 @@ class StorageFreeingBucketAllocator(BucketAllocator):
     ) -> None:
         key = _resolve_key(key, param_group_id)
         if key in self.buckets:
+            retain_weight_storage = (
+                os.environ.get("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "0") == "1"
+                and isinstance(key, tuple)
+                and key[-1] in ("model_weight", "transpose_weight")
+            )
+            if retain_weight_storage:
+                del self.buckets[key]
+                return
             _free_storage(self.buckets[key].data)
 
 
