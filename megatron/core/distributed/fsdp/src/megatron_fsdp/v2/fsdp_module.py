@@ -726,6 +726,15 @@ class FSDPModule:
         if ctx.unshard_done_events[id(self)] is not None:
             ctx.unshard_done_events[id(self)].wait()
 
+        # The all-gather event makes the weights ready on this stream, but it
+        # does not tell either the CUDA caching allocator or TracePoolAllocator
+        # that the stream will keep reading them. Record the consumer before
+        # reshard() can release or recycle the full buffers.
+        consumer_stream = torch.cuda.current_stream()
+        for _, param_group in self._named_param_groups:
+            for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
+                weight_buffer.record_unsharded_buffer_stream(consumer_stream)
+
         # Replace module parameters with unsharded versions
         for param_names, param_group in self._named_param_groups:
             for name, param in zip(param_names, param_group.params):

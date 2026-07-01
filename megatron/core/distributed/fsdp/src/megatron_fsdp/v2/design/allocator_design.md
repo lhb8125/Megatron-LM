@@ -18,6 +18,15 @@ Forward:   allocate(model_weight)  →  [compute]  →  free(model_weight)
 Backward:  allocate(main_grad)     →  [reduce]   →  free(main_grad)
 ```
 
+The alloc/free calls describe logical host-side ownership, while the kernels
+between them may execute asynchronously on several CUDA streams. A buffer
+therefore records each producer and consumer stream. Storage-backed allocators
+delegate physical lifetime to `Tensor.record_stream()`. The static trace pool
+keeps the streams on the freed slot and makes the next allocation of a shared
+slot wait for them before reusing the address. This preserves the planned
+memory sharing without allowing an all-gather to overwrite weights that a
+forward or recompute kernel is still reading.
+
 ## Why CUDA graph needs stable addresses
 
 CUDA graphs capture a sequence of GPU kernel launches into a single replayable

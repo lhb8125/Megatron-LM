@@ -186,6 +186,13 @@ for module in [self] + prefetch:
 if ctx.unshard_done_events[id(self)] is not None:
     ctx.unshard_done_events[id(self)].wait()          # main stream waits on ag_stream event
 
+# Keep the full buffers alive until this consumer stream finishes. For the
+# static trace pool this also orders the next user of a shared slot.
+consumer_stream = torch.cuda.current_stream()
+for _, param_group in self._named_param_groups:
+    for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
+        weight_buffer.record_unsharded_buffer_stream(consumer_stream)
+
 # Install full parameter tensors into the nn.Module (safe after event.wait)
 for param_names, param_group in self._named_param_groups:
     for name, param in zip(param_names, param_group.params):
@@ -223,6 +230,17 @@ ordering expected by FP8/NVFP4 rebuild hooks.
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
+
+**Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
+producer-to-consumer ordering, but does not by itself keep the temporary full
+buffer alive while the consumer kernel runs asynchronously. After readiness,
+`FSDPModule.unshard()` records every required full weight buffer on the current
+consumer stream. Storage-backed allocators use `Tensor.record_stream()` so a
+later `reshard()` cannot return the storage to CUDA too early. In optimized
+`TracePoolAllocator` mode, `free()` transfers the recorded streams to the
+physical slot, and the next `allocate()` of that slot inserts `wait_stream()`
+dependencies before another key can overwrite it. Producer streams are recorded
+through the same path for all-gather and reduce-scatter buffers.
 
 ### `_get_prefetch_next_modules(bwd_pass)`
 

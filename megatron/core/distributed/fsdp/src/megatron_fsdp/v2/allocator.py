@@ -59,6 +59,20 @@ class BucketAllocator:
         """Free the bucket associated with the given key."""
         raise NotImplementedError
 
+    def record_stream(
+        self,
+        key: Optional[AllocatorKey],
+        stream: torch.cuda.Stream,
+        *,
+        param_group_id: Optional[AllocatorKey] = None,
+    ) -> None:
+        """Record a stream that uses an allocated bucket.
+
+        Storage-backed allocators rely on ``Tensor.record_stream`` at the
+        buffer layer. Static-pool allocators override this method to order
+        later users of a shared slot after asynchronous consumers.
+        """
+
 
 class TemporaryBucketAllocator(BucketAllocator):
     """Manages temporary flat buffers keyed by a caller-provided key.
@@ -202,6 +216,10 @@ class TracePoolAllocator(BucketAllocator):
         self._key_to_slot: Dict[AllocatorKey, int] = {}
         # For each key, the view into its slot (pre-computed for O(1) access)
         self._key_to_view: Dict[AllocatorKey, torch.Tensor] = {}
+        # Streams that have used an active key and must finish before its slot
+        # can be handed to another key.
+        self._recorded_streams: Dict[AllocatorKey, Set[torch.cuda.Stream]] = defaultdict(set)
+        self._pending_slot_streams: Dict[int, Set[torch.cuda.Stream]] = defaultdict(set)
 
     # -- Public interface ------------------------------------------------ #
 
@@ -233,6 +251,24 @@ class TracePoolAllocator(BucketAllocator):
             self._trace_free(key)
         else:
             self._optimized_free(key)
+
+    def record_stream(
+        self,
+        key: Optional[AllocatorKey],
+        stream: torch.cuda.Stream,
+        *,
+        param_group_id: Optional[AllocatorKey] = None,
+    ) -> None:
+        """Track an optimized-pool consumer until the key is freed.
+
+        Logical alloc/free intervals are recorded on the CPU, while kernels
+        consuming a slot may continue asynchronously on another CUDA stream.
+        The next key assigned to that slot waits for these streams in
+        ``_optimized_allocate`` before it can overwrite the shared storage.
+        """
+        key = _resolve_key(key, param_group_id)
+        if self._phase == "optimized" and key in self._active_keys:
+            self._recorded_streams[key].add(stream)
 
     # -- Phase 1: trace -------------------------------------------------- #
 
@@ -438,6 +474,11 @@ class TracePoolAllocator(BucketAllocator):
         slot_idx = self._key_to_slot[key]
         slot = self._slots[slot_idx]
         assert size <= slot.size, f"requested {size} > slot capacity {slot.size} (key={key!r})"
+        current_stream = torch.cuda.current_stream(device=device) if device.type == "cuda" else None
+        if current_stream is not None:
+            for pending_stream in self._pending_slot_streams.pop(slot_idx, ()):
+                if pending_stream != current_stream:
+                    current_stream.wait_stream(pending_stream)
         slot.in_use = True
         self._active_keys.add(key)
         # Return a view of the pre-allocated slot tensor
@@ -447,7 +488,9 @@ class TracePoolAllocator(BucketAllocator):
     def _optimized_free(self, key: AllocatorKey) -> None:
         if key not in self._active_keys:
             return
-        self._slots[self._key_to_slot[key]].in_use = False
+        slot_idx = self._key_to_slot[key]
+        self._slots[slot_idx].in_use = False
+        self._pending_slot_streams[slot_idx].update(self._recorded_streams.pop(key, ()))
         self._active_keys.discard(key)
 
     # -- Lifecycle ------------------------------------------------------- #
@@ -463,6 +506,8 @@ class TracePoolAllocator(BucketAllocator):
         self._slots.clear()
         self._key_to_slot.clear()
         self._key_to_view.clear()
+        self._recorded_streams.clear()
+        self._pending_slot_streams.clear()
 
     def release(self) -> None:
         """Release all slot tensor memory while preserving the slot plan.
@@ -494,6 +539,8 @@ class TracePoolAllocator(BucketAllocator):
             slot.tensor = torch.empty(0, dtype=slot.dtype, device=slot.device)
             slot.in_use = False
         self._active_keys.clear()
+        self._recorded_streams.clear()
+        self._pending_slot_streams.clear()
         self._phase = "released"
 
     def _auto_resume(self) -> None:
@@ -519,6 +566,8 @@ class TracePoolAllocator(BucketAllocator):
             self._key_to_view[key] = slot.tensor[: min(size_k, slot.size)]
 
         self._active_keys.clear()
+        self._recorded_streams.clear()
+        self._pending_slot_streams.clear()
         self._phase = "optimized"
 
     def resume(self) -> None:

@@ -579,6 +579,15 @@ class DataParallelBuffer:
             return True
         return False
 
+    def record_unsharded_buffer_stream(self, stream: torch.cuda.Stream) -> None:
+        """Keep the full buffer alive until work on ``stream`` completes."""
+        full_tensor = self._unsharded_buffer if self.is_distributed else self.data
+        if full_tensor is None or not full_tensor.is_cuda:
+            return
+        full_tensor.record_stream(stream)
+        if self.is_distributed:
+            self.allocator.record_stream(self.alloc_key, stream)
+
     @torch.no_grad()
     def unshard(self, bind_params: bool = False) -> torch.Tensor:
         """All-gather the full buffer from all shards and bind parameter storage.
@@ -602,7 +611,7 @@ class DataParallelBuffer:
         if full_buffer.is_cuda:
             # Temporary all-gather buckets may be released from another stream before
             # the collective finishes; record the producer stream for allocator safety.
-            full_buffer.record_stream(torch.cuda.current_stream())
+            self.record_unsharded_buffer_stream(torch.cuda.current_stream())
 
         if bind_params:
             self._bind_buffer_to_params(full_buffer)
@@ -766,7 +775,7 @@ class DataParallelBuffer:
             output_offset = sm.bucket_data_index
             if input_buffer.is_cuda:
                 # Keep temporary reduce-scatter buffers tied to the stream that uses them.
-                input_buffer.record_stream(torch.cuda.current_stream())
+                self.record_unsharded_buffer_stream(torch.cuda.current_stream())
         else:
             # ZeRO-1 (optim): ``self.data`` is the replicated full grad
             # accumulation buffer. The optimizer consumes only this rank's
