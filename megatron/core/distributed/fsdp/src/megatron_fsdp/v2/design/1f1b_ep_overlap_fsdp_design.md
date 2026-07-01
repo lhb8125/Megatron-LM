@@ -422,9 +422,11 @@ parent `TransformerLayer` would incorrectly apply the dense-DP placement and sca
 
 When the expert-DP process group has world size one, expert model and main weights use complete
 persistent buffers while their DTensors keep the logical expert-mesh placement. Fine-grained
-unshard and reshard therefore become local no-ops and issue no all-gather. Expert gradient
-buffers retain the normal ZeRO-3 full-gradient and optimizer-shard layout plus reduce-scatter,
-so per-microbatch scaling, accumulation, and full-CG side-stream ordering are unchanged.
+unshard and reshard therefore remain local and issue no all-gather. Logical reshard marks the
+resident quantized payload dirty so the next phase still performs local rebind and TE
+`post_unshard()` processing. Expert gradient buffers retain the normal ZeRO-3 full-gradient and
+optimizer-shard layout plus reduce-scatter, so per-microbatch scaling, accumulation, and
+full-CG side-stream ordering are unchanged.
 
 ---
 

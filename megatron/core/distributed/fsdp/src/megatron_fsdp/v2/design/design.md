@@ -35,8 +35,11 @@ one. This preserves their expert-DP mesh, DTensor placement, and gradient-scalin
 the dense DP mesh is larger. For a singleton mesh, `ParameterGroup` stores model and main weights
 as complete persistent buffers while retaining the logical `Shard(dim=0)` DTensor placement.
 Those buffers bind directly to compute parameters, so weight unshard and reshard become local
-no-ops and issue no all-gather. Gradient buffers keep the normal ZeRO-3 layout and reduction
-path, preserving per-microbatch scaling and full-iteration CUDA graph stream ordering.
+operations and issue no all-gather. Logical reshard marks resident quantized buffers dirty so
+the next forward/backward unshard still rebinds them and executes Transformer Engine's
+`post_unshard()` processing after `post_reshard()` invalidates recipe state. Gradient buffers
+keep the normal ZeRO-3 layout and reduction path, preserving per-microbatch scaling and
+full-iteration CUDA graph stream ordering.
 
 ---
 

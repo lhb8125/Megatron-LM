@@ -180,6 +180,16 @@ class TestFSDPV2LayerNormRecompute:
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
+                for child in expert_units:
+                    for param_group in child._fsdp_param_groups:
+                        param_group.reshard()
+                        assert param_group.model_weight_buffer.data._dirty
+                        if param_group.transpose_weight_buffer is not None:
+                            assert param_group.transpose_weight_buffer.data._dirty
+                            param_group.unshard(bwd_pass=True)
+                            assert not param_group.transpose_weight_buffer.data._dirty
+                            param_group.reshard()
+
                 singleton_all_gathers = []
                 original_all_gather = torch.distributed.all_gather_into_tensor
 

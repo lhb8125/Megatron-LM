@@ -632,6 +632,14 @@ class DataParallelBuffer:
     def reshard(self) -> None:
         """Release the temporary unsharded buffer allocated by unshard()."""
         if not self.is_distributed:
+            if (
+                self._dp_world_size == 1
+                and self.sharding_strategy != "no_shard"
+                and self.buffer_role in ("model_weight", "transpose_weight")
+            ):
+                # The storage remains resident, but quantized parameters must still
+                # re-enter post_unshard() after post_reshard() invalidates TE state.
+                self.data._dirty = True
             return
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
