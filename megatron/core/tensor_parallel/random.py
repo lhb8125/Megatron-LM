@@ -835,11 +835,16 @@ class CheckpointWithoutOutput(object):
         self.outputs = None
         self.debug_name = debug_name
         self.debug_module = debug_module
+        self.debug_forward_inputs = None
         self.debug_forward_outputs = None
         self.debug_forward_parameters = None
 
     def _debug_recompute_enabled(self):
         target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_CHECK")
+        return self.debug_name is not None and target in {"1", "all", self.debug_name}
+
+    def _debug_input_lifetime_enabled(self):
+        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK")
         return self.debug_name is not None and target in {"1", "all", self.debug_name}
 
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
@@ -860,6 +865,13 @@ class CheckpointWithoutOutput(object):
         self.run_function = run_function
 
         self.rng_states = _get_all_rng_states()
+
+        if self._debug_input_lifetime_enabled():
+            self.debug_forward_inputs = tuple(
+                (index, arg.detach().clone(), arg.data_ptr())
+                for index, arg in enumerate(args)
+                if isinstance(arg, torch.Tensor)
+            )
 
         outputs = CheckpointWithoutOutputFunction.apply(run_function, self, *args)
         self.outputs = outputs
@@ -913,6 +925,30 @@ class CheckpointWithoutOutput(object):
 
             # Reconstruct full args list from saved ctx
             inputs = _load_args_from_ctx(self.ctx)
+            if self._debug_input_lifetime_enabled():
+                for index, reference, reference_data_ptr in self.debug_forward_inputs:
+                    input_ = inputs[index]
+                    required_bytes = (
+                        input_.storage_offset() + input_.numel()
+                    ) * input_.element_size()
+                    storage_bytes = input_.untyped_storage().size()
+                    assert storage_bytes >= required_bytes, (
+                        f"Checkpoint input storage released at {self.debug_name} input={index}: "
+                        f"{storage_bytes} < {required_bytes} bytes"
+                    )
+                    assert torch.isfinite(
+                        input_
+                    ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
+                    if not torch.equal(input_, reference):
+                        max_abs_diff = (input_.float() - reference.float()).abs().max().item()
+                        raise AssertionError(
+                            f"Checkpoint input differs from forward at {self.debug_name} "
+                            f"input={index}: data_ptr={input_.data_ptr()}, "
+                            f"forward_data_ptr={reference_data_ptr}, "
+                            f"range=[{input_.min().item()}, {input_.max().item()}], "
+                            f"forward_range=[{reference.min().item()}, "
+                            f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
+                        )
             if self._debug_recompute_enabled():
                 for index, input_ in enumerate(inputs):
                     if not isinstance(input_, torch.Tensor):

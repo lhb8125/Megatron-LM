@@ -542,6 +542,15 @@ result, `share_storage()` restores the original output alias, and the router
 still observes that value in backward. This check retains extra tensors and
 synchronizes with the host, so it is restricted to short eager diagnostics.
 
+Set `MCORE_CHECKPOINT_RECOMPUTE_INPUT_CHECK` to the same checkpoint name for a
+narrower saved-input lifetime check. The selected checkpoint clones each tensor
+input before its original forward, then verifies immediately before recompute
+that the restored input storage is live, finite, and bitwise equal to that
+forward value. This separates a finite-but-corrupted activation reload from a
+LayerNorm parameter or kernel failure without retaining the output and parameter
+references used by the broader check. It is also host-synchronizing and intended
+only for short eager diagnostics.
+
 Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
 stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
 its consumer stream wait for the parameter all-gather stream after unshard.
