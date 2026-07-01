@@ -278,17 +278,19 @@ class FullyShardedDataParallel(_BaseDataParallel):
         else:
             from torch.distributed.fsdp import fully_shard
 
-        if (
-            fsdp_unit_modules is None
-            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
-        ):
-            fsdp_unit_modules = [TransformerLayer, MambaLayer, TEGroupedMLP, SequentialMLP]
-
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         edp_mesh = _init_dp_mesh(pg_collection, edp=True)
         dp_mesh = _init_dp_mesh(pg_collection, edp=False)
+
+        if (
+            fsdp_unit_modules is None
+            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
+        ):
+            fsdp_unit_modules = [TransformerLayer, MambaLayer]
+            if edp_mesh.size() > 1:
+                fsdp_unit_modules.extend([TEGroupedMLP, SequentialMLP])
 
         fully_shard_mp_policy = MixedPrecisionPolicy(
             main_params_dtype=ddp_config.megatron_fsdp_main_params_dtype,
@@ -336,6 +338,16 @@ class FullyShardedDataParallel(_BaseDataParallel):
             dp_world_size = pg_collection.dp.size()
             gradient_scaling_factor = 1.0 / dp_world_size
             expert_gradient_scaling_factor = 1.0 / dp_world_size
+
+        def transformer_param_mesh(param):
+            return edp_mesh if not getattr(param, "allreduce", True) else dp_mesh
+
+        def transformer_param_gradient_scaling_factor(param):
+            return (
+                expert_gradient_scaling_factor
+                if not getattr(param, "allreduce", True)
+                else gradient_scaling_factor
+            )
 
         # Untied embedding and output weights execute at opposite ends of the
         # iteration. Keeping both in the root FSDP unit concatenates them into
@@ -385,11 +397,20 @@ class FullyShardedDataParallel(_BaseDataParallel):
                         **kwargs,
                     )
                 elif isinstance(m, tuple(fsdp_unit_modules)):
+                    mixed_mesh_kwargs = {}
+                    if isinstance(m, TransformerLayer):
+                        mixed_mesh_kwargs = {
+                            "param_mesh_fn": transformer_param_mesh,
+                            "param_gradient_scaling_factor_fn": (
+                                transformer_param_gradient_scaling_factor
+                            ),
+                        }
                     fully_shard(
                         m,
                         mesh=mesh,
                         gradient_scaling_factor=grad_sf,
                         enable_cuda_graph=False,
+                        **mixed_mesh_kwargs,
                         **kwargs,
                     )
         fully_shard(module, mesh=dp_mesh, gradient_scaling_factor=gradient_scaling_factor, **kwargs)

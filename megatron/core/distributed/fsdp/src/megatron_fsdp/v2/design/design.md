@@ -28,18 +28,21 @@ registered with `with_kwargs=True`. The fused path passes empty args/kwargs
 because these hooks may trigger parameter all-gathers but may not modify
 inputs; any non-`None` hook return remains an error.
 
-### Singleton Weight-Buffer Fast Path
+### Singleton Expert-DP Parameter Groups
 
-Expert modules remain independent FSDP units even when expert data parallelism has world size
-one. This preserves their expert-DP mesh, DTensor placement, and gradient-scaling factor when
-the dense DP mesh is larger. For a singleton mesh, `ParameterGroup` stores model and main weights
-as complete persistent buffers while retaining the logical `Shard(dim=0)` DTensor placement.
-Those buffers bind directly to compute parameters, so weight unshard and reshard become local
-operations and issue no all-gather. Logical reshard marks resident quantized buffers dirty so
-the next forward/backward unshard still rebinds them and executes Transformer Engine's
-`post_unshard()` processing after `post_reshard()` invalidates recipe state. Gradient buffers
-keep the normal ZeRO-3 layout and reduction path, preserving per-microbatch scaling and
-full-iteration CUDA graph stream ordering.
+When expert data parallelism has world size one, the default adapter keeps expert parameters
+inside their parent `TransformerLayer` FSDP unit instead of creating a nested expert
+`FSDPModule`. `fully_shard()` accepts per-parameter mesh and gradient-scaling selectors, and
+`FSDPModule` includes their results in the `ParameterGroup` key. Parameters with
+`allreduce=False` therefore retain the expert-DP mesh and expert scaling while dense parameters
+in the same layer use the dense-DP mesh.
+
+For the singleton expert mesh, model and main weights use complete persistent buffers while
+retaining logical `Shard(dim=0)` DTensor placement. Parent-layer unshard still visits every
+parameter group, so resident MXFP8 payloads are rebound and receive Transformer Engine
+`post_unshard()` processing after logical reshard invalidates recipe state. Gradient buffers
+keep the normal ZeRO-3 layout and reduction path. This matches the v1 unit boundary without
+changing expert placement, per-microbatch scaling, or full-iteration CUDA graph stream ordering.
 
 ---
 

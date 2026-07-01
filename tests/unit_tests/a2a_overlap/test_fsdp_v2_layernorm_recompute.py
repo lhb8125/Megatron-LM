@@ -158,12 +158,23 @@ class TestFSDPV2LayerNormRecompute:
                     child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
                 ]
                 assert expert_units
-                assert all(isinstance(child, FSDPModule) for child in expert_units)
-                expert_dp_groups = {
-                    param_group.dp_group
-                    for child in expert_units
-                    for param_group in child._fsdp_param_groups
-                }
+                assert all(not isinstance(child, FSDPModule) for child in expert_units)
+                transformer_layers = list(recompute_model.decoder.layers)
+                assert all(isinstance(layer, FSDPModule) for layer in transformer_layers)
+                expert_param_groups = [
+                    param_group
+                    for layer in transformer_layers
+                    for param_group in layer._fsdp_param_groups
+                    if any(not getattr(param, "allreduce", True) for param in param_group.params)
+                ]
+                dense_param_groups = [
+                    param_group
+                    for layer in transformer_layers
+                    for param_group in layer._fsdp_param_groups
+                    if all(getattr(param, "allreduce", True) for param in param_group.params)
+                ]
+                assert expert_param_groups and dense_param_groups
+                expert_dp_groups = {param_group.dp_group for param_group in expert_param_groups}
                 assert expert_dp_groups
                 assert all(
                     torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
@@ -171,24 +182,22 @@ class TestFSDPV2LayerNormRecompute:
                 assert all(
                     not param_group.model_weight_buffer.is_distributed
                     and param_group.main_grad_buffer.is_distributed
-                    for child in expert_units
-                    for param_group in child._fsdp_param_groups
-                    if param_group.requires_grad
+                    for param_group in expert_param_groups
                 )
                 assert all(
-                    isinstance(layer, FSDPModule) for layer in recompute_model.decoder.layers
+                    torch.distributed.get_world_size(param_group.dp_group) == 4
+                    for param_group in dense_param_groups
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
-                for child in expert_units:
-                    for param_group in child._fsdp_param_groups:
+                for param_group in expert_param_groups:
+                    param_group.reshard()
+                    assert param_group.model_weight_buffer.data._dirty
+                    if param_group.transpose_weight_buffer is not None:
+                        assert param_group.transpose_weight_buffer.data._dirty
+                        param_group.unshard(bwd_pass=True)
+                        assert not param_group.transpose_weight_buffer.data._dirty
                         param_group.reshard()
-                        assert param_group.model_weight_buffer.data._dirty
-                        if param_group.transpose_weight_buffer is not None:
-                            assert param_group.transpose_weight_buffer.data._dirty
-                            param_group.unshard(bwd_pass=True)
-                            assert not param_group.transpose_weight_buffer.data._dirty
-                            param_group.reshard()
 
                 singleton_all_gathers = []
                 original_all_gather = torch.distributed.all_gather_into_tensor

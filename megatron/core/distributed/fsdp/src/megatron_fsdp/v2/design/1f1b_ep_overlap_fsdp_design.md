@@ -416,17 +416,18 @@ required fallback and handles that unit after embedding backward.
 
 ### 3.9 Singleton expert-DP collectives
 
-Expert modules always remain independent FSDP units on the expert-DP mesh. This matters for
-EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameters into the
-parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
+When the expert-DP process group has world size one, the default adapter omits nested
+`TEGroupedMLP` and `SequentialMLP` FSDP units. Their parameters remain in the parent
+`TransformerLayer`, whose `ParameterGroup` construction uses per-parameter selectors:
+`allreduce=False` parameters use the expert-DP mesh and expert gradient-scaling factor, while
+the remaining parameters use dense DP. This avoids the incorrect placement that would result
+from assigning every parent parameter to one mesh.
 
-When the expert-DP process group has world size one, expert model and main weights use complete
-persistent buffers while their DTensors keep the logical expert-mesh placement. Fine-grained
-unshard and reshard therefore remain local and issue no all-gather. Logical reshard marks the
-resident quantized payload dirty so the next phase still performs local rebind and TE
-`post_unshard()` processing. Expert gradient buffers retain the normal ZeRO-3 full-gradient and
-optimizer-shard layout plus reduce-scatter, so per-microbatch scaling, accumulation, and
-full-CG side-stream ordering are unchanged.
+Singleton expert model and main weights use complete persistent buffers and issue no
+all-gather. Parent-layer fine-grained unshard still visits the mixed parameter groups, preserving
+local MXFP8 rebind and TE `post_unshard()` processing. Expert gradients retain the normal
+ZeRO-3 full-gradient and optimizer-shard layout plus reduce-scatter, so per-microbatch scaling,
+accumulation, and full-CG side-stream ordering are unchanged.
 
 ---
 
