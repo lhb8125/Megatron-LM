@@ -858,6 +858,10 @@ class CheckpointWithoutOutput(object):
         target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER")
         return self.debug_name is not None and target in {"1", "all", self.debug_name}
 
+    def _debug_native_rmsnorm_enabled(self):
+        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_NATIVE_RMSNORM")
+        return self.debug_name is not None and target in {"1", "all", self.debug_name}
+
     def _bind_debug_parameter_storage(self):
         if not self._debug_stable_parameter_enabled() or self.debug_module is None:
             return
@@ -993,7 +997,16 @@ class CheckpointWithoutOutput(object):
                     ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
             self._bind_debug_parameter_storage()
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
-                outputs = self.run_function(*inputs)
+                if self._debug_native_rmsnorm_enabled():
+                    assert self.debug_module is not None and len(inputs) == 1
+                    weight = self.debug_module.weight
+                    if getattr(self.debug_module, "zero_centered_gamma", False):
+                        weight = weight + 1
+                    outputs = torch.nn.functional.rms_norm(
+                        inputs[0], tuple(weight.shape), weight, self.debug_module.eps
+                    )
+                else:
+                    outputs = self.run_function(*inputs)
 
         self.run_function = None
         self.rng_states = None

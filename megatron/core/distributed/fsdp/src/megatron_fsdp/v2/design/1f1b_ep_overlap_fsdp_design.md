@@ -560,6 +560,14 @@ inspected but their backing storage did not remain valid for the asynchronous TE
 forward/backward kernels. This deliberately changes memory use and synchronization
 timing and is not a production fix.
 
+Set `MCORE_CHECKPOINT_RECOMPUTE_NATIVE_RMSNORM` to the checkpoint name to keep
+the original forward on Transformer Engine while recomputing the selected
+RMSNorm with `torch.nn.functional.rms_norm`. The native operation uses the same
+input and parameter object, so gradients still flow to the original parameter;
+it only distinguishes a TE reentrant-recompute failure from corruption in the
+checkpoint output-storage restoration. This is a diagnostic substitution, not
+a supported mixed-implementation training mode.
+
 Set `MCORE_CHECKPOINT_RECOMPUTE_WAIT_STREAM` to the same checkpoint name for a
 stream-ordering ablation. The selected LayerNorm's FSDP pre-forward hook makes
 its consumer stream wait for the parameter all-gather stream after unshard.
