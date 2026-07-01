@@ -227,17 +227,6 @@ No batched reset is needed — if every ``allocate`` is matched by a ``free``
 within the micro-batch, ``in_use`` flags and ``_active_keys`` are already
 correct by the end.
 
-Full-iteration gradient buffers have a separate trace-time requirement.
-``free_for_reuse()`` appends the same logical free event and clears the active
-key, but it keeps the trace tensor storage valid until the complete eager trace
-iteration ends. Physically resizing that storage to zero changes caching-
-allocator reuse while saved LayerNorm/router aliases may still be live. An
-explicit logical-release flag makes a later ``fetch_buffer()`` record the next
-allocation even though the retained tensor still owns storage. After planning,
-the retained buffer is rebound to its optimized slot. Runtime slot collisions
-raise immediately instead of silently aliasing keys whose lifetimes differ
-from the trace.
-
 ```python
 def allocate(key, size, dtype, device):
     slot_idx = _key_to_slot[key]             # raises KeyError if key never traced
@@ -352,11 +341,10 @@ The capture is triggered inside the unified per-module forward pre-hook
 
 3. **Trace buckets are rebound after planning**: In full-iteration CUDA graph
    mode, the first trace micro-batch may leave `main_grad_buffer._unsharded_buffer`
-   pointing at the retained trace bucket. Logical free events are recorded
-   without resizing this storage during the eager trace. Immediately after
-   `plan()`, FSDP rebinds the cached full grad buffer to the optimized key→slot
-   view and zeroes it, so the later full-iteration capture records the planned
-   slot address and the trace bucket can be released.
+   pointing at the trace bucket.  Immediately after `plan()`, FSDP rebinds that
+   cached full grad buffer to the optimized key→slot view and zeroes it, so the
+   later full-iteration capture records the planned slot address and the trace
+   bucket can be released.
 
 4. **Hooks popped recursively**: `_pop_hooks_recursive` removes all FSDP
    hooks on the target module and every submodule. ``cuda_graph_active`` is

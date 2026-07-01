@@ -136,10 +136,10 @@ class TracePoolAllocator(BucketAllocator):
 
     **Phase 1 — Trace** (first micro-batch)
 
-    Records alloc/free calls with monotonic sequence numbers. Ordinary buckets
-    are freed via ``_free_storage`` so the same tensor object can be resurrected
-    on re-allocation. Full-iteration gradient buffers use ``free_for_reuse`` to
-    record a logical free while retaining trace storage until planning.
+    Records alloc/free calls with monotonic sequence numbers.  Buckets are
+    created with ``torch.empty`` and freed via ``_free_storage`` so the same
+    tensor object can be resurrected on re-alloc (keeping outstanding views
+    alive, e.g.  NVFP4 ``_rowwise_data`` references).
 
     **Phase 2 — Plan** (``plan()``)
 
@@ -234,24 +234,6 @@ class TracePoolAllocator(BucketAllocator):
         else:
             self._optimized_free(key)
 
-    def free_for_reuse(
-        self, key: Optional[AllocatorKey] = None, *, param_group_id: Optional[AllocatorKey] = None
-    ) -> None:
-        """End a logical lifetime without releasing trace-phase storage.
-
-        Full-iteration CUDA graph tracing needs free events for slot planning,
-        but resizing a retained tensor's storage to zero can invalidate saved
-        activation aliases before their backward runs. Optimized storage is
-        already persistent, so its runtime behavior matches ``free``.
-        """
-        key = _resolve_key(key, param_group_id)
-        if self._phase == "released":
-            self._auto_resume()
-        if self._phase != "optimized":
-            self._trace_free(key, release_storage=False)
-        else:
-            self._optimized_free(key)
-
     # -- Phase 1: trace -------------------------------------------------- #
 
     def _trace_allocate(
@@ -273,12 +255,12 @@ class TracePoolAllocator(BucketAllocator):
         self._active_keys.add(key)
         return self._buckets[key]
 
-    def _trace_free(self, key: AllocatorKey, *, release_storage: bool = True) -> None:
+    def _trace_free(self, key: AllocatorKey) -> None:
         if key not in self._active_keys:
             return
         self._trace.append(self._TraceEvent(seq=self._seq, op="free", key=key))
         self._seq += 1
-        if release_storage and key in self._buckets:
+        if key in self._buckets:
             _free_storage(self._buckets[key].data)
         self._active_keys.discard(key)
 
@@ -456,13 +438,6 @@ class TracePoolAllocator(BucketAllocator):
         slot_idx = self._key_to_slot[key]
         slot = self._slots[slot_idx]
         assert size <= slot.size, f"requested {size} > slot capacity {slot.size} (key={key!r})"
-        if slot.in_use and key not in self._active_keys:
-            raise RuntimeError(
-                f"TracePoolAllocator slot collision: key={key!r} maps to active "
-                f"slot {slot_idx}; runtime lifetimes differ from the recorded trace"
-            )
-        if key in self._active_keys:
-            return Bucket(data=self._key_to_view[key])
         slot.in_use = True
         self._active_keys.add(key)
         # Return a view of the pre-allocated slot tensor

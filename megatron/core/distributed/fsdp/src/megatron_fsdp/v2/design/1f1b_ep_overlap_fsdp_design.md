@@ -465,17 +465,14 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
   5. Sets `module.post_backward_issued = True`.
 
 For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
-the allocator `free` event but retains the buffer's tensor/view object and its
-physical storage for the rest of the eager trace. Releasing that storage early
-changes caching-allocator reuse while LayerNorm checkpoint/router aliases are
-still live and can corrupt the saved router input before backward. The trace
-spans the complete combined 1F1B iteration, including forward-only,
+the allocator `free` event but retains the buffer's tensor/view object. The
+trace spans the complete combined 1F1B iteration, including forward-only,
 steady-state overlap, and backward-only phases, so buffers are shared only when
-their lifetimes do not overlap in any phase. An explicit logical-release flag
-records later allocations without using zero-sized storage as the signal.
-After the last backward-only phase, each retained view is rebound to its planned
-address before graph capture; graph replay keeps that address while the recorded
-kernel order preserves the traced reuse lifetime.
+their lifetimes do not overlap in any phase. A logically released trace buffer
+is resurrected in place when a later microbatch uses the same key. After the
+last backward-only phase, each retained view is rebound to its planned address
+before graph capture; graph replay keeps that address while the recorded kernel
+order preserves the traced reuse lifetime.
 
 ### 4.5 Gradient sync suppression — `no_sync()`
 

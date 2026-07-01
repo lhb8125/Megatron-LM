@@ -125,8 +125,8 @@ class TestTracePoolFullIterationGradBuffers:
 
         assert first._unsharded_buffer is first_trace_tensor
         assert second._unsharded_buffer is second_trace_tensor
-        assert first_trace_tensor._typed_storage()._size() == 16
-        assert second_trace_tensor._typed_storage()._size() == 16
+        assert first_trace_tensor._typed_storage()._size() == 0
+        assert second_trace_tensor._typed_storage()._size() == 0
 
         allocator.plan()
 
@@ -157,36 +157,6 @@ class TestTracePoolFullIterationGradBuffers:
         assert first.rebind_unsharded_buffer_to_allocator(zero=True)
         assert second.rebind_unsharded_buffer_to_allocator(zero=True)
         assert first._unsharded_buffer.data_ptr() != second._unsharded_buffer.data_ptr()
-
-    def test_logical_free_preserves_trace_tensor_contents(self):
-        allocator = TracePoolAllocator()
-        buffer = self._make_buffer(allocator, (0, "main_grad"), 16)
-        buffer._unsharded_buffer.fill_(7)
-
-        buffer.release_unsharded_buffer_for_reuse()
-
-        assert buffer._unsharded_buffer._typed_storage()._size() == 16
-        assert torch.equal(buffer._unsharded_buffer, torch.full((16,), 7.0))
-        assert buffer.fetch_buffer() is buffer._unsharded_buffer
-
-    def test_optimized_slot_collision_fails_fast(self):
-        allocator = TracePoolAllocator()
-        first = self._make_buffer(allocator, (0, "main_grad"), 16)
-        first.release_unsharded_buffer_for_reuse()
-        second = self._make_buffer(allocator, (1, "main_grad"), 16)
-        second.release_unsharded_buffer_for_reuse()
-        allocator.plan()
-
-        allocator.allocate(
-            key=(0, "main_grad"), size=16, dtype=torch.float32, device=torch.device("cpu")
-        )
-        with pytest.raises(RuntimeError, match="slot collision"):
-            allocator.allocate(
-                key=(1, "main_grad"),
-                size=16,
-                dtype=torch.float32,
-                device=torch.device("cpu"),
-            )
 
 
 if __name__ == "__main__":

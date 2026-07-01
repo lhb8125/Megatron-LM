@@ -410,7 +410,6 @@ class DataParallelBuffer:
 
         self.data: Optional[torch.Tensor] = None
         self._unsharded_buffer: Optional[torch.Tensor] = None
-        self._unsharded_buffer_released_for_reuse = False
 
     # ------------------------------------------------------------------ #
     #  Public API
@@ -632,7 +631,6 @@ class DataParallelBuffer:
             return
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
-        self._unsharded_buffer_released_for_reuse = False
 
     @torch.no_grad()
     def release_unsharded_buffer_for_reuse(self) -> None:
@@ -644,9 +642,7 @@ class DataParallelBuffer:
         """
         if not self.is_distributed or self._unsharded_buffer is None:
             return
-        free_for_reuse = getattr(self.allocator, "free_for_reuse", self.allocator.free)
-        free_for_reuse(self.alloc_key)
-        self._unsharded_buffer_released_for_reuse = True
+        self.allocator.free(self.alloc_key)
 
     @torch.no_grad()
     def rebind_unsharded_buffer_to_allocator(self, *, zero: bool = False) -> bool:
@@ -682,7 +678,6 @@ class DataParallelBuffer:
         if dirty is not None:
             setattr(new_buffer, "_dirty", dirty)
         self._unsharded_buffer = new_buffer
-        self._unsharded_buffer_released_for_reuse = True
         return new_buffer.data_ptr() != old_buffer.data_ptr()
 
     def fetch_buffer(self, *, as_shard: bool = False) -> torch.Tensor:
@@ -698,10 +693,12 @@ class DataParallelBuffer:
         caching-allocator behaviour.
         """
         if self.is_distributed:
-            logically_released = getattr(
-                self, "_unsharded_buffer_released_for_reuse", False
+            trace_storage_was_released = (
+                self._unsharded_buffer is not None
+                and getattr(self.allocator, "phase", None) == "trace"
+                and self._unsharded_buffer._typed_storage()._size() == 0
             )
-            if self._unsharded_buffer is None or logically_released:
+            if self._unsharded_buffer is None or trace_storage_was_released:
                 bucket = self.allocator.allocate(
                     key=self.alloc_key,
                     size=self.buffer_index.bucket_meta.size,
@@ -709,7 +706,6 @@ class DataParallelBuffer:
                     device=self.device,
                 )
                 self._unsharded_buffer = bucket.data
-                self._unsharded_buffer_released_for_reuse = False
             full = self._unsharded_buffer
         else:
             assert self.data is not None, "DataParallelBuffer data not initialized"
