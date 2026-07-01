@@ -30,7 +30,7 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 from ..uneven_dtensor import make_uneven_dtensor, update_uneven_dtensor_chunk_metadata
 from .allocator import BucketAllocator, TemporaryBucketAllocator, _free_storage
 from .dp_buffer import DataParallelBuffer
-from .mixed_precision import FP8WeightUpdate, MixedPrecisionPolicy
+from .mixed_precision import MixedPrecisionPolicy
 from .utils import ParamGroupIdx
 
 
@@ -261,9 +261,7 @@ class ParameterGroup:
         self.mp_policy.post_reshard(self.params)
 
     @torch.no_grad()
-    def copy_main_weights_to_model_weights(
-        self, fp8_weight_updates: Optional[List[FP8WeightUpdate]] = None
-    ):
+    def copy_main_weights_to_model_weights(self):
         """Install optimized main weights into model compute weights."""
         self._ensure_buffers_on_gpu()
         self.mp_policy.copy_main_weights_to_model_weights(
@@ -273,7 +271,6 @@ class ParameterGroup:
             self.model_weight_buffer,
             self.main_weight_buffer,
             self.transpose_weight_buffer,
-            fp8_weight_updates,
         )
 
     def reduce_grad(self):

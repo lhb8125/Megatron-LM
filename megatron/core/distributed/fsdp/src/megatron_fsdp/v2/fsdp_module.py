@@ -27,13 +27,11 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .allocator import BucketAllocator, TracePoolAllocator
-from .mixed_precision import FP8WeightUpdate, MixedPrecisionPolicy, apply_fp8_weight_updates
+from .mixed_precision import MixedPrecisionPolicy
 from .param_group import ParameterGroup
 from .utils import ParamGroupIdx, _replace_module_parameter
 
 logger = logging.getLogger(__name__)
-
-_FP8_WEIGHT_UPDATE_BATCH_SIZE = 8
 
 
 def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None:
@@ -960,32 +958,11 @@ class FSDPModule:
 
     def _copy_main_weights_to_model_weights(self):
         """Copy main weight buffer to model weight buffer."""
-        fp8_weight_update_batches: List[Tuple[Any, List[FP8WeightUpdate]]] = []
         for child in self.modules():
             if not isinstance(child, FSDPModule):
                 continue
             for param_group in child._fsdp_param_groups:
-                updates: List[FP8WeightUpdate] = []
-                param_group.copy_main_weights_to_model_weights(updates)
-                for update in updates:
-                    batch = next(
-                        (
-                            candidate
-                            for group, candidate in fp8_weight_update_batches
-                            if group is update.data_parallel_group
-                        ),
-                        None,
-                    )
-                    if batch is None:
-                        batch = []
-                        fp8_weight_update_batches.append((update.data_parallel_group, batch))
-                    batch.append(update)
-                    if len(batch) == _FP8_WEIGHT_UPDATE_BATCH_SIZE:
-                        apply_fp8_weight_updates(batch)
-                        batch.clear()
-
-        for _, batch in fp8_weight_update_batches:
-            apply_fp8_weight_updates(batch)
+                param_group.copy_main_weights_to_model_weights()
 
     def _compute_per_param_norms(self) -> Dict[str, Dict[str, float]]:
         """
