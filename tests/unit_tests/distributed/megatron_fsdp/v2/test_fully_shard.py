@@ -289,6 +289,34 @@ class TestFullyShardBasic:
         assert not torch.isnan(torch.tensor(loss)), "Loss is NaN"
         assert not torch.isinf(torch.tensor(loss)), "Loss is Inf"
 
+    def test_no_sync_defers_gradient_reduction(self, monkeypatch):
+        """Inner micro-batches accumulate locally and reduce only after no_sync."""
+        torch.manual_seed(42)
+        model = SimpleMLP(64).to(_device())
+        fully_shard(model, enable_async_reduce_grad=False)
+
+        reduce_calls = []
+        for param_group in model._fsdp_param_groups:
+            original_reduce_grad = param_group.reduce_grad
+
+            def reduce_grad(original_reduce_grad=original_reduce_grad):
+                reduce_calls.append(1)
+                return original_reduce_grad()
+
+            monkeypatch.setattr(param_group, "reduce_grad", reduce_grad)
+
+        x = torch.randn(2, 64, device=_device())
+        with model.no_sync():
+            _forward_backward(model, x)
+
+        assert reduce_calls == []
+        assert model._fsdp_root_context.sync_gradients
+
+        _forward_backward(model, x)
+        assert len(reduce_calls) == sum(
+            param_group.requires_grad for param_group in model._fsdp_param_groups
+        )
+
     def test_singleton_mesh_skips_weight_and_gradient_collectives(self, monkeypatch):
         """A size-one DP group keeps full buffers local for every strategy."""
         torch.manual_seed(42)
