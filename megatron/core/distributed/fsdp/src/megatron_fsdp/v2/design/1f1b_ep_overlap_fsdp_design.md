@@ -414,21 +414,6 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
-### 3.9 Singleton expert-DP collectives
-
-When the expert-DP process group has world size one, the default adapter omits nested
-`TEGroupedMLP` and `SequentialMLP` FSDP units. Their parameters remain in the parent
-`TransformerLayer`, whose `ParameterGroup` construction uses per-parameter selectors:
-`allreduce=False` parameters use the expert-DP mesh and expert gradient-scaling factor, while
-the remaining parameters use dense DP. This avoids the incorrect placement that would result
-from assigning every parent parameter to one mesh.
-
-Expert model, main-weight, and gradient buffers retain their normal ZeRO-3 collective paths.
-The mixed parent unit launches expert all-gather as part of parent-layer prefetch, allowing it
-to overlap earlier attention work instead of waiting for a nested expert pre-hook immediately
-before MLP compute. Parameter placement, per-microbatch scaling, accumulation, buffer lifetimes,
-and full-CG side-stream ordering are unchanged.
-
 ---
 
 ## 4. Hook behavior — v2 implementation

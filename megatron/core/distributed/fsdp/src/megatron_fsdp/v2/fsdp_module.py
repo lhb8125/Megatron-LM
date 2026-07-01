@@ -18,7 +18,7 @@ import logging
 import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -420,10 +420,6 @@ class FSDPModule:
         ignored_params: Optional[set],
         mp_policy: MixedPrecisionPolicy,
         gradient_scaling_factor: Optional[float] = None,
-        param_mesh_fn: Optional[Callable[[nn.Parameter], DeviceMesh]] = None,
-        param_gradient_scaling_factor_fn: Optional[
-            Callable[[nn.Parameter], Optional[float]]
-        ] = None,
         sharding_strategy: str = "optim_grads_params",
     ):
         """
@@ -455,8 +451,6 @@ class FSDPModule:
             mesh=mesh,
             ignored_params=ignored_params,
             gradient_scaling_factor=gradient_scaling_factor,
-            param_mesh_fn=param_mesh_fn,
-            param_gradient_scaling_factor_fn=param_gradient_scaling_factor_fn,
             sharding_strategy=sharding_strategy,
         )
         setattr(self, "_fsdp_param_groups", fsdp_param_groups)
@@ -1164,8 +1158,6 @@ def _get_module_fsdp_param_groups(
     mesh: Optional[DeviceMesh] = None,
     ignored_params: Optional[set[nn.Parameter]] = None,
     gradient_scaling_factor: Optional[float] = None,
-    param_mesh_fn: Optional[Callable[[nn.Parameter], DeviceMesh]] = None,
-    param_gradient_scaling_factor_fn: Optional[Callable[[nn.Parameter], Optional[float]]] = None,
     sharding_strategy: str = "optim_grads_params",
 ) -> List[ParameterGroup]:
     """
@@ -1183,33 +1175,21 @@ def _get_module_fsdp_param_groups(
         # The policy owns dtype-sensitive grouping, including FP8/MXFP8 tensors
         # whose logical dtype may differ from their communication payload.
         param_dtype = mp_policy.group_key_dtype(param)
-        param_mesh = param_mesh_fn(param) if param_mesh_fn is not None else mesh
-        param_gradient_scaling_factor = (
-            param_gradient_scaling_factor_fn(param)
-            if param_gradient_scaling_factor_fn is not None
-            else gradient_scaling_factor
-        )
-        param_attrs = (
-            param.device,
-            param_dtype,
-            param.requires_grad,
-            id(param_mesh),
-            param_gradient_scaling_factor,
-        )
+        param_attrs = (param.device, param_dtype, param.requires_grad)
         if param_attrs not in param_groups:
-            param_groups[param_attrs] = ([], param_mesh, param_gradient_scaling_factor)
-        param_groups[param_attrs][0].append(param)
+            param_groups[param_attrs] = []
+        param_groups[param_attrs].append(param)
 
     # Create ParameterGroup for each group
     fsdp_param_groups = []
-    for i, (params, param_mesh, param_gradient_scaling_factor) in enumerate(param_groups.values()):
+    for i, params in enumerate(param_groups.values()):
         fsdp_param_groups.append(
             ParameterGroup(
                 params,
-                mesh=param_mesh,
+                mesh=mesh,
                 param_group_id=ParamGroupIdx(id(module), i),
                 mp_policy=mp_policy,
-                gradient_scaling_factor=param_gradient_scaling_factor,
+                gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
             )
         )
