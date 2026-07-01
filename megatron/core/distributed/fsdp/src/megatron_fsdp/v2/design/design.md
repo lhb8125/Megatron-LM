@@ -245,6 +245,13 @@ Prefetched modules' data also becomes valid when their own pre-hook later calls 
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
 
+For a mixed-mesh parent whose next forward-order module is its nested singleton-DP child,
+the caller stream waits for the child's recorded prefetch event before starting parent
+compute. The all-gather, buffer allocation, parameter binding, and reshard lifecycle remain
+unchanged; only their overlap window moves. This keeps a size-one expert gather from competing
+with the parent layer's attention and HybridEP kernels while retaining normal asynchronous
+prefetch for non-singleton children and for the backward pass.
+
 ### `_get_prefetch_next_modules(bwd_pass)`
 
 ```python

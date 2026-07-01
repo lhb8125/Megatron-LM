@@ -14,7 +14,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDP
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-from megatron.core.transformer import TransformerLayer
+from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     build_gpt_model,
@@ -64,6 +64,49 @@ def test_async_coalesced_unshard_waits_for_work(monkeypatch):
     assert order == ["unshard:a", "unshard:b", "launch", "wait"]
 
 
+def test_forward_waits_for_singleton_child_prefetch():
+    class FakeParamGroup:
+        def __init__(self, world_size):
+            self._dp_world_size = world_size
+
+    class FakeModule:
+        def __init__(self, world_sizes, children=()):
+            self._fsdp_param_groups = [FakeParamGroup(size) for size in world_sizes]
+            self._children = list(children)
+
+        def modules(self):
+            yield self
+            yield from self._children
+
+    class FakeEvent:
+        def __init__(self):
+            self.wait_count = 0
+
+        def wait(self):
+            self.wait_count += 1
+
+    singleton_child = FakeModule([1])
+    dense_child = FakeModule([4])
+    parent = FakeModule([4], children=[singleton_child, dense_child])
+
+    event = FakeEvent()
+    assert fsdp_module_impl._wait_for_singleton_child_prefetch(
+        parent, singleton_child, event, bwd_pass=False
+    )
+    assert event.wait_count == 1
+
+    assert not fsdp_module_impl._wait_for_singleton_child_prefetch(
+        parent, singleton_child, event, bwd_pass=True
+    )
+    assert not fsdp_module_impl._wait_for_singleton_child_prefetch(
+        parent, dense_child, event, bwd_pass=False
+    )
+    assert not fsdp_module_impl._wait_for_singleton_child_prefetch(
+        FakeModule([1], children=[singleton_child]), singleton_child, event, bwd_pass=False
+    )
+    assert event.wait_count == 1
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 
@@ -82,7 +125,9 @@ class TestFSDPV2LayerNormRecompute:
     def test_mxfp8_layernorm_recompute(self, monkeypatch):
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
+        original_singleton_wait = fsdp_module_impl._wait_for_singleton_child_prefetch
         recompute_stream_pairs = []
+        singleton_prefetch_waits = []
 
         def checkpoint_with_stream(checkpoint, *args, **kwargs):
             checkpoint._test_forward_stream = torch.cuda.current_stream()
@@ -97,6 +142,16 @@ class TestFSDPV2LayerNormRecompute:
 
         monkeypatch.setattr(CheckpointWithoutOutput, "checkpoint", checkpoint_with_stream)
         monkeypatch.setattr(CheckpointWithoutOutput, "_recompute", recompute_with_stream_check)
+
+        def track_singleton_wait(*args, **kwargs):
+            waited = original_singleton_wait(*args, **kwargs)
+            if waited:
+                singleton_prefetch_waits.append(True)
+            return waited
+
+        monkeypatch.setattr(
+            fsdp_module_impl, "_wait_for_singleton_child_prefetch", track_singleton_wait
+        )
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -150,13 +205,20 @@ class TestFSDPV2LayerNormRecompute:
                     layer.recompute_pre_mlp_layernorm for layer in recompute_model.decoder.layers
                 )
                 recompute_fsdp = FullyShardedDataParallel(
-                    config=recompute_config,
-                    ddp_config=make_ddp_config(),
-                    module=recompute_model,
-                    fsdp_unit_modules=[TransformerLayer],
+                    config=recompute_config, ddp_config=make_ddp_config(), module=recompute_model
                 )
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
+                expert_units = [
+                    child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
+                ]
+                assert expert_units
+                assert all(isinstance(child, FSDPModule) for child in expert_units)
+                assert all(
+                    param_group._dp_world_size == 1
+                    for child in expert_units
+                    for param_group in child._fsdp_param_groups
+                )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
                 rank = torch.distributed.get_rank()
@@ -180,6 +242,7 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
+                assert singleton_prefetch_waits
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

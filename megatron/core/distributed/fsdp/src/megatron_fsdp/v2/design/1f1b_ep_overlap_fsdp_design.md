@@ -414,6 +414,16 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
+### 3.9 Singleton expert prefetch pacing
+
+Expert modules remain independent FSDP units on the expert-DP mesh. In EP-heavy topologies the
+parent `TransformerLayer` uses a non-singleton dense-DP group while its nested `TEGroupedMLP`
+uses a singleton expert-DP group. The parent forward pre-hook still launches the child's normal
+all-gather on `ag_stream`, but the caller stream waits for that child's recorded prefetch event
+before parent compute starts. This preserves the exact buffer and collective lifecycle while
+preventing singleton expert gathers from overlapping the same attention/HybridEP window they
+can slow through copy-engine and fabric contention. Backward prefetch remains asynchronous.
+
 ---
 
 ## 4. Hook behavior — v2 implementation

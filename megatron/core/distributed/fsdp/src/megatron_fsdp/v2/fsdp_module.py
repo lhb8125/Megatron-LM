@@ -48,6 +48,31 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
         coalescing_event.wait()
 
 
+def _wait_for_singleton_child_prefetch(
+    current_module, prefetched_module, event, *, bwd_pass: bool
+) -> bool:
+    """Keep singleton child gathers off the parent forward-compute window."""
+    if bwd_pass:
+        return False
+
+    is_child = any(
+        child is prefetched_module
+        for child in current_module.modules()
+        if child is not current_module
+    )
+    current_groups = current_module._fsdp_param_groups
+    prefetched_groups = prefetched_module._fsdp_param_groups
+    if (
+        is_child
+        and any(param_group._dp_world_size > 1 for param_group in current_groups)
+        and prefetched_groups
+        and all(param_group._dp_world_size == 1 for param_group in prefetched_groups)
+    ):
+        event.wait()
+        return True
+    return False
+
+
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -725,6 +750,8 @@ class FSDPModule:
             if async_op:
                 event = stream.record_event()
                 ctx.unshard_done_events[id(module)] = event
+                if module is not self:
+                    _wait_for_singleton_child_prefetch(self, module, event, bwd_pass=bwd_pass)
 
         # Ensure unshard is complete before forward.
         # The event is NOT cleared here — it persists as a "currently unsharded"
