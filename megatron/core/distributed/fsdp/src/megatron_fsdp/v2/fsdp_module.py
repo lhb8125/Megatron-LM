@@ -16,7 +16,7 @@
 
 import logging
 import weakref
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -138,9 +138,6 @@ class _FSDPRootContext:
 
     enable_async_reduce_grad: bool = True
     """Whether to overlap gradient reduction with backward computation."""
-
-    sync_gradients: bool = True
-    """Whether backward should reduce gradients for the current micro-batch."""
 
     # ------------------------------------------------------------------
     # Activation recompute / gradient checkpointing support
@@ -289,21 +286,6 @@ class FSDPModule:
         self._release_cuda_graphs(ctx)
         self._clear_cuda_graph_sentinels(ctx)
         allocator.release()
-
-    @contextmanager
-    def no_sync(self):
-        """Accumulate gradients locally without reducing them in this context.
-
-        The final micro-batch must run outside this context so its backward pass
-        reduces the accumulated gradients once.
-        """
-        ctx = self._fsdp_root_context
-        previous = ctx.sync_gradients
-        ctx.sync_gradients = False
-        try:
-            yield
-        finally:
-            ctx.sync_gradients = previous
 
     # ----------------------------------------------------------------
     # Internal: CUDA graph teardown / sentinel helpers
@@ -809,21 +791,8 @@ class FSDPModule:
         2. Perform gradient reduction
         3. Install reduced gradients to distributed parameters
         """
-        ctx = self._fsdp_root_context
-        if not ctx.sync_gradients:
-            # TE gradient-accumulation fusion writes directly into main_grad.
-            # After the first local micro-batch, later fused wgrads must add to
-            # that buffer instead of overwriting it.
-            for _, param_group in self._named_param_groups:
-                if any(
-                    getattr(param, "grad_added_to_main_grad", False)
-                    or getattr(param, "_mfsdp_recorded_te_wgrad", False)
-                    for param in param_group.params
-                ):
-                    param_group._grad_buffer_is_fresh = False
-            return
-
         torch.cuda.nvtx.range_push("MFSDP reduce_grad")
+        ctx = self._fsdp_root_context
         stream = ctx.rs_stream if async_op else torch.cuda.current_stream()
 
         # Handle pending reduce events before this module to release buffers promptly.

@@ -491,12 +491,10 @@ order preserves the traced reuse lifetime.
 
 ### 4.5 Gradient sync suppression — `no_sync()`
 
-- **v2 status**: `FSDPModule.no_sync()` temporarily clears the shared root
-  context's `sync_gradients` flag. Post-backward still reshards parameters,
-  but `reduce_grad()` returns before copying or communicating gradients.
-- **Effect**: Inner micro-batches accumulate into the compute parameter grads.
-  The final micro-batch runs after the context exits and reduce-scatters the
-  accumulated gradients once, matching the v1 communication schedule.
+- **v2 status**: Returns `nullcontext` (no-op).
+  This means gradient reduce-scatter fires on every micro-batch, including
+  inner ones.  The standard 1F1B pattern (suppress sync for inner
+  micro-batches, sync on the last) is not yet implemented for v2.
 
 ---
 
@@ -613,10 +611,6 @@ When `overlap_moe_expert_parallel_comm=True`, the following constraints apply:
 - **When**: wraps the inner micro-batches (all except first forward-only
   and last backward-only).
 - **Effect**: prevents gradient reduce-scatter for non-final micro-batches.
-
-V2 provides the same externally visible behavior through
-`FSDPModule.no_sync()`, using a shared root-context flag rather than v1's
-per-buffer `is_last_microbatch` state.
 
 #### 7.1.6 `_replace_param_with_raw_if_needed()`
 
