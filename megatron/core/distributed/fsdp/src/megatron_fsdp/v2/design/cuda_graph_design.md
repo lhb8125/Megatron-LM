@@ -373,9 +373,11 @@ requirements:
 - `_pre_backward_setup()` pre-allocates dist grads and fetches the full
   `main_grad_buffer` before capture so TE and FSDP write to fixed addresses.
 - `ParameterGroup.release_grad_buffer()` records logical allocator free events
-  while retaining the full `main_grad_buffer` tensor/view object. This lets
-  non-overlapping buffers share planned storage without changing capture-visible
-  tensor identities.
+  while retaining the full `main_grad_buffer` tensor/view object and its
+  trace-phase storage. Physically resizing that storage during the eager trace
+  can let the caching allocator reuse it while saved router/checkpoint aliases
+  are still live. After the complete trace, each buffer is rebound to planned
+  storage, so non-overlapping buffers still share stable capture addresses.
 - Hook-managed schedules call `TracePoolAllocator.plan()` after their first
   complete backward. The externally managed combined 1F1B schedule defers the
   plan until its full forward-only, steady, and backward-only trace is complete.
