@@ -34,7 +34,6 @@ from .utils import ParamGroupIdx, _replace_module_parameter
 logger = logging.getLogger(__name__)
 
 _UNSHARDED_WITHOUT_EVENT = object()
-_DEBUG_FP8_GROUPS_LOGGED = False
 
 
 def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None:
@@ -1232,13 +1231,11 @@ def _get_module_fsdp_param_groups(
     sharding_strategy: str = "optim_grads_params",
 ) -> List[ParameterGroup]:
     """
-    Group module parameters by (device, dtype, requires_grad) and create ParameterGroups.
+    Group module parameters by buffer-compatible attributes and create ParameterGroups.
 
     Parameters are grouped because they share the same buffer management
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
-    global _DEBUG_FP8_GROUPS_LOGGED
-
     param_groups = {}
     param_to_name = {param: name for name, param in module.named_parameters()}
 
@@ -1249,27 +1246,21 @@ def _get_module_fsdp_param_groups(
         # The policy owns dtype-sensitive grouping, including FP8/MXFP8 tensors
         # whose logical dtype may differ from their communication payload.
         param_dtype = mp_policy.group_key_dtype(param)
-        param_attrs = (param.device, param_dtype, param.requires_grad)
+        param_name = param_to_name[param]
+        defer_fp8_norm_sync = _is_fp8_norm_param(
+            module, param_name, param, mp_policy, sharding_strategy
+        )
+        param_attrs = (param.device, param_dtype, param.requires_grad, defer_fp8_norm_sync)
         if param_attrs not in param_groups:
             param_groups[param_attrs] = []
         param_groups[param_attrs].append(param)
 
     # Create ParameterGroup for each group
     fsdp_param_groups = []
-    debug_groups = []
     for i, params in enumerate(param_groups.values()):
         param_names = [param_to_name[param] for param in params]
         defer_full_param_and_grad_sync = _should_defer_fp8_norm_sync(
             module, param_names, params, mp_policy, sharding_strategy
-        )
-        debug_groups.append(
-            {
-                "group": i,
-                "names": param_names,
-                "shapes": [tuple(param.shape) for param in params],
-                "dtypes": [str(param.dtype) for param in params],
-                "defer": defer_full_param_and_grad_sync,
-            }
         )
         fsdp_param_groups.append(
             ParameterGroup(
@@ -1283,21 +1274,32 @@ def _get_module_fsdp_param_groups(
             )
         )
 
-    if (
-        not _DEBUG_FP8_GROUPS_LOGGED
-        and torch.distributed.get_rank() == 0
-        and hasattr(module, "layer_number")
-    ):
-        print(
-            "FSDP_FP8_GROUPS "
-            f"module={type(module).__name__} fp8_enabled={mp_policy.fp8.enabled} "
-            f"hidden_size={getattr(getattr(module, 'config', None), 'hidden_size', None)} "
-            f"groups={debug_groups}",
-            flush=True,
-        )
-        _DEBUG_FP8_GROUPS_LOGGED = True
-
     return fsdp_param_groups
+
+
+def _is_fp8_norm_param(
+    module: nn.Module,
+    param_name: str,
+    param: nn.Parameter,
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Return whether one parameter is eligible for delayed FP8 norm synchronization."""
+    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+        return False
+
+    hidden_size = getattr(getattr(module, "config", None), "hidden_size", None)
+    if not isinstance(hidden_size, int) or hidden_size <= 0:
+        return False
+
+    normalized_name = param_name.lower().replace("_", "")
+    return (
+        ("layernorm" in normalized_name or "rmsnorm" in normalized_name)
+        and not mp_policy.is_fp8_param(param)
+        and not mp_policy.is_nvfp4_param(param)
+        and param.ndim <= 1
+        and param.numel() <= hidden_size
+    )
 
 
 def _should_defer_fp8_norm_sync(
@@ -1308,19 +1310,8 @@ def _should_defer_fp8_norm_sync(
     sharding_strategy: str,
 ) -> bool:
     """Select small non-quantized normalization groups in an FP8 ZeRO-3 module."""
-    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
-        return False
-
-    hidden_size = getattr(getattr(module, "config", None), "hidden_size", None)
-    if not isinstance(hidden_size, int) or hidden_size <= 0 or not params:
-        return False
-
-    normalized_names = [name.lower().replace("_", "") for name in param_names]
-    return all(
-        ("layernorm" in name or "rmsnorm" in name)
-        and not mp_policy.is_fp8_param(param)
-        and not mp_policy.is_nvfp4_param(param)
-        and param.ndim <= 1
-        and param.numel() <= hidden_size
-        for name, param in zip(normalized_names, params)
+    assert len(param_names) == len(params)
+    return bool(params) and all(
+        _is_fp8_norm_param(module, name, param, mp_policy, sharding_strategy)
+        for name, param in zip(param_names, params)
     )

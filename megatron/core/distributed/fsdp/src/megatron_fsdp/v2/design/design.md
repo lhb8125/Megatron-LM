@@ -518,8 +518,11 @@ The group's declared strategy remains `optim_grads_params`: model weights,
 main weights, persistent gradients, and optimizer state are all still sharded.
 Only the small temporary full weight/gradient buffers span the micro-batches.
 The selector requires an enabled FP8 policy and exact normalization-only
-groups, so BF16 training, quantized matrix weights, and mixed groups retain the
-standard per-micro-batch ZeRO-3 lifecycle.
+groups. The parameter-group key includes this eligibility bit so normalization
+parameters are separated from same-dtype parameters such as the MoE router
+matrix before group construction. BF16 training, quantized matrix weights, and
+the non-normalization subgroup retain the standard per-micro-batch ZeRO-3
+lifecycle.
 
 ---
 

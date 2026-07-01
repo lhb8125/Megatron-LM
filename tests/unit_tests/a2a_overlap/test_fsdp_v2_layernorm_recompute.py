@@ -13,6 +13,7 @@ from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataPa
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as fsdp_module_impl
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import (
     FSDPModule,
+    _is_fp8_norm_param,
     _should_defer_fp8_norm_sync,
 )
 from megatron.core.enums import Fp8Recipe
@@ -144,6 +145,14 @@ def test_fp8_norm_sync_selector_is_narrow():
     module = torch.nn.Module()
     module.config = SimpleNamespace(hidden_size=16)
     params = [torch.nn.Parameter(torch.ones(16)), torch.nn.Parameter(torch.ones(16))]
+    router = torch.nn.Parameter(torch.ones(4, 16))
+
+    assert _is_fp8_norm_param(
+        module, "input_layernorm.weight", params[0], FakePolicy(), "optim_grads_params"
+    )
+    assert not _is_fp8_norm_param(
+        module, "mlp.router.weight", router, FakePolicy(), "optim_grads_params"
+    )
 
     assert _should_defer_fp8_norm_sync(
         module,
