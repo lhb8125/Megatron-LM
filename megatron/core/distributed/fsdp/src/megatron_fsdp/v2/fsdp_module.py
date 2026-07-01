@@ -27,7 +27,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .allocator import BucketAllocator, TracePoolAllocator
-from .mixed_precision import MixedPrecisionPolicy
+from .mixed_precision import MixedPrecisionPolicy, quantize_main_weights_to_fp8
 from .param_group import ParameterGroup
 from .utils import ParamGroupIdx, _replace_module_parameter
 
@@ -72,6 +72,38 @@ def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
     """Return whether this param group's gradient reduction is process-local."""
     grad_buffer = param_group.main_grad_buffer
     return grad_buffer is not None and getattr(grad_buffer, "_dp_world_size", 2) == 1
+
+
+def _copy_main_weight_param_groups(param_groups) -> None:
+    """Refresh FP8 parameter groups in one TE call per data-parallel group."""
+    fp8_batches = {}
+    deferred_groups = []
+    for param_group in param_groups:
+        if not param_group.can_batch_fp8_main_weight_update():
+            param_group.copy_main_weights_to_model_weights()
+            continue
+
+        update = param_group.prepare_fp8_main_weight_update()
+        key = id(param_group.dp_group)
+        if key not in fp8_batches:
+            fp8_batches[key] = [param_group.dp_group, [], [], [], []]
+        batch = fp8_batches[key]
+        for target, source in zip(batch[1:], update):
+            target.extend(source)
+        deferred_groups.append(param_group)
+
+    for (
+        dp_group,
+        fp8_params,
+        main_params,
+        start_offsets,
+        model_param_shards,
+    ) in fp8_batches.values():
+        quantize_main_weights_to_fp8(
+            fp8_params, main_params, start_offsets, dp_group, model_param_shards
+        )
+    for param_group in deferred_groups:
+        param_group.mark_model_weight_buffers_dirty()
 
 
 class _FSDPState:
@@ -994,11 +1026,13 @@ class FSDPModule:
 
     def _copy_main_weights_to_model_weights(self):
         """Copy main weight buffer to model weight buffer."""
-        for child in self.modules():
-            if not isinstance(child, FSDPModule):
-                continue
-            for param_group in child._fsdp_param_groups:
-                param_group.copy_main_weights_to_model_weights()
+        param_groups = [
+            param_group
+            for child in self.modules()
+            if isinstance(child, FSDPModule)
+            for param_group in child._fsdp_param_groups
+        ]
+        _copy_main_weight_param_groups(param_groups)
 
     def _compute_per_param_norms(self) -> Dict[str, Dict[str, float]]:
         """

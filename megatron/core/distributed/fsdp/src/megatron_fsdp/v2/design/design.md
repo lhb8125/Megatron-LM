@@ -256,6 +256,16 @@ stream, releases its temporary full buffer immediately, and does not append an
 RS event to `reduce_grad_buckets`. Real multi-rank reductions retain the normal
 RS-stream overlap and delayed release behavior.
 
+### Batched FP8 Weight Refresh
+
+After the optimizer step, `_copy_main_weights_to_model_weights()` collects FP8
+parameter groups by process-group identity and submits one Transformer Engine
+weight-refresh call per process group. The TE helper receives direct views into
+each group's model/main/transpose buffers, so ownership and dirty-buffer state
+remain per `ParameterGroup` while amax reduction and multi-tensor scale/cast
+kernels are shared across the batch. Non-FP8 and NVFP4 groups retain their
+existing per-group update path.
+
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.

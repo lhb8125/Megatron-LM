@@ -578,48 +578,63 @@ class MixedPrecisionPolicy:
                     ]
                 )
         else:
-            fp8_params = []
-            main_params = []
-            start_offsets = []
-            model_param_shards = []
-            no_shard = model_weight_buffer.sharding_strategy == "no_shard"
-            for param in params:
-                item_id = param_idx[param]
-                model_shard = model_weight_buffer.get_item(item_id, as_shard=not no_shard)
-                if model_shard.numel() == 0:
-                    fp8_params.append(param)
-                    main_params.append(None)
-                    start_offsets.append(None)
-                    model_param_shards.append((None, None))
-                    continue
-
-                transpose_shard = None
-                if transpose_weight_buffer is not None:
-                    transpose_shard = transpose_weight_buffer.get_item(
-                        item_id, as_shard=not no_shard
-                    )
-                main_weight = main_weight_buffer.get_item(item_id, as_shard=not no_shard)
-                if no_shard:
-                    start_offset = 0
-                else:
-                    start_offset, _ = model_weight_buffer.buffer_index._get_item_self_range(item_id)
-                fp8_params.append(param)
-                main_params.append(main_weight)
-                start_offsets.append(start_offset)
-                model_param_shards.append((model_shard, transpose_shard))
-
+            update = self.prepare_fp8_main_weight_update(
+                params, param_idx, model_weight_buffer, main_weight_buffer, transpose_weight_buffer
+            )
+            fp8_params, main_params, start_offsets, model_param_shards = update
             quantize_main_weights_to_fp8(
                 fp8_params, main_params, start_offsets, data_parallel_group, model_param_shards
             )
 
-        # ZeRO-1/2 refresh only this rank's slice; gather before next compute.
-        def mark_dirty(buffer):
+        self.mark_model_weight_buffers_dirty(model_weight_buffer, transpose_weight_buffer)
+
+    def prepare_fp8_main_weight_update(
+        self,
+        params: List[torch.Tensor],
+        param_idx: dict,
+        model_weight_buffer,
+        main_weight_buffer,
+        transpose_weight_buffer=None,
+    ) -> Tuple[list, list, list, list]:
+        """Build direct buffer views for a batched FP8 main-weight refresh."""
+        fp8_params = []
+        main_params = []
+        start_offsets = []
+        model_param_shards = []
+        no_shard = model_weight_buffer.sharding_strategy == "no_shard"
+        for param in params:
+            item_id = param_idx[param]
+            model_shard = model_weight_buffer.get_item(item_id, as_shard=not no_shard)
+            if model_shard.numel() == 0:
+                fp8_params.append(param)
+                main_params.append(None)
+                start_offsets.append(None)
+                model_param_shards.append((None, None))
+                continue
+
+            transpose_shard = None
+            if transpose_weight_buffer is not None:
+                transpose_shard = transpose_weight_buffer.get_item(item_id, as_shard=not no_shard)
+            main_weight = main_weight_buffer.get_item(item_id, as_shard=not no_shard)
+            if no_shard:
+                start_offset = 0
+            else:
+                start_offset, _ = model_weight_buffer.buffer_index._get_item_self_range(item_id)
+            fp8_params.append(param)
+            main_params.append(main_weight)
+            start_offsets.append(start_offset)
+            model_param_shards.append((model_shard, transpose_shard))
+
+        return fp8_params, main_params, start_offsets, model_param_shards
+
+    @staticmethod
+    def mark_model_weight_buffers_dirty(model_weight_buffer, transpose_weight_buffer=None) -> None:
+        """Mark replicated compute weights for refresh on their next unshard."""
+        if model_weight_buffer.sharding_strategy == "no_shard":
+            return
+        for buffer in (model_weight_buffer, transpose_weight_buffer):
             if buffer is not None and not buffer.is_distributed:
                 buffer.data._dirty = True
-
-        if model_weight_buffer.sharding_strategy != "no_shard":
-            mark_dirty(model_weight_buffer)
-            mark_dirty(transpose_weight_buffer)
 
 
 def is_fp8_param(tensor: torch.Tensor) -> bool:
