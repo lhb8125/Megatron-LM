@@ -597,12 +597,9 @@ class DataParallelBuffer:
 
         sm = self.buffer_index.shard_meta
         shard_buffer = self.data[sm.local_data_index : sm.local_data_index + sm.size]
-        if self._dp_world_size == 1:
-            full_buffer.copy_(shard_buffer)
-        else:
-            torch.distributed.all_gather_into_tensor(
-                output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
-            )
+        torch.distributed.all_gather_into_tensor(
+            output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
+        )
         if full_buffer.is_cuda:
             # Temporary all-gather buckets may be released from another stream before
             # the collective finishes; record the producer stream for allocator safety.

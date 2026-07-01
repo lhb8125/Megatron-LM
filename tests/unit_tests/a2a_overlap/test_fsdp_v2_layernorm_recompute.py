@@ -174,20 +174,13 @@ class TestFSDPV2LayerNormRecompute:
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
                 singleton_collectives = []
-                original_all_gather = torch.distributed.all_gather_into_tensor
                 original_reduce_scatter = torch.distributed.reduce_scatter_tensor
-
-                def track_all_gather(*args, **kwargs):
-                    if kwargs.get("group") in expert_dp_groups:
-                        singleton_collectives.append("all_gather")
-                    return original_all_gather(*args, **kwargs)
 
                 def track_reduce_scatter(*args, **kwargs):
                     if kwargs.get("group") in expert_dp_groups:
                         singleton_collectives.append("reduce_scatter")
                     return original_reduce_scatter(*args, **kwargs)
 
-                monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", track_all_gather)
                 monkeypatch.setattr(
                     torch.distributed, "reduce_scatter_tensor", track_reduce_scatter
                 )

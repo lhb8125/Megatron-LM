@@ -421,9 +421,10 @@ EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameter
 parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
 
 When the expert-DP process group has world size one, `DataParallelBuffer` preserves the normal
-unsharded and optimizer-facing buffers but implements all-gather and reduce-scatter as local
-copy, scale, and accumulation operations. This removes redundant NCCL kernels without changing
-the FSDP unit boundary, allocator lifetime, or gradient-accumulation semantics.
+unsharded and optimizer-facing buffers but implements gradient reduce-scatter as local scaling
+and accumulation. Weight unshard keeps its normal all-gather path for full-iteration CUDA graph
+stream and buffer-lifetime compatibility. The gradient fast path removes redundant NCCL kernels
+without changing the FSDP unit boundary, allocator lifetime, or accumulation semantics.
 
 ---
 
