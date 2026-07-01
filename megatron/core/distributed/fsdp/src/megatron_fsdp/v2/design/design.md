@@ -260,6 +260,13 @@ current-stream unshard and disabled neighbor prefetch. It leaves `async_op=True`
 boundary but skips event creation and persistence, making the event lifecycle the only
 remaining difference under test. It is not a supported production configuration.
 
+At the adapter boundary, the mutually exclusive temporary diagnostics
+`MCORE_FSDP_FORCE_UNSHARD_PREFETCH=1` and `MCORE_FSDP_DISABLE_UNSHARD_PREFETCH=1` override
+only the `enable_unshard_prefetch` argument passed to v2 `fully_shard()`. They leave the global
+`ddp_config.overlap_param_gather` value unchanged, allowing a two-way isolation of v2 unshard
+overlap from optimizer and training-loop uses of the global flag. They are not supported
+production configurations.
+
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full
 buffer alive while the consumer kernel runs asynchronously. After readiness,

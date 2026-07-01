@@ -49,11 +49,20 @@ class TestFSDPV2LayerNormRecompute:
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     @pytest.mark.parametrize(
         "diagnostic_mode",
-        ["default", "no_neighbor", "post_unshard_caller", "current_stream", "no_event"],
+        [
+            "default",
+            "no_neighbor",
+            "post_unshard_caller",
+            "current_stream",
+            "no_event",
+            "global_sync_fsdp_async",
+            "global_overlap_fsdp_sync",
+        ],
     )
     def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
         monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
-        if diagnostic_mode != "default":
+        no_neighbor_modes = {"no_neighbor", "post_unshard_caller", "current_stream", "no_event"}
+        if diagnostic_mode in no_neighbor_modes:
             monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
         if diagnostic_mode == "post_unshard_caller":
             monkeypatch.setenv("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "1")
@@ -61,6 +70,10 @@ class TestFSDPV2LayerNormRecompute:
             monkeypatch.setenv("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "1")
         if diagnostic_mode == "no_event":
             monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "1")
+        if diagnostic_mode == "global_sync_fsdp_async":
+            monkeypatch.setenv("MCORE_FSDP_FORCE_UNSHARD_PREFETCH", "1")
+        if diagnostic_mode == "global_overlap_fsdp_sync":
+            monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_PREFETCH", "1")
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
@@ -127,7 +140,7 @@ class TestFSDPV2LayerNormRecompute:
                 use_megatron_fsdp_v2=True,
                 data_parallel_sharding_strategy="optim_grads_params",
                 overlap_grad_reduce=True,
-                overlap_param_gather=True,
+                overlap_param_gather=diagnostic_mode != "global_sync_fsdp_async",
                 fp8_param_gather=True,
                 megatron_fsdp_main_params_dtype=None,
             )
@@ -181,7 +194,10 @@ class TestFSDPV2LayerNormRecompute:
                     recompute_stream in recorded_consumer_streams
                     for _, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute stream must own the unsharded weight-buffer lifetime"
-                if diagnostic_mode != "default":
+                if (
+                    diagnostic_mode in no_neighbor_modes
+                    or diagnostic_mode == "global_overlap_fsdp_sync"
+                ):
                     assert not prefetch_directions
                 else:
                     assert any(backward_phase for backward_phase, _ in prefetch_directions)

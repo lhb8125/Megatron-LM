@@ -294,9 +294,18 @@ class FullyShardedDataParallel(_BaseDataParallel):
                 enabled=ddp_config.fp4_param_gather, recipe=config.fp4_recipe
             ),
         )
+        force_unshard_prefetch = os.environ.get("MCORE_FSDP_FORCE_UNSHARD_PREFETCH", "0") == "1"
+        disable_unshard_prefetch = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_PREFETCH", "0") == "1"
+        if force_unshard_prefetch and disable_unshard_prefetch:
+            raise ValueError("FSDP unshard prefetch cannot be both forced and disabled")
+        enable_unshard_prefetch = ddp_config.overlap_param_gather
+        if force_unshard_prefetch:
+            enable_unshard_prefetch = True
+        elif disable_unshard_prefetch:
+            enable_unshard_prefetch = False
         kwargs = {
             "mp_policy": fully_shard_mp_policy,
-            "enable_unshard_prefetch": ddp_config.overlap_param_gather,
+            "enable_unshard_prefetch": enable_unshard_prefetch,
             "enable_async_reduce_grad": ddp_config.overlap_grad_reduce,
             "enable_trace_pool": ddp_config.fsdp_double_buffer or ddp_config.fsdp_trace_pool,
             "sharding_strategy": ddp_config.data_parallel_sharding_strategy,
