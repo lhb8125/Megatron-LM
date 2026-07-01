@@ -113,6 +113,8 @@ class TestFSDPV2LayerNormRecompute:
             "moe_token_dispatcher_type": "flex",
             "moe_flex_dispatcher_backend": flex_backend,
             "moe_router_topk": 8,
+            "moe_router_fusion": True,
+            "moe_router_force_load_balancing": True,
             "moe_router_padding_for_quantization": True,
             "moe_permute_fusion": True,
             "fp8": mxfp8_flags[0][0],
