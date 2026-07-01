@@ -48,7 +48,8 @@ class TestFSDPV2LayerNormRecompute:
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     @pytest.mark.parametrize(
-        "diagnostic_mode", ["default", "no_neighbor", "post_unshard_caller", "current_stream"]
+        "diagnostic_mode",
+        ["default", "no_neighbor", "post_unshard_caller", "current_stream", "no_event"],
     )
     def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
         monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
@@ -56,8 +57,10 @@ class TestFSDPV2LayerNormRecompute:
             monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
         if diagnostic_mode == "post_unshard_caller":
             monkeypatch.setenv("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "1")
-        if diagnostic_mode == "current_stream":
+        if diagnostic_mode in ("current_stream", "no_event"):
             monkeypatch.setenv("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "1")
+        if diagnostic_mode == "no_event":
+            monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "1")
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream

@@ -680,6 +680,7 @@ class FSDPModule:
             os.environ.get("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "0") == "1"
         )
         post_unshard_on_caller = os.environ.get("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "0") == "1"
+        disable_unshard_event = os.environ.get("MCORE_FSDP_DISABLE_UNSHARD_EVENT", "0") == "1"
         if async_op and not disable_neighbor_prefetch:
             prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
         else:
@@ -733,7 +734,7 @@ class FSDPModule:
                         param_group.post_unshard(bwd_pass=bwd_pass)
 
             # Record event to track when unshard is done for this module
-            if async_op:
+            if async_op and not disable_unshard_event:
                 event = stream.record_event()
                 ctx.unshard_done_events[id(module)] = event
 

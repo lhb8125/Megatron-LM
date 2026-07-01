@@ -255,6 +255,11 @@ ordering. `MCORE_FSDP_CURRENT_STREAM_UNSHARD=1` keeps the async/event control fl
 the whole current unshard on the caller stream. Neither switch is a supported production
 configuration.
 
+`MCORE_FSDP_DISABLE_UNSHARD_EVENT=1` is a final temporary split used together with
+current-stream unshard and disabled neighbor prefetch. It leaves `async_op=True` at the hook
+boundary but skips event creation and persistence, making the event lifecycle the only
+remaining difference under test. It is not a supported production configuration.
+
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full
 buffer alive while the consumer kernel runs asynchronously. After readiness,
