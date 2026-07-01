@@ -2,7 +2,6 @@
 
 """Common functions used in train_*.py and pretrain_*.py scripts."""
 
-import os
 from typing import Callable, Optional, Union
 
 import torch
@@ -44,9 +43,8 @@ def model_provider(
     if args.record_memory_history:
         torch.cuda.memory._record_memory_history(
             True,
-            trace_alloc_max_entries=int(
-                os.environ.get("MCORE_MEMORY_HISTORY_MAX_ENTRIES", "100000")
-            ),
+            # keep 100,000 alloc/free events from before the snapshot
+            trace_alloc_max_entries=100000,
             # record stack information for the trace events
             trace_alloc_record_context=True,
         )
