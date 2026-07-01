@@ -824,11 +824,6 @@ class FSDPModule:
             # the Python-side ``setattr(param, "grad_added_to_main_grad", True)`` that
             # accompanies the eager backward is captured away.  We record the per-param
             # flag during the trace micro-batch and restore it here.
-            singleton_local_grad = (
-                param_group.main_grad_buffer is not None
-                and not param_group.main_grad_buffer.is_distributed
-                and param_group.main_grad_buffer.dp_world_size == 1
-            )
             for name, param in zip(param_names, param_group.params):
                 grad_added = getattr(param, "grad_added_to_main_grad", False)
                 recorded = getattr(param, "_mfsdp_recorded_te_wgrad", False)
@@ -856,10 +851,7 @@ class FSDPModule:
                         main_grad.zero_()
                 else:
                     main_grad = param.get_main_grad()
-                    if singleton_local_grad and not param_group._grad_buffer_is_fresh:
-                        main_grad.add_(param.grad.detach())
-                    else:
-                        main_grad.copy_(param.grad.detach())
+                    main_grad.copy_(param.grad.detach())
                     del param.grad
 
             if async_op:

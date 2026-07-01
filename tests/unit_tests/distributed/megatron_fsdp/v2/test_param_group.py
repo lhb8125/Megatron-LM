@@ -28,7 +28,6 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
@@ -51,22 +50,6 @@ def dist_env():
     yield
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-
-
-@pytest.fixture(scope="session")
-def singleton_mesh(dist_env):
-    """Return this rank's singleton device mesh, created in global rank order."""
-    selected_group = None
-    rank = torch.distributed.get_rank()
-    for group_rank in range(torch.distributed.get_world_size()):
-        group = torch.distributed.new_group(ranks=[group_rank])
-        if group_rank == rank:
-            selected_group = group
-    assert selected_group is not None
-    yield DeviceMesh.from_group(
-        selected_group, device_type="cuda", mesh=[rank], mesh_dim_names=("dp",)
-    )
-    torch.distributed.destroy_process_group(selected_group)
 
 
 # ------------------------------------------------------------------ #
@@ -173,32 +156,6 @@ class Ref:
     def all_reduce(t, group):
         torch.distributed.all_reduce(t, group=group)
         return t
-
-
-def test_singleton_group_keeps_only_gradient_buffer_local(singleton_mesh, monkeypatch):
-    """Singleton expert groups skip grad collectives without changing weight lifecycle."""
-    rank = torch.distributed.get_rank()
-    device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
-    param = nn.Parameter(torch.arange(16, dtype=torch.bfloat16, device=device))
-    group = ParameterGroup(
-        params=[param],
-        param_group_id=ParamGroupIdx(0, 0),
-        mp_policy=MixedPrecisionPolicy(),
-        mesh=singleton_mesh,
-        sharding_strategy="optim_grads_params",
-    )
-
-    assert group.model_weight_buffer.is_distributed
-    assert not group.main_grad_buffer.is_distributed
-
-    def unexpected_collective(*args, **kwargs):
-        raise AssertionError("singleton local grad must not launch reduce-scatter")
-
-    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", unexpected_collective)
-    group._init_dist_grads()
-    group.main_grad_buffer.data.fill_(3)
-    group.reduce_grad()
-    assert torch.equal(group.main_grad_buffer.data, torch.full_like(group.main_grad_buffer.data, 3))
 
 
 # ------------------------------------------------------------------ #
