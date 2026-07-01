@@ -149,6 +149,13 @@ class Router(MegatronModule):
             router_dtype = torch.float32
         elif self.config.moe_router_dtype == 'fp64':
             router_dtype = torch.float64
+        if os.environ.get("MCORE_MOE_ROUTER_WEIGHT_NAN_CHECK", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            input._mcore_router_layer_number = self.layer_number
         logits = router_gating_linear(input, self.weight, self.bias, router_dtype)
         return logits
 

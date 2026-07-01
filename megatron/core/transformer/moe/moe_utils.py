@@ -1335,6 +1335,9 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         ctx.router_dtype = router_dtype
         ctx.input_dtype = inp.dtype
         ctx.weight_dtype = weight.dtype
+        ctx.router_layer_number = getattr(inp, "_mcore_router_layer_number", None)
+        ctx.checkpoint_debug_name = getattr(inp, "_mcore_checkpoint_debug_name", None)
+        ctx.checkpoint_forward_reference = getattr(inp, "_mcore_checkpoint_forward_reference", None)
         inp_shape = inp.shape
         inp = inp.view(-1, inp_shape[-1])
 
@@ -1377,7 +1380,13 @@ class RouterGatingLinearFunction(torch.autograd.Function):
             "on",
         }
         if debug_router_weight:
-            assert torch.isfinite(inp).all(), "Non-finite saved router gating input"
+            location = f" at layer={ctx.router_layer_number}"
+            if ctx.checkpoint_forward_reference is not None:
+                assert torch.equal(inp, ctx.checkpoint_forward_reference), (
+                    f"Restored checkpoint alias changed before router gating backward{location}; "
+                    f"checkpoint={ctx.checkpoint_debug_name}"
+                )
+            assert torch.isfinite(inp).all(), f"Non-finite saved router gating input{location}"
             assert torch.isfinite(grad_output).all(), "Non-finite router gating grad_output"
 
         if te_general_gemm is not None and ctx.router_dtype != torch.float64:

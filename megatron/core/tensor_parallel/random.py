@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
@@ -811,7 +812,7 @@ class CheckpointWithoutOutput(object):
     discarded output tensors are directly saved in the following modules for backward computation.
     """
 
-    def __init__(self, fp8=False, ckpt_manager=None):
+    def __init__(self, fp8=False, ckpt_manager=None, debug_name=None):
         """
         Initialize CheckpointWithoutOutput.
 
@@ -821,6 +822,7 @@ class CheckpointWithoutOutput(object):
                          checkpoint() will auto-register to the manager, and
                          discard_output_and_register_recompute() will only discard
                          output without registering individual hooks.
+            debug_name: Optional name used by the opt-in recompute lifetime checker.
         """
         self.fp8 = bool(fp8)
         self.ckpt_manager = ckpt_manager
@@ -830,6 +832,12 @@ class CheckpointWithoutOutput(object):
         self.fwd_cuda_rng_state_tracker = None
         self.ctx = None
         self.outputs = None
+        self.debug_name = debug_name
+        self.debug_forward_outputs = None
+
+    def _debug_recompute_enabled(self):
+        target = os.environ.get("MCORE_CHECKPOINT_RECOMPUTE_CHECK")
+        return self.debug_name is not None and target in {"1", "all", self.debug_name}
 
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """
@@ -854,6 +862,12 @@ class CheckpointWithoutOutput(object):
         self.outputs = outputs
         if isinstance(self.outputs, torch.Tensor):
             self.outputs = (self.outputs,)
+
+        if self._debug_recompute_enabled():
+            self.debug_forward_outputs = tuple(output.detach().clone() for output in self.outputs)
+            for output, reference in zip(self.outputs, self.debug_forward_outputs):
+                output._mcore_checkpoint_debug_name = self.debug_name
+                output._mcore_checkpoint_forward_reference = reference
 
         # Auto-register to manager if provided
         if self.ckpt_manager is not None:
@@ -891,6 +905,21 @@ class CheckpointWithoutOutput(object):
 
             # Reconstruct full args list from saved ctx
             inputs = _load_args_from_ctx(self.ctx)
+            if self._debug_recompute_enabled():
+                for index, input_ in enumerate(inputs):
+                    if not isinstance(input_, torch.Tensor):
+                        continue
+                    required_bytes = (
+                        input_.storage_offset() + input_.numel()
+                    ) * input_.element_size()
+                    storage_bytes = input_.untyped_storage().size()
+                    assert storage_bytes >= required_bytes, (
+                        f"Checkpoint input storage released at {self.debug_name} input={index}: "
+                        f"{storage_bytes} < {required_bytes} bytes"
+                    )
+                    assert torch.isfinite(
+                        input_
+                    ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 outputs = self.run_function(*inputs)
 
@@ -900,6 +929,15 @@ class CheckpointWithoutOutput(object):
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
 
+        if self._debug_recompute_enabled():
+            for index, (output, reference) in enumerate(zip(outputs, self.debug_forward_outputs)):
+                assert torch.isfinite(
+                    output
+                ).all(), f"Non-finite recompute output at {self.debug_name} output={index}"
+                assert torch.equal(
+                    output, reference
+                ), f"Recompute output differs from forward at {self.debug_name} output={index}"
+
         # Zero-copy: make output's StorageImpl point to recomputation_output's data.
         # This operates at the UntypedStorage level (below TensorImpl), so:
         #   - ALL views / reshapes that reference output's StorageImpl see the data
@@ -908,6 +946,13 @@ class CheckpointWithoutOutput(object):
         share_storage = _get_share_storage()
         for output, recomputation_output in zip(self.outputs, outputs):
             share_storage(output, recomputation_output)
+
+        if self._debug_recompute_enabled():
+            for index, (output, recomputation_output) in enumerate(zip(self.outputs, outputs)):
+                assert torch.equal(output, recomputation_output), (
+                    f"Restored checkpoint alias differs after share_storage at "
+                    f"{self.debug_name} output={index}"
+                )
 
         self.ctx.outputs = outputs
         self.ctx.inputs = inputs
