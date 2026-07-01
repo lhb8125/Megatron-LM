@@ -126,7 +126,7 @@ def test_singleton_reduce_grad_detection(world_size, expected):
 
 
 @pytest.mark.parametrize(
-    ("requested", "module_has_fp8", "group_specs", "expected"),
+    ("requested", "fp8_enabled", "group_specs", "expected"),
     [
         ("optim_grads_params", True, [(1, False), (0, False)], "optim"),
         ("optim_grads_params", True, [(2, False)], "optim_grads_params"),
@@ -135,15 +135,15 @@ def test_singleton_reduce_grad_detection(world_size, expected):
         ("optim_grads", True, [(1, False)], "optim_grads"),
     ],
 )
-def test_fp8_module_1d_param_group_sharding_strategy(
-    requested, module_has_fp8, group_specs, expected
-):
+def test_fp8_module_1d_param_group_sharding_strategy(requested, fp8_enabled, group_specs, expected):
     class FakeParam:
         def __init__(self, ndim, is_fp8):
             self.ndim = ndim
             self.is_fp8 = is_fp8
 
     class FakePolicy:
+        fp8 = type("FakeFP8Policy", (), {"enabled": fp8_enabled})()
+
         @staticmethod
         def is_fp8_param(param):
             return param.is_fp8
@@ -151,10 +151,7 @@ def test_fp8_module_1d_param_group_sharding_strategy(
     params = [FakeParam(ndim, is_fp8) for ndim, is_fp8 in group_specs]
     assert (
         fsdp_module_impl._select_param_group_sharding_strategy(
-            params,
-            module_has_fp8_params=module_has_fp8,
-            mp_policy=FakePolicy(),
-            requested_sharding_strategy=requested,
+            params, mp_policy=FakePolicy(), requested_sharding_strategy=requested
         )
         == expected
     )

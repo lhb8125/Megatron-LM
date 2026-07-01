@@ -75,14 +75,10 @@ def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
 
 
 def _select_param_group_sharding_strategy(
-    params,
-    *,
-    module_has_fp8_params: bool,
-    mp_policy: MixedPrecisionPolicy,
-    requested_sharding_strategy: str,
+    params, *, mp_policy: MixedPrecisionPolicy, requested_sharding_strategy: str
 ) -> str:
     """Keep small non-quantized 1D state resident beside FP8 module weights."""
-    if requested_sharding_strategy != "optim_grads_params" or not module_has_fp8_params:
+    if requested_sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
         return requested_sharding_strategy
     if all(param.ndim <= 1 and not mp_policy.is_fp8_param(param) for param in params):
         return "optim"
@@ -1244,8 +1240,6 @@ def _get_module_fsdp_param_groups(
         for param in module.parameters()
         if ignored_params is None or param not in ignored_params
     ]
-    module_has_fp8_params = any(mp_policy.is_fp8_param(param) for param in managed_params)
-
     for param in managed_params:
         # The policy owns dtype-sensitive grouping, including FP8/MXFP8 tensors
         # whose logical dtype may differ from their communication payload.
@@ -1259,10 +1253,7 @@ def _get_module_fsdp_param_groups(
     fsdp_param_groups = []
     for i, params in enumerate(param_groups.values()):
         param_group_sharding_strategy = _select_param_group_sharding_strategy(
-            params,
-            module_has_fp8_params=module_has_fp8_params,
-            mp_policy=mp_policy,
-            requested_sharding_strategy=sharding_strategy,
+            params, mp_policy=mp_policy, requested_sharding_strategy=sharding_strategy
         )
         fsdp_param_groups.append(
             ParameterGroup(

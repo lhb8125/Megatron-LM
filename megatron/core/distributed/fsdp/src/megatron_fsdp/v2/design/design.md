@@ -459,8 +459,12 @@ module-wide `optim_grads_params` strategy, the small BF16 group otherwise adds
 one independent parameter all-gather and gradient reduce-scatter per layer and
 per micro-batch. `_get_module_fsdp_param_groups()` therefore assigns `optim`
 only to non-FP8 groups whose parameters are all one-dimensional (or scalar)
-when the same managed module also contains FP8 parameters. Matrix weights and
-modules without FP8 parameters retain the requested strategy.
+when FP8 parameter gather is enabled by the mixed-precision policy. Matrix
+weights, quantized tensors, and policies without FP8 parameter gather retain
+the requested strategy. The policy flag is the authoritative condition because
+FSDP unit boundaries and parameter-materialization order do not guarantee that
+a non-quantized one-dimensional group can observe a sibling FP8 tensor while
+groups are being constructed.
 
 Mixed-strategy modules still enter the post-backward reduction path because
 their ZeRO-3 group needs an immediate reduce-scatter. `FSDPModule.reduce_grad()`
