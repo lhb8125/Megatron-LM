@@ -414,20 +414,6 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
-### 3.9 Singleton expert-DP weights and gradients
-
-Expert modules always remain independent FSDP units on the expert-DP mesh. This matters for
-EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameters into the
-parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
-
-When the expert-DP process group has world size one, expert model and main weights use complete
-persistent buffers while their DTensors keep the logical expert-mesh placement. Fine-grained
-unshard therefore rebinds resident storage without all-gather or device copy. Logical reshard
-marks quantized payloads dirty so the next phase still runs local rebind and TE
-`post_unshard()` processing. Expert gradient buffers retain the normal ZeRO-3 layout while
-reduce-scatter becomes equivalent local scaling and accumulation. This removes singleton
-collective traffic without changing the FSDP unit boundary or gradient semantics.
-
 ---
 
 ## 4. Hook behavior — v2 implementation

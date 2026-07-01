@@ -14,7 +14,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDP
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-from megatron.core.transformer.moe.experts import TEGroupedMLP
+from megatron.core.transformer import TransformerLayer
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     build_gpt_model,
@@ -62,30 +62,6 @@ def test_async_coalesced_unshard_waits_for_work(monkeypatch):
     )
 
     assert order == ["unshard:a", "unshard:b", "launch", "wait"]
-
-
-def test_singleton_unshard_skips_coalescing_manager(monkeypatch):
-    order = []
-
-    class FakeWeightBuffer:
-        _dp_world_size = 1
-
-        def __init__(self, name):
-            self.name = name
-
-        def unshard(self, bind_params=False):
-            assert bind_params
-            order.append(self.name)
-
-    def unexpected_coalescing_manager(*args, **kwargs):
-        raise AssertionError("Singleton unshard must not enter a distributed coalescing manager")
-
-    monkeypatch.setattr(fsdp_module_impl, "_coalescing_manager", unexpected_coalescing_manager)
-    fsdp_module_impl._unshard_weight_buffers(
-        object(), [FakeWeightBuffer("a"), FakeWeightBuffer("b")], async_op=True
-    )
-
-    assert order == ["a", "b"]
 
 
 class TestFSDPV2LayerNormRecompute:
@@ -174,86 +150,14 @@ class TestFSDPV2LayerNormRecompute:
                     layer.recompute_pre_mlp_layernorm for layer in recompute_model.decoder.layers
                 )
                 recompute_fsdp = FullyShardedDataParallel(
-                    config=recompute_config, ddp_config=make_ddp_config(), module=recompute_model
+                    config=recompute_config,
+                    ddp_config=make_ddp_config(),
+                    module=recompute_model,
+                    fsdp_unit_modules=[TransformerLayer],
                 )
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
-                expert_units = [
-                    child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
-                ]
-                assert expert_units
-                assert all(isinstance(child, FSDPModule) for child in expert_units)
-                expert_dp_groups = {
-                    param_group.dp_group
-                    for child in expert_units
-                    for param_group in child._fsdp_param_groups
-                }
-                assert expert_dp_groups
-                assert all(
-                    torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
-                )
-                assert all(
-                    not param_group.model_weight_buffer.is_distributed
-                    and (
-                        param_group.transpose_weight_buffer is None
-                        or not param_group.transpose_weight_buffer.is_distributed
-                    )
-                    and param_group.main_grad_buffer.is_distributed
-                    for child in expert_units
-                    for param_group in child._fsdp_param_groups
-                    if param_group.requires_grad
-                )
-                assert all(
-                    isinstance(layer, FSDPModule) for layer in recompute_model.decoder.layers
-                )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
-
-                for child in expert_units:
-                    for param_group in child._fsdp_param_groups:
-                        model_buffer = param_group.model_weight_buffer
-                        model_data_ptr = model_buffer.data.data_ptr()
-                        transpose_buffer = param_group.transpose_weight_buffer
-                        transpose_data_ptr = (
-                            transpose_buffer.data.data_ptr()
-                            if transpose_buffer is not None
-                            else None
-                        )
-
-                        param_group.reshard()
-                        assert model_buffer.data._dirty
-                        if transpose_buffer is not None:
-                            assert transpose_buffer.data._dirty
-
-                        param_group.unshard(bwd_pass=False)
-                        assert not model_buffer.data._dirty
-                        assert model_buffer.data.data_ptr() == model_data_ptr
-                        assert model_buffer._unsharded_buffer is None
-
-                        if transpose_buffer is not None:
-                            param_group.unshard(bwd_pass=True)
-                            assert not transpose_buffer.data._dirty
-                            assert transpose_buffer.data.data_ptr() == transpose_data_ptr
-                            assert transpose_buffer._unsharded_buffer is None
-                        param_group.reshard()
-
-                singleton_collectives = []
-                original_all_gather = torch.distributed.all_gather_into_tensor
-                original_reduce_scatter = torch.distributed.reduce_scatter_tensor
-
-                def track_all_gather(*args, **kwargs):
-                    if kwargs.get("group") in expert_dp_groups:
-                        singleton_collectives.append("all_gather")
-                    return original_all_gather(*args, **kwargs)
-
-                def track_reduce_scatter(*args, **kwargs):
-                    if kwargs.get("group") in expert_dp_groups:
-                        singleton_collectives.append("reduce_scatter")
-                    return original_reduce_scatter(*args, **kwargs)
-
-                monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", track_all_gather)
-                monkeypatch.setattr(
-                    torch.distributed, "reduce_scatter_tensor", track_reduce_scatter
-                )
 
                 rank = torch.distributed.get_rank()
                 recompute_loss = overlap_train_step(
@@ -276,7 +180,6 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
-                assert not singleton_collectives
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

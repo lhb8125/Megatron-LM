@@ -28,19 +28,6 @@ registered with `with_kwargs=True`. The fused path passes empty args/kwargs
 because these hooks may trigger parameter all-gathers but may not modify
 inputs; any non-`None` hook return remains an error.
 
-### Singleton Expert-Weight Fast Path
-
-Expert modules remain independent FSDP units even when expert data parallelism has world size
-one. This preserves their expert-DP mesh, DTensor placement, and gradient-scaling factor when
-the dense DP mesh is larger. For a singleton mesh, `ParameterGroup` stores model and main
-weights in complete persistent buffers while retaining the logical `Shard(dim=0)` DTensor
-placement. Unshard rebinds those resident buffers without an all-gather or a device copy.
-Logical reshard marks resident quantized payloads dirty so the next phase still rebinds them
-and executes Transformer Engine's `post_unshard()` after `post_reshard()` invalidates recipe
-state. Gradient buffers retain the normal ZeRO-3 layout, but reduce-scatter and all-reduce use
-equivalent local scaling and accumulation. Singleton unshard also avoids the distributed
-coalescing manager.
-
 ---
 
 ## `_FSDPRootContext` — Shared Coordination Object
