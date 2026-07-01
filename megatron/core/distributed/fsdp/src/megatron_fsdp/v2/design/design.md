@@ -241,12 +241,6 @@ readiness event. This inserts the NCCL completion dependency into `ag_stream`;
 otherwise the readiness event can run before the backend stream finishes
 writing the gathered buffers.
 
-**Nested-module prefetch.** One MoE transformer layer is represented by a parent
-`TransformerLayer` FSDP module plus a nested expert FSDP module. Prefetch therefore looks ahead
-by two modules in both forward and backward order: the first covers the remainder of the current
-layer and the second starts the next layer. This matches v1's full-FSDP-unit lookahead while
-retaining v2's separate dense and expert process groups.
-
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
