@@ -18,7 +18,7 @@ import logging
 import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -72,38 +72,6 @@ def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
     """Return whether this param group's gradient reduction is process-local."""
     grad_buffer = param_group.main_grad_buffer
     return grad_buffer is not None and getattr(grad_buffer, "_dp_world_size", 2) == 1
-
-
-def _select_param_group_sharding_strategy(
-    params,
-    param_names,
-    *,
-    mp_policy: MixedPrecisionPolicy,
-    normalization_size_limit: Optional[int],
-    requested_sharding_strategy: str,
-) -> str:
-    """Keep small non-quantized 1D state resident beside FP8 module weights."""
-    assert len(params) == len(param_names)
-    if (
-        requested_sharding_strategy != "optim_grads_params"
-        or not mp_policy.fp8.enabled
-        or normalization_size_limit is None
-    ):
-        return requested_sharding_strategy
-
-    def is_normalization_param_name(name: str) -> bool:
-        normalized_name = name.lower().replace("_", "")
-        return "layernorm" in normalized_name or "rmsnorm" in normalized_name
-
-    if all(
-        param.ndim <= 1
-        and param.numel() <= normalization_size_limit
-        and not mp_policy.is_fp8_param(param)
-        and is_normalization_param_name(name)
-        for param, name in zip(params, param_names)
-    ):
-        return "optim"
-    return requested_sharding_strategy
 
 
 class _FSDPState:
@@ -847,9 +815,7 @@ class FSDPModule:
             if module is self:
                 break
 
-    def reduce_grad(
-        self, async_op: bool = False, allowed_sharding_strategies: Optional[Set[str]] = None
-    ):
+    def reduce_grad(self, async_op: bool = False):
         """
         Reduce gradients across data-parallel ranks.
 
@@ -870,21 +836,11 @@ class FSDPModule:
         for param_names, param_group in self._named_param_groups:
             if not param_group.requires_grad:
                 continue
-            if (
-                allowed_sharding_strategies is not None
-                and param_group.sharding_strategy not in allowed_sharding_strategies
-            ):
-                continue
 
             # Initialize main gradient buffer and param -> main_grad mapping if not already done.
             param_group._init_dist_grads()
-            delayed_grad_sync = async_op and param_group.sharding_strategy in ("no_shard", "optim")
-            singleton_dp = (
-                async_op
-                and not delayed_grad_sync
-                and _uses_singleton_dp_for_reduce_grad(param_group)
-            )
-            param_stream = caller_stream if delayed_grad_sync or singleton_dp else stream
+            singleton_dp = async_op and _uses_singleton_dp_for_reduce_grad(param_group)
+            param_stream = caller_stream if singleton_dp else stream
 
             # NaN check before reduction
             if getattr(self, "_enable_nan_checks", False):
@@ -931,18 +887,10 @@ class FSDPModule:
                         main_grad.zero_()
                 else:
                     main_grad = param.get_main_grad()
-                    if delayed_grad_sync and not param_group._grad_buffer_is_fresh:
-                        main_grad.add_(param.grad.detach())
-                    else:
-                        main_grad.copy_(param.grad.detach())
+                    main_grad.copy_(param.grad.detach())
                     del param.grad
 
-            if delayed_grad_sync:
-                # ZeRO-1/no-shard groups accumulate full local gradients across
-                # micro-batches and synchronize once in finish_grad_sync().
-                param_group._grad_buffer_is_fresh = False
-                continue
-            elif async_op and not singleton_dp:
+            if async_op and not singleton_dp:
                 # ---- Overlapped path ----
                 # Switch to rs_stream for the reduce-scatter kernel
                 stream.wait_stream(torch.cuda.current_stream())
@@ -1005,7 +953,7 @@ class FSDPModule:
                 # no_shard and ZeRO-1 keep gradients replicated during backward.
                 # Sync them once at the iteration grad-sync boundary: no_shard
                 # all-reduces full grads, ZeRO-1 reduce-scatters virtual shards.
-                child.reduce_grad(async_op=False, allowed_sharding_strategies={"no_shard", "optim"})
+                child.reduce_grad(async_op=False)
             for param_group in child._fsdp_param_groups:
                 for param, dist_grad in zip(param_group.params, param_group.dist_grads):
                     if param.requires_grad:
@@ -1256,15 +1204,11 @@ def _get_module_fsdp_param_groups(
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
     param_groups = {}
-    param_names = {param: name for name, param in module.named_parameters()}
-    module_config = getattr(module, "config", None)
-    normalization_size_limit = getattr(module_config, "hidden_size", None)
-    managed_params = [
-        param
-        for param in module.parameters()
-        if ignored_params is None or param not in ignored_params
-    ]
-    for param in managed_params:
+
+    for param in module.parameters():
+        if ignored_params is not None and param in ignored_params:
+            continue
+
         # The policy owns dtype-sensitive grouping, including FP8/MXFP8 tensors
         # whose logical dtype may differ from their communication payload.
         param_dtype = mp_policy.group_key_dtype(param)
@@ -1276,13 +1220,6 @@ def _get_module_fsdp_param_groups(
     # Create ParameterGroup for each group
     fsdp_param_groups = []
     for i, params in enumerate(param_groups.values()):
-        param_group_sharding_strategy = _select_param_group_sharding_strategy(
-            params,
-            [param_names[param] for param in params],
-            mp_policy=mp_policy,
-            normalization_size_limit=normalization_size_limit,
-            requested_sharding_strategy=sharding_strategy,
-        )
         fsdp_param_groups.append(
             ParameterGroup(
                 params,
@@ -1290,7 +1227,7 @@ def _get_module_fsdp_param_groups(
                 param_group_id=ParamGroupIdx(id(module), i),
                 mp_policy=mp_policy,
                 gradient_scaling_factor=gradient_scaling_factor,
-                sharding_strategy=param_group_sharding_strategy,
+                sharding_strategy=sharding_strategy,
             )
         )
 
