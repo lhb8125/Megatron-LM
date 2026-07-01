@@ -180,7 +180,7 @@ class TestFSDPV2LayerNormRecompute:
                     torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
                 )
                 assert all(
-                    not param_group.model_weight_buffer.is_distributed
+                    param_group.model_weight_buffer.is_distributed
                     and param_group.main_grad_buffer.is_distributed
                     for param_group in expert_param_groups
                 )
@@ -189,15 +189,6 @@ class TestFSDPV2LayerNormRecompute:
                     for param_group in dense_param_groups
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
-
-                for param_group in expert_param_groups:
-                    param_group.reshard()
-                    assert param_group.model_weight_buffer.data._dirty
-                    if param_group.transpose_weight_buffer is not None:
-                        assert param_group.transpose_weight_buffer.data._dirty
-                        param_group.unshard(bwd_pass=True)
-                        assert not param_group.transpose_weight_buffer.data._dirty
-                        param_group.reshard()
 
                 singleton_all_gathers = []
                 original_all_gather = torch.distributed.all_gather_into_tensor
@@ -230,7 +221,7 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
-                assert not singleton_all_gathers
+                assert singleton_all_gathers
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

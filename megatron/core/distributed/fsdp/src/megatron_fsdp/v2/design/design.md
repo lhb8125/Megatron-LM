@@ -37,12 +37,12 @@ inside their parent `TransformerLayer` FSDP unit instead of creating a nested ex
 `allreduce=False` therefore retain the expert-DP mesh and expert scaling while dense parameters
 in the same layer use the dense-DP mesh.
 
-For the singleton expert mesh, model and main weights use complete persistent buffers while
-retaining logical `Shard(dim=0)` DTensor placement. Parent-layer unshard still visits every
-parameter group, so resident MXFP8 payloads are rebound and receive Transformer Engine
-`post_unshard()` processing after logical reshard invalidates recipe state. Gradient buffers
-keep the normal ZeRO-3 layout and reduction path. This matches the v1 unit boundary without
-changing expert placement, per-microbatch scaling, or full-iteration CUDA graph stream ordering.
+Expert model, main-weight, and gradient buffers keep the normal ZeRO-3 layout and collective
+paths, including on a singleton expert mesh. Grouping them with the parent changes only the
+unit boundary and schedule: expert all-gather is launched with parent-layer prefetch and can
+overlap the preceding attention work instead of being launched by a nested module immediately
+before expert compute. This matches the v1 unit boundary without changing expert placement,
+per-microbatch scaling, buffer lifetimes, or full-iteration CUDA graph stream ordering.
 
 ---
 

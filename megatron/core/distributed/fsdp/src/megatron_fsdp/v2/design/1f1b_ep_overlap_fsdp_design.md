@@ -423,11 +423,11 @@ When the expert-DP process group has world size one, the default adapter omits n
 the remaining parameters use dense DP. This avoids the incorrect placement that would result
 from assigning every parent parameter to one mesh.
 
-Singleton expert model and main weights use complete persistent buffers and issue no
-all-gather. Parent-layer fine-grained unshard still visits the mixed parameter groups, preserving
-local MXFP8 rebind and TE `post_unshard()` processing. Expert gradients retain the normal
-ZeRO-3 full-gradient and optimizer-shard layout plus reduce-scatter, so per-microbatch scaling,
-accumulation, and full-CG side-stream ordering are unchanged.
+Expert model, main-weight, and gradient buffers retain their normal ZeRO-3 collective paths.
+The mixed parent unit launches expert all-gather as part of parent-layer prefetch, allowing it
+to overlap earlier attention work instead of waiting for a nested expert pre-hook immediately
+before MLP compute. Parameter placement, per-microbatch scaling, accumulation, buffer lifetimes,
+and full-CG side-stream ordering are unchanged.
 
 ---
 

@@ -381,7 +381,6 @@ class DataParallelBuffer:
 
         dp_rank = torch.distributed.get_rank(dp_group)
         dp_world_size = torch.distributed.get_world_size(dp_group)
-        self._dp_world_size = dp_world_size
 
         # Always build layout with logical shapes and shared chunk_size_factor
         # so that all buffers share the same proportional item-offset mapping.
@@ -590,12 +589,9 @@ class DataParallelBuffer:
         """
         full_buffer = self.fetch_buffer(as_shard=False)
 
-        if not self.is_distributed and (
-            self._dp_world_size == 1 or not getattr(full_buffer, "_dirty", False)
-        ):
+        if not self.is_distributed and not getattr(full_buffer, "_dirty", False):
             if bind_params:
                 self._bind_buffer_to_params(full_buffer)
-            setattr(full_buffer, "_dirty", False)
             return full_buffer
 
         sm = self.buffer_index.shard_meta
@@ -632,14 +628,6 @@ class DataParallelBuffer:
     def reshard(self) -> None:
         """Release the temporary unsharded buffer allocated by unshard()."""
         if not self.is_distributed:
-            if (
-                self._dp_world_size == 1
-                and self.sharding_strategy != "no_shard"
-                and self.buffer_role in ("model_weight", "transpose_weight")
-            ):
-                # The storage remains resident, but quantized parameters must still
-                # re-enter post_unshard() after post_reshard() invalidates TE state.
-                self.data._dirty = True
             return
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
