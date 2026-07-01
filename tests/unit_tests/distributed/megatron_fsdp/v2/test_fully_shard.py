@@ -52,7 +52,10 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
     get_state_dict,
     preprocess_state_dict_for_uneven_dtensor,
 )
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDPModule
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import (
+    FSDPModule,
+    _FSDPRootContext,
+)
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fully_shard import fully_shard
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import MixedPrecisionPolicy
 
@@ -218,6 +221,17 @@ def _count_fsdp_modules(module):
 
 
 class TestFullyShardBasic:
+    def test_prefetch_looks_ahead_across_nested_expert_module(self):
+        modules = [object() for _ in range(4)]
+        ctx = _FSDPRootContext(
+            ag_stream=None, rs_stream=None, bucket_allocator=None, forward_order=modules
+        )
+
+        assert ctx.get_prefetch_next_modules(modules[0]) == modules[1:3]
+        assert ctx.get_prefetch_next_modules(modules[2]) == modules[3:4]
+        assert ctx.get_prefetch_next_modules(modules[3]) == []
+        assert ctx.get_prefetch_next_modules(modules[3], bwd_pass=True) == modules[2:0:-1]
+
     def test_reclaims_original_parameter_cache_after_buffer_init(self, monkeypatch):
         events = []
         real_collect = gc.collect

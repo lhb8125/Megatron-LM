@@ -202,14 +202,18 @@ class _FSDPRootContext:
     def get_prefetch_next_modules(
         self, module: "FSDPModule", bwd_pass: bool = False
     ) -> List["FSDPModule"]:
-        """Return the next FSDP module to prefetch in forward or backward order."""
+        """Return up to two modules to prefetch in forward or backward order.
+
+        Transformer layers with expert parallelism are represented by a parent
+        layer FSDP module and a nested expert FSDP module. Looking ahead by two
+        modules covers the remainder of the current layer and starts gathering
+        the next layer, matching v1's full-FSDP-unit prefetch behavior.
+        """
         module_order = list(reversed(self.forward_order)) if bwd_pass else self.forward_order
 
         for module_index, candidate_module in enumerate(module_order):
             if candidate_module is module:
-                if module_index + 1 >= len(module_order):
-                    return []
-                return [module_order[module_index + 1]]
+                return module_order[module_index + 1 : module_index + 3]
 
         raise AssertionError("Current module not found in forward module order")
 
