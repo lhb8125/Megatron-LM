@@ -158,6 +158,27 @@ class TestTracePoolFullIterationGradBuffers:
         assert second.rebind_unsharded_buffer_to_allocator(zero=True)
         assert first._unsharded_buffer.data_ptr() != second._unsharded_buffer.data_ptr()
 
+    def test_slot_inherits_largest_key_trace_stream(self, monkeypatch):
+        allocator = TracePoolAllocator()
+        large = self._make_buffer(allocator, "large", 32)
+        large.release_unsharded_buffer_for_reuse()
+        small = self._make_buffer(allocator, "small", 16)
+        small.release_unsharded_buffer_for_reuse()
+
+        allocator._trace_streams = {"large": "large-stream", "small": "small-stream"}
+        allocated_streams = []
+
+        def fake_allocate(size, dtype, device, stream):
+            allocated_streams.append(stream)
+            return torch.empty(size, dtype=dtype, device=device)
+
+        monkeypatch.setattr(allocator, "_allocate_slot_tensor", fake_allocate)
+        allocator.plan()
+
+        assert len(allocator._slots) == 1
+        assert allocated_streams == ["large-stream"]
+        assert allocator._slots[0].stream == "large-stream"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

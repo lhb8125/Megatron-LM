@@ -174,6 +174,7 @@ class TracePoolAllocator(BucketAllocator):
         size: int  # Capacity in elements
         dtype: torch.dtype
         device: torch.device
+        stream: Optional[torch.cuda.Stream] = None
         in_use: bool = False
 
     @dataclasses.dataclass
@@ -194,6 +195,7 @@ class TracePoolAllocator(BucketAllocator):
         self._seq: int = 0
         self._trace: List["TracePoolAllocator._TraceEvent"] = []
         self._trace_meta: Dict[AllocatorKey, Tuple[int, torch.dtype, torch.device]] = {}
+        self._trace_streams: Dict[AllocatorKey, torch.cuda.Stream] = {}
         self._buckets: Dict[AllocatorKey, Bucket] = {}
         self._active_keys: Set[AllocatorKey] = set()
 
@@ -246,6 +248,8 @@ class TracePoolAllocator(BucketAllocator):
             self._trace.append(self._TraceEvent(seq=self._seq, op="alloc", key=key))
             self._seq += 1
             self._trace_meta[key] = (size, dtype, device)
+            if device.type == "cuda":
+                self._trace_streams[key] = torch.cuda.current_stream(device)
             self._buckets[key] = Bucket(data=torch.empty(size, dtype=dtype, device=device))
         else:
             self._trace.append(self._TraceEvent(seq=self._seq, op="alloc", key=key))
@@ -410,14 +414,24 @@ class TracePoolAllocator(BucketAllocator):
                 color_of[k] = len(slot_sizes)
                 slot_sizes.append(size_k)
 
-        # Allocate each slot as a SEPARATE tensor
+        # Allocate each slot as a SEPARATE tensor. Prefer the trace stream of
+        # the largest key assigned to the slot so expandable CUDA segments can
+        # reuse the storage that the trace allocation just released.
         global_slot_offset = len(self._slots)
         slot_tensors: List[torch.Tensor] = []
+        slot_streams: List[Optional[torch.cuda.Stream]] = [None] * len(slot_sizes)
 
-        for slot_size in slot_sizes:
-            t = torch.empty(slot_size, dtype=dtype, device=device)
+        for k in keys_sorted:
+            slot_idx = color_of[k]
+            if slot_streams[slot_idx] is None:
+                slot_streams[slot_idx] = self._trace_streams.get(k)
+
+        for slot_size, stream in zip(slot_sizes, slot_streams):
+            t = self._allocate_slot_tensor(slot_size, dtype, device, stream)
             slot_tensors.append(t)
-            self._slots.append(self._SlotInfo(tensor=t, size=slot_size, dtype=dtype, device=device))
+            self._slots.append(
+                self._SlotInfo(tensor=t, size=slot_size, dtype=dtype, device=device, stream=stream)
+            )
 
         # Map each key to its slot and pre-compute the view
         for k in keys:
@@ -429,6 +443,15 @@ class TracePoolAllocator(BucketAllocator):
             self._key_to_view[k] = slot_tensors[local_idx][:size_k]
 
         return sum(slot_sizes)
+
+    @staticmethod
+    def _allocate_slot_tensor(
+        size: int, dtype: torch.dtype, device: torch.device, stream: Optional[torch.cuda.Stream]
+    ) -> torch.Tensor:
+        if stream is None:
+            return torch.empty(size, dtype=dtype, device=device)
+        with torch.cuda.stream(stream):
+            return torch.empty(size, dtype=dtype, device=device)
 
     # -- Phase 3: optimized runtime ------------------------------------- #
 
@@ -458,6 +481,7 @@ class TracePoolAllocator(BucketAllocator):
         self._seq = 0
         self._trace.clear()
         self._trace_meta.clear()
+        self._trace_streams.clear()
         self._buckets.clear()
         self._active_keys.clear()
         self._slots.clear()
@@ -506,7 +530,7 @@ class TracePoolAllocator(BucketAllocator):
             return
 
         for slot_idx, slot in enumerate(self._slots):
-            new_tensor = torch.empty(slot.size, dtype=slot.dtype, device=slot.device)
+            new_tensor = self._allocate_slot_tensor(slot.size, slot.dtype, slot.device, slot.stream)
             slot.tensor = new_tensor
 
         for key, slot_idx in self._key_to_slot.items():

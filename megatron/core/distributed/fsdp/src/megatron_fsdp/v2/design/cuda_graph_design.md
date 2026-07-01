@@ -382,6 +382,10 @@ requirements:
   Cached full grad buffers are then rebound from trace buckets to planned slots
   and zeroed before full-iteration capture, so trace and optimized storage do not
   remain resident together.
+- The trace records each key's CUDA stream. Each planned slot inherits the stream
+  of its largest key, including after allocator release/resume, so the CUDA caching
+  allocator can reuse the expandable segment mapped for the original trace buffer
+  instead of growing the full-iteration capture stream's segment.
 - `_maybe_free_grad_data()` keeps optimizer-facing gradient storage resident
   for full-iteration replay.
 - `ParameterGroup.zero_grad()` clears existing buffer storage instead of
