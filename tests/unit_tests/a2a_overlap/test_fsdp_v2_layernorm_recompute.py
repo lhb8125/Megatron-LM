@@ -37,6 +37,41 @@ NUM_MICROBATCHES = 4
 LR = 0.01
 
 
+def test_async_coalesced_unshard_waits_for_work(monkeypatch):
+    order = []
+    dp_group = object()
+
+    class FakeCoalescingManager:
+        def wait(self):
+            order.append("wait")
+
+    class FakeWeightBuffer:
+        def __init__(self, name):
+            self.name = name
+
+        def unshard(self, bind_params=False):
+            assert bind_params
+            order.append(f"unshard:{self.name}")
+
+    @contextmanager
+    def fake_coalescing_manager(group, async_ops=False):
+        assert group is dp_group
+        assert async_ops
+        yield FakeCoalescingManager()
+        order.append("launch")
+
+    monkeypatch.setattr(fsdp_module_impl, "_coalescing_manager", fake_coalescing_manager)
+    fsdp_module_impl._unshard_weight_buffers(
+        dp_group,
+        [FakeWeightBuffer("a"), FakeWeightBuffer("b")],
+        async_op=True,
+        coalescing_async_op=True,
+        bind_params=True,
+    )
+
+    assert order == ["unshard:a", "unshard:b", "launch", "wait"]
+
+
 class TestFSDPV2LayerNormRecompute:
     """Production-shape regression for v2 LayerNorm recompute."""
 
@@ -102,11 +137,9 @@ class TestFSDPV2LayerNormRecompute:
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
         original_get_prefetch = _FSDPRootContext.get_prefetch_next_modules
-        original_coalescing_manager = fsdp_module_impl._coalescing_manager
         recompute_stream_pairs = []
         recorded_consumer_streams = []
         prefetch_directions = []
-        coalescing_wait_streams = []
 
         def checkpoint_with_stream(checkpoint, *args, **kwargs):
             if checkpoint.debug_name is not None:
@@ -128,26 +161,12 @@ class TestFSDPV2LayerNormRecompute:
             prefetch_directions.append((ctx.backward_phase, bwd_pass))
             return original_get_prefetch(ctx, module, bwd_pass=bwd_pass)
 
-        @contextmanager
-        def coalescing_manager_with_wait_check(*args, **kwargs):
-            with original_coalescing_manager(*args, **kwargs) as manager:
-
-                class TrackedCoalescingManager:
-                    def wait(self):
-                        coalescing_wait_streams.append(torch.cuda.current_stream())
-                        manager.wait()
-
-                yield TrackedCoalescingManager()
-
         monkeypatch.setattr(CheckpointWithoutOutput, "checkpoint", checkpoint_with_stream)
         monkeypatch.setattr(CheckpointWithoutOutput, "_recompute", recompute_with_stream_check)
         monkeypatch.setattr(
             DataParallelBuffer, "record_unsharded_buffer_stream", record_stream_with_check
         )
         monkeypatch.setattr(_FSDPRootContext, "get_prefetch_next_modules", get_prefetch_with_check)
-        monkeypatch.setattr(
-            fsdp_module_impl, "_coalescing_manager", coalescing_manager_with_wait_check
-        )
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -246,11 +265,6 @@ class TestFSDPV2LayerNormRecompute:
                         for backward_phase, prefetch_bwd_pass in prefetch_directions
                         if backward_phase
                     ), "Every backward-phase prefetch must follow backward module order"
-                if diagnostic_mode == "global_overlap_fsdp_sync":
-                    assert not coalescing_wait_streams
-                else:
-                    assert coalescing_wait_streams
-
                 del recompute_fsdp, recompute_opt
                 gc.collect()
                 torch.cuda.empty_cache()

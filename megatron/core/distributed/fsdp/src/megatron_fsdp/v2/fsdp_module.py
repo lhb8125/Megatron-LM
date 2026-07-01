@@ -35,6 +35,22 @@ from .utils import ParamGroupIdx, _replace_module_parameter
 logger = logging.getLogger(__name__)
 
 
+def _unshard_weight_buffers(
+    dp_group, weight_buffers, *, async_op: bool, coalescing_async_op: bool, bind_params: bool
+) -> None:
+    """Unshard one same-process-group buffer run and order async completion."""
+    cm = (
+        _coalescing_manager(dp_group, async_ops=coalescing_async_op)
+        if len(weight_buffers) > 1
+        else nullcontext()
+    )
+    with cm as coalescing_event:
+        for weight_buffer in weight_buffers:
+            weight_buffer.unshard(bind_params=bind_params)
+    if async_op and coalescing_event is not None:
+        coalescing_event.wait()
+
+
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -722,21 +738,16 @@ class FSDPModule:
                             buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
 
                 for dp_group, weight_buffers in buffer_runs:
-                    cm = (
-                        _coalescing_manager(
-                            dp_group, async_ops=async_op and not sync_unshard_coalescing
-                        )
-                        if len(weight_buffers) > 1
-                        else nullcontext()
+                    bind_params = not (defer_unshard_bind and module is self)
+                    _unshard_weight_buffers(
+                        dp_group,
+                        weight_buffers,
+                        async_op=async_op,
+                        coalescing_async_op=async_op and not sync_unshard_coalescing,
+                        bind_params=bind_params,
                     )
-                    with cm as coalescing_event:
-                        for weight_buffer in weight_buffers:
-                            bind_params = not (defer_unshard_bind and module is self)
-                            weight_buffer.unshard(bind_params=bind_params)
-                            if not bind_params:
-                                self_bind_buffers.append(weight_buffer)
-                    if async_op and coalescing_event is not None:
-                        coalescing_event.wait()
+                    if not bind_params:
+                        self_bind_buffers.extend(weight_buffers)
 
                 if post_unshard_on_caller and module is self:
                     self_post_unshard.extend(pending_post_unshard)
