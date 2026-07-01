@@ -267,12 +267,18 @@ def mfsdp_post_backward_final_callback(root_module: nn.Module):
 
     # ---- drain pending async reduce-grad events -----------------------
     stream = ctx.rs_stream
+    reduced_gradients = False
     for buckets in ctx.reduce_grad_buckets.values():
         while len(buckets) > 0:
+            reduced_gradients = True
             event, param_group = buckets.pop()
             event.wait()
             param_group.release_grad_buffer()
-    torch.cuda.current_stream().wait_stream(stream)
+    # no_sync micro-batches do not submit work to rs_stream. Waiting on that
+    # stream during full-CG capture would create a dependency on its uncaptured
+    # eager history and invalidate capture.
+    if reduced_gradients:
+        torch.cuda.current_stream().wait_stream(stream)
 
     # ---- reset root / context state for the next micro-batch ----------
     root_module._fsdp_state._post_backward_callback_queued = False
@@ -412,7 +418,7 @@ def _pre_backward_setup(module: FSDPModule, skip_final_callback: bool = False):
         for param in param_group.params:
             param.grad_added_to_main_grad = False
             if param_group.sharding_strategy in ("optim_grads_params", "optim_grads"):
-                param.overwrite_main_grad = True
+                param.overwrite_main_grad = getattr(param_group, "_grad_buffer_is_fresh", True)
         # CUDA graph + TE wgrad fusion: during graph capture the eager backward
         # runs once and TE sets grad_added_to_main_grad=True on each param it
         # writes to.  Under replay only the GPU kernel runs — the Python-side

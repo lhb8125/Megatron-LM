@@ -343,6 +343,24 @@ The operation is inherently synchronous *within whatever stream is current* when
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
 
+### Gradient accumulation with `no_sync()`
+
+`FSDPModule.no_sync()` sets the shared root context's `sync_gradients` flag to `False` for
+inner micro-batches. Backward hooks still reshard parameters and reset their bookkeeping, but
+`reduce_grad()` leaves compute-parameter gradients local. The final micro-batch runs outside
+the context and reduce-scatters the accumulated gradients once, matching v1's communication
+schedule.
+
+When a `no_sync()` micro-batch has not submitted any reduction, the post-backward callback
+does not wait on `rs_stream`. This is required by full-iteration CUDA graph capture: waiting
+on an unused side stream would pull that stream's eager history into the capture dependency
+graph and trigger `cudaErrorStreamCaptureIsolation`.
+
+For Transformer Engine gradient-accumulation fusion, the first inner micro-batch overwrites
+freshly zeroed `main_grad`; later micro-batches accumulate into it. A skipped reduction marks
+the buffer non-fresh after TE records a fused wgrad, and `zero_grad()` restores overwrite mode
+for the next iteration.
+
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
 directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:
@@ -351,12 +369,11 @@ directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:
   pass; the kernel sets it to `True` after writing. In `reduce_grad`, the `zero_()` call is
   skipped when `True` to preserve the fused-gradient value.
 
-- **`overwrite_main_grad`**: Set to `True` in `pre_backward_hook` for sharded parameters
-  (`optim_grads_params` / `optim_grads`). By default TE **accumulates** (adds) into
-  `main_grad` — useful for micro-batch gradient accumulation in non-FSDP settings. With FSDP
-  the gradient buffer is re-used across micro-batches; accumulation would silently **double**
-  gradients and produce NaN after the first step. This flag tells TE to **overwrite** instead
-  of accumulate.
+- **`overwrite_main_grad`**: Set from `ParameterGroup._grad_buffer_is_fresh` in
+  `pre_backward_hook` for sharded parameters (`optim_grads_params` / `optim_grads`). The first
+  micro-batch overwrites freshly zeroed storage. Under `no_sync()`, skipped reductions mark the
+  buffer non-fresh so later micro-batches accumulate. After `zero_grad()`, the flag returns to
+  overwrite mode for the next iteration.
 
 ### Sliding Drain: The `i-2` Rule
 
