@@ -14,7 +14,6 @@
 
 import logging
 import random
-from contextlib import nullcontext
 from typing import Dict, List, Optional
 
 try:
@@ -447,7 +446,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
             self.module._copy_main_weights_to_model_weights
         )
         self.ddp_config = ddp_config
-        self.no_sync = nullcontext
+        self.no_sync = self.module.no_sync
         self.start_param_sync = noop
         self.start_grad_sync = noop
 

@@ -46,6 +46,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import StateDictOptions
 from torch.distributed.checkpoint.state_dict import get_state_dict as torch_get_state_dict
+from torch.distributed.tensor import DeviceMesh
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from megatron.core.distributed.fsdp.src.megatron_fsdp.uneven_dtensor import (
@@ -83,6 +84,18 @@ def _world_size():
 
 def _device():
     return torch.device(f"cuda:{_rank() % torch.cuda.device_count()}")
+
+
+def _singleton_mesh():
+    selected_group = None
+    for rank in range(_world_size()):
+        group = torch.distributed.new_group(ranks=[rank])
+        if rank == _rank():
+            selected_group = group
+    assert selected_group is not None
+    return DeviceMesh.from_group(
+        [selected_group], device_type="cuda", mesh=[_rank()], mesh_dim_names=("dp",)
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -275,6 +288,64 @@ class TestFullyShardBasic:
         loss = _forward_backward(model, x)
         assert not torch.isnan(torch.tensor(loss)), "Loss is NaN"
         assert not torch.isinf(torch.tensor(loss)), "Loss is Inf"
+
+    def test_no_sync_defers_gradient_reduction(self, monkeypatch):
+        """Inner micro-batches accumulate locally and reduce only after no_sync."""
+        torch.manual_seed(42)
+        model = SimpleMLP(64).to(_device())
+        fully_shard(model, enable_async_reduce_grad=False)
+
+        reduce_calls = []
+        for param_group in model._fsdp_param_groups:
+            original_reduce_grad = param_group.reduce_grad
+
+            def reduce_grad(original_reduce_grad=original_reduce_grad):
+                reduce_calls.append(1)
+                return original_reduce_grad()
+
+            monkeypatch.setattr(param_group, "reduce_grad", reduce_grad)
+
+        x = torch.randn(2, 64, device=_device())
+        with model.no_sync():
+            _forward_backward(model, x)
+
+        assert reduce_calls == []
+        assert model._fsdp_root_context.sync_gradients
+
+        _forward_backward(model, x)
+        assert len(reduce_calls) == sum(
+            param_group.requires_grad for param_group in model._fsdp_param_groups
+        )
+
+    def test_singleton_mesh_skips_weight_and_gradient_collectives(self, monkeypatch):
+        """A size-one DP group keeps full buffers local for every strategy."""
+        torch.manual_seed(42)
+        model = SimpleMLP(64).to(_device())
+        fully_shard(
+            model,
+            mesh=_singleton_mesh(),
+            sharding_strategy="optim_grads_params",
+            enable_async_reduce_grad=False,
+        )
+
+        for param_group in model._fsdp_param_groups:
+            for buffer in (
+                param_group.model_weight_buffer,
+                param_group.main_weight_buffer,
+                param_group.main_grad_buffer,
+                param_group.transpose_weight_buffer,
+            ):
+                if buffer is not None:
+                    assert not buffer.is_distributed
+
+        def unexpected_collective(*args, **kwargs):
+            raise AssertionError("singleton DP buffers must not launch collectives")
+
+        monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", unexpected_collective)
+        monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", unexpected_collective)
+
+        x = torch.randn(2, 64, device=_device())
+        _forward_backward(model, x)
 
     def test_no_shard_forward_backward_finish_grad_sync(self):
         """no_shard keeps full replicated buffers and all-reduces at grad sync."""

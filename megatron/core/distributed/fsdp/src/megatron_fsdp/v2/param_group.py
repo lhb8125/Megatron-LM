@@ -161,9 +161,10 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
-        shard_main_weights = s != "no_shard"
-        shard_grads = s in ("optim_grads", "optim_grads_params")
+        distributed_group = self._dp_world_size > 1
+        shard_weights = s == "optim_grads_params" and distributed_group
+        shard_main_weights = s != "no_shard" and distributed_group
+        shard_grads = s in ("optim_grads", "optim_grads_params") and distributed_group
 
         # Create model weight buffers. The policy owns dtype-sensitive storage
         # choices and exposes the tensor view that should be packed.
