@@ -232,7 +232,7 @@ def test_singleton_reduce_grad_accumulates_locally(singleton_group, monkeypatch)
 def test_singleton_param_group_keeps_only_compute_weights_local(singleton_group):
     rank = torch.distributed.get_rank()
     device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
-    mesh = DeviceMesh.from_group(device_type="cuda", group=singleton_group, mesh=[rank])
+    mesh = DeviceMesh.from_group("cuda", singleton_group, mesh=[rank])
     param = nn.Parameter(torch.arange(16, dtype=torch.bfloat16, device=device))
     group = ParameterGroup(
         params=[param],
