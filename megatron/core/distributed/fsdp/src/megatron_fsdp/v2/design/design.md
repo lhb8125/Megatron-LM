@@ -343,6 +343,14 @@ The operation is inherently synchronous *within whatever stream is current* when
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
 
+When one FSDP module has multiple `ParameterGroup` objects on the same DP
+process group, `FSDPModule.reduce_grad()` first prepares their gradients on the
+main stream, then submits the reduce-scatters together under one
+`_coalescing_manager`. The groups retain separate weight, gradient, and DTensor
+storage; only NCCL submission is grouped. Async mode records one completion
+event for the run and associates it with every participating group so the
+existing sliding drain releases each gradient buffer after the grouped work.
+
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
 directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:
