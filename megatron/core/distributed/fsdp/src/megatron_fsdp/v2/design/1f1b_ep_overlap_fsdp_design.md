@@ -280,16 +280,6 @@ reduce-scatter a router/wgrad tensor while its producer stream is still
 writing it.  The wait is GPU-asynchronous and is used for both delayed and
 inline wgrad callback paths.
 
-The same dependency is required at the forward boundary.  The final forward
-node queues its work on the node stream, while the manual
-`mfsdp_post_forward_hook` runs from the caller stream.  Before resharding and
-releasing an all-gather buffer, the caller stream waits for the node stream.
-Otherwise the CUDA allocator may recycle parameter storage while a forward
-kernel on the compute or communication stream still reads it.  Selective
-LayerNorm recompute makes this race especially visible because backward
-rebinds the same parameter views after the stale forward allocation has been
-reused.
-
 Force-balanced performance runs have an additional compatibility fallback.
 When Megatron-FSDP v2 and full-iteration CUDA graphs are combined with forced
 router load balancing, argument validation disables router fusion and auxiliary
