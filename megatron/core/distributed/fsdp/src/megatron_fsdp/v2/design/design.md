@@ -349,6 +349,11 @@ persistent shard into the temporary full buffer. Gradient reduction still copies
 the temporary full gradient into the persistent optimizer-facing shard; it skips only the
 size-one reduce-scatter. This distinction is required for correct micro-batch accumulation.
 
+For `optim_grads_params`, a singleton group keeps only its model and transpose weight buffers
+local. Those buffers are already complete and can remain bound across micro-batches, so they do
+not need temporary all-gather storage. Main-weight and main-gradient buffers retain the standard
+distributed layout, preserving optimizer views and micro-batch gradient accumulation.
+
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
 directly into `param.main_grad` (bypassing `.grad`). Two flags coordinate this:

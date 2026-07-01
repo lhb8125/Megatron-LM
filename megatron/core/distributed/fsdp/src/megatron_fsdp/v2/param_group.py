@@ -161,7 +161,10 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
+        # A singleton DP group already owns the complete compute weight. Keep
+        # that weight local across micro-batches, while retaining the normal
+        # sharded main-weight and gradient paths for optimizer semantics.
+        shard_weights = s == "optim_grads_params" and self._dp_world_size > 1
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 

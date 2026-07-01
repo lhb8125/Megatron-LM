@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
@@ -226,6 +227,26 @@ def test_singleton_reduce_grad_accumulates_locally(singleton_group, monkeypatch)
     buffer.fetch_buffer().fill_(3)
     buffer.reduce_grad()
     assert torch.equal(buffer.data, torch.full_like(buffer.data, 5))
+
+
+def test_singleton_param_group_keeps_only_compute_weights_local(singleton_group):
+    rank = torch.distributed.get_rank()
+    device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
+    mesh = DeviceMesh.from_group("cuda", singleton_group, mesh=[rank])
+    param = nn.Parameter(torch.arange(16, dtype=torch.bfloat16, device=device))
+    group = ParameterGroup(
+        params=[param],
+        mesh=mesh,
+        param_group_id=ParamGroupIdx(2, 0),
+        mp_policy=MixedPrecisionPolicy(
+            main_params_dtype=torch.float32, main_grads_dtype=torch.bfloat16
+        ),
+        sharding_strategy="optim_grads_params",
+    )
+
+    assert not group.model_weight_buffer.is_distributed
+    assert group.main_weight_buffer.is_distributed
+    assert group.main_grad_buffer.is_distributed
 
 
 @pytest.mark.parametrize("strategy", ["no_shard", "optim", "optim_grads", "optim_grads_params"])
