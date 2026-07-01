@@ -665,9 +665,16 @@ class FSDPModule:
             # shards may be gathered, causing convergence divergence.
             stream.wait_stream(torch.cuda.current_stream())
 
-        # Unshard this module and optionally prefetch next modules in the forward/backward pass
+        # Buffer orientation and traversal direction are independent during
+        # activation recompute: backward may need a forward-oriented weight
+        # buffer, but the next module is still the previous layer in forward
+        # order. Derive traversal from the lifecycle phase, not bwd_pass.
+        prefetch_bwd_pass = ctx.backward_phase
+
+        # Unshard this module and optionally prefetch the next module in the
+        # active forward/backward traversal.
         if async_op:
-            prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=bwd_pass)
+            prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=prefetch_bwd_pass)
         else:
             prefetch_modules = []
         for module in [self] + prefetch_modules:
@@ -676,7 +683,7 @@ class FSDPModule:
                 for param_group in module._fsdp_param_groups
             ):
                 continue
-            if bwd_pass and id(module) in ctx.backward_done_modules:
+            if prefetch_bwd_pass and id(module) in ctx.backward_done_modules:
                 continue  # Skip prefetch for modules whose backward is already done
 
             # Unshard parameters for this module.  Coalesce consecutive all-gathers

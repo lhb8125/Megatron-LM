@@ -9,6 +9,7 @@ import torch
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import _FSDPRootContext
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
@@ -51,8 +52,10 @@ class TestFSDPV2LayerNormRecompute:
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
+        original_get_prefetch = _FSDPRootContext.get_prefetch_next_modules
         recompute_stream_pairs = []
         recorded_consumer_streams = []
+        prefetch_directions = []
 
         def checkpoint_with_stream(checkpoint, *args, **kwargs):
             if checkpoint.debug_name is not None:
@@ -70,11 +73,16 @@ class TestFSDPV2LayerNormRecompute:
             recorded_consumer_streams.append(stream)
             return original_record_stream(buffer, stream)
 
+        def get_prefetch_with_check(ctx, module, bwd_pass=False):
+            prefetch_directions.append((ctx.backward_phase, bwd_pass))
+            return original_get_prefetch(ctx, module, bwd_pass=bwd_pass)
+
         monkeypatch.setattr(CheckpointWithoutOutput, "checkpoint", checkpoint_with_stream)
         monkeypatch.setattr(CheckpointWithoutOutput, "_recompute", recompute_with_stream_check)
         monkeypatch.setattr(
             DataParallelBuffer, "record_unsharded_buffer_stream", record_stream_with_check
         )
+        monkeypatch.setattr(_FSDPRootContext, "get_prefetch_next_modules", get_prefetch_with_check)
         mxfp8_flags = [
             flag
             for flag in get_valid_fp8_flags()
@@ -161,6 +169,12 @@ class TestFSDPV2LayerNormRecompute:
                     recompute_stream in recorded_consumer_streams
                     for _, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute stream must own the unsharded weight-buffer lifetime"
+                assert any(backward_phase for backward_phase, _ in prefetch_directions)
+                assert all(
+                    prefetch_bwd_pass
+                    for backward_phase, prefetch_bwd_pass in prefetch_directions
+                    if backward_phase
+                ), "Every backward-phase prefetch must follow backward module order"
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

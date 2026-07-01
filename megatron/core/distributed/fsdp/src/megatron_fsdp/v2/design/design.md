@@ -157,9 +157,12 @@ stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
 if async_op:
     stream.wait_stream(torch.cuda.current_stream())
 
-# Build the work list: self + (optionally) next module to prefetch
+# Build the work list: self + (optionally) next module to prefetch.
+# bwd_pass selects the weight-buffer orientation. The lifecycle phase selects
+# traversal direction, since backward recompute also requests forward buffers.
+prefetch_bwd_pass = ctx.backward_phase
 if async_op:
-    prefetch = _get_prefetch_next_modules(bwd_pass)   # returns [next_module] or []
+    prefetch = _get_prefetch_next_modules(prefetch_bwd_pass)
 else:
     prefetch = []
 
@@ -213,6 +216,12 @@ all-gather. This ensures that writes performed on the main stream (e.g., reshard
 previous forward, or tensor-parallel slice updates) are fully visible to the all-gather
 kernel. Without this barrier, stale or partially-written parameter shards may be read by
 the NCCL collective, causing convergence divergence.
+
+**Backward recompute prefetch direction.** `bwd_pass` selects which mixed-precision
+weight buffers a module needs, but it does not always identify traversal direction.
+LayerNorm activation recompute runs during backward while requesting the forward-oriented
+rowwise buffer. Prefetch therefore follows `ctx.backward_phase`; otherwise the rowwise
+request walks forward and can re-unshard modules whose backward has already completed.
 
 **NVTX profiling.** `unshard()`, `reshard()`, and `reduce_grad()` each push/pop a
 `torch.cuda.nvtx` range (`"MFSDP unshard"`, `"MFSDP reshard"`, `"MFSDP reduce_grad"`)
