@@ -131,27 +131,57 @@ def test_singleton_reduce_grad_detection(world_size, expected):
         (
             "optim_grads_params",
             True,
-            [(1, False, "input_layernorm.weight"), (0, False, "layer_norm_bias")],
+            [(1, False, "input_layernorm.weight", 4096), (0, False, "layer_norm_bias", 1)],
             "optim",
         ),
         (
             "optim_grads_params",
             True,
-            [(1, False, "self_attention.linear_qkv.layer_norm_weight")],
+            [(1, False, "self_attention.linear_qkv.layer_norm_weight", 4096)],
             "optim",
         ),
-        ("optim_grads_params", True, [(2, False, "input_layernorm.weight")], "optim_grads_params"),
-        ("optim_grads_params", True, [(1, False, "mlp.linear_fc1.weight")], "optim_grads_params"),
-        ("optim_grads_params", True, [(1, True, "input_layernorm.weight")], "optim_grads_params"),
-        ("optim_grads_params", False, [(1, False, "input_layernorm.weight")], "optim_grads_params"),
-        ("optim_grads", True, [(1, False, "input_layernorm.weight")], "optim_grads"),
+        (
+            "optim_grads_params",
+            True,
+            [(2, False, "input_layernorm.weight", 4096)],
+            "optim_grads_params",
+        ),
+        (
+            "optim_grads_params",
+            True,
+            [(1, False, "mlp.linear_fc1.weight", 4096)],
+            "optim_grads_params",
+        ),
+        (
+            "optim_grads_params",
+            True,
+            [(1, True, "input_layernorm.weight", 4096)],
+            "optim_grads_params",
+        ),
+        (
+            "optim_grads_params",
+            False,
+            [(1, False, "input_layernorm.weight", 4096)],
+            "optim_grads_params",
+        ),
+        ("optim_grads", True, [(1, False, "input_layernorm.weight", 4096)], "optim_grads"),
+        (
+            "optim_grads_params",
+            True,
+            [(1, False, "input_layernorm.weight", 16_777_216)],
+            "optim_grads_params",
+        ),
     ],
 )
 def test_fp8_module_1d_param_group_sharding_strategy(requested, fp8_enabled, group_specs, expected):
     class FakeParam:
-        def __init__(self, ndim, is_fp8):
+        def __init__(self, ndim, is_fp8, numel):
             self.ndim = ndim
             self.is_fp8 = is_fp8
+            self._numel = numel
+
+        def numel(self):
+            return self._numel
 
     class FakePolicy:
         fp8 = type("FakeFP8Policy", (), {"enabled": fp8_enabled})()
@@ -160,11 +190,15 @@ def test_fp8_module_1d_param_group_sharding_strategy(requested, fp8_enabled, gro
         def is_fp8_param(param):
             return param.is_fp8
 
-    params = [FakeParam(ndim, is_fp8) for ndim, is_fp8, _ in group_specs]
-    param_names = [name for _, _, name in group_specs]
+    params = [FakeParam(ndim, is_fp8, numel) for ndim, is_fp8, _, numel in group_specs]
+    param_names = [name for _, _, name, _ in group_specs]
     assert (
         fsdp_module_impl._select_param_group_sharding_strategy(
-            params, param_names, mp_policy=FakePolicy(), requested_sharding_strategy=requested
+            params,
+            param_names,
+            mp_policy=FakePolicy(),
+            normalization_size_limit=4096,
+            requested_sharding_strategy=requested,
         )
         == expected
     )

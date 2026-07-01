@@ -75,11 +75,20 @@ def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
 
 
 def _select_param_group_sharding_strategy(
-    params, param_names, *, mp_policy: MixedPrecisionPolicy, requested_sharding_strategy: str
+    params,
+    param_names,
+    *,
+    mp_policy: MixedPrecisionPolicy,
+    normalization_size_limit: Optional[int],
+    requested_sharding_strategy: str,
 ) -> str:
     """Keep small non-quantized 1D state resident beside FP8 module weights."""
     assert len(params) == len(param_names)
-    if requested_sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+    if (
+        requested_sharding_strategy != "optim_grads_params"
+        or not mp_policy.fp8.enabled
+        or normalization_size_limit is None
+    ):
         return requested_sharding_strategy
 
     def is_normalization_param_name(name: str) -> bool:
@@ -87,7 +96,10 @@ def _select_param_group_sharding_strategy(
         return "layernorm" in normalized_name or "rmsnorm" in normalized_name
 
     if all(
-        param.ndim <= 1 and not mp_policy.is_fp8_param(param) and is_normalization_param_name(name)
+        param.ndim <= 1
+        and param.numel() <= normalization_size_limit
+        and not mp_policy.is_fp8_param(param)
+        and is_normalization_param_name(name)
         for param, name in zip(params, param_names)
     ):
         return "optim"
@@ -1245,6 +1257,8 @@ def _get_module_fsdp_param_groups(
     """
     param_groups = {}
     param_names = {param: name for name, param in module.named_parameters()}
+    module_config = getattr(module, "config", None)
+    normalization_size_limit = getattr(module_config, "hidden_size", None)
     managed_params = [
         param
         for param in module.parameters()
@@ -1266,6 +1280,7 @@ def _get_module_fsdp_param_groups(
             params,
             [param_names[param] for param in params],
             mp_policy=mp_policy,
+            normalization_size_limit=normalization_size_limit,
             requested_sharding_strategy=sharding_strategy,
         )
         fsdp_param_groups.append(

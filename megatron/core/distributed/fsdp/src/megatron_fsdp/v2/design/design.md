@@ -459,7 +459,8 @@ module-wide `optim_grads_params` strategy, the small BF16 group otherwise adds
 one independent parameter all-gather and gradient reduce-scatter per layer and
 per micro-batch. `_get_module_fsdp_param_groups()` therefore assigns `optim`
 only to non-FP8 groups whose parameters are all one-dimensional (or scalar),
-whose fully-qualified names identify LayerNorm/RMSNorm state, and when FP8
+whose fully-qualified names identify LayerNorm/RMSNorm state, whose individual
+sizes do not exceed the owning module's configured hidden size, and when FP8
 parameter gather is enabled by the mixed-precision policy. Matrix weights,
 including physically flattened GroupedLinear/TE parameters, quantized tensors,
 and policies without FP8 parameter gather retain the requested strategy. The
