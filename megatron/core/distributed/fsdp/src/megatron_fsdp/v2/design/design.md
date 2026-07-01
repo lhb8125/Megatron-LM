@@ -147,7 +147,9 @@ module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
 ### `FSDPModule.unshard(async_op, bwd_pass)`
 
 ```python
-stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
+caller_stream = torch.cuda.current_stream()
+current_stream_unshard = os.environ.get("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "0") == "1"
+stream = ctx.ag_stream if async_op and not current_stream_unshard else caller_stream
 
 # *** Critical: synchronize ag_stream with current_stream before launching AG ***
 # This ensures main-stream writes to parameter data (e.g. reshard after forward,
@@ -245,6 +247,13 @@ by the previous module), it just waits on the event and skips re-launching the A
 the current module's asynchronous all-gather on `ag_stream` and its event wait while removing
 only the adjacent-module lookahead. It isolates current-module async unshard from neighbor
 prefetch and is not a supported production configuration.
+
+Two additional temporary diagnostics split the current-module path. With neighbor prefetch
+disabled, `MCORE_FSDP_POST_UNSHARD_ON_CALLER=1` leaves the all-gather on `ag_stream` but waits
+for its event before running TE post-unshard processing on the caller stream, matching v1's
+ordering. `MCORE_FSDP_CURRENT_STREAM_UNSHARD=1` keeps the async/event control flow but dispatches
+the whole current unshard on the caller stream. Neither switch is a supported production
+configuration.
 
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full

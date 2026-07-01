@@ -47,11 +47,17 @@ class TestFSDPV2LayerNormRecompute:
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
-    @pytest.mark.parametrize("disable_neighbor_prefetch", [False, True])
-    def test_mxfp8_layernorm_recompute(self, monkeypatch, disable_neighbor_prefetch):
+    @pytest.mark.parametrize(
+        "diagnostic_mode", ["default", "no_neighbor", "post_unshard_caller", "current_stream"]
+    )
+    def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
         monkeypatch.setenv("MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK", "1")
-        if disable_neighbor_prefetch:
+        if diagnostic_mode != "default":
             monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
+        if diagnostic_mode == "post_unshard_caller":
+            monkeypatch.setenv("MCORE_FSDP_POST_UNSHARD_ON_CALLER", "1")
+        if diagnostic_mode == "current_stream":
+            monkeypatch.setenv("MCORE_FSDP_CURRENT_STREAM_UNSHARD", "1")
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
@@ -172,7 +178,7 @@ class TestFSDPV2LayerNormRecompute:
                     recompute_stream in recorded_consumer_streams
                     for _, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute stream must own the unsharded weight-buffer lifetime"
-                if disable_neighbor_prefetch:
+                if diagnostic_mode != "default":
                     assert not prefetch_directions
                 else:
                     assert any(backward_phase for backward_phase, _ in prefetch_directions)
