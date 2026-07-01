@@ -273,6 +273,14 @@ current module's event wait, the caller stream binds the materialized full buffe
 post-unshard processing. This tests whether mutating parameter wrappers before collective
 readiness is the corruption point. It is not a supported production configuration.
 
+`MCORE_FSDP_RETAIN_WEIGHT_STORAGE=1` is a temporary eager-only diagnostic for the
+`StorageFreeingBucketAllocator`. On free, model and transpose weight buckets are removed from
+the allocator without resizing their storage to zero. Existing parameter views therefore keep
+the old generation alive while the next all-gather writes a distinct allocation. Gradient
+buckets retain the normal storage-freeing behavior. This tests whether async unshard overwrites
+storage that an earlier parameter view still consumes. It is not a supported production
+configuration.
+
 **Cross-stream buffer lifetime.** Waiting on the all-gather event establishes
 producer-to-consumer ordering, but does not by itself keep the temporary full
 buffer alive while the consumer kernel runs asynchronously. After readiness,

@@ -8,6 +8,9 @@ import torch
 
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.allocator import (
+    StorageFreeingBucketAllocator,
+)
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import _FSDPRootContext
 from megatron.core.enums import Fp8Recipe
@@ -58,6 +61,7 @@ class TestFSDPV2LayerNormRecompute:
             "global_sync_fsdp_async",
             "global_overlap_fsdp_sync",
             "defer_bind",
+            "retain_weight_storage",
         ],
     )
     def test_mxfp8_layernorm_recompute(self, monkeypatch, diagnostic_mode):
@@ -68,6 +72,7 @@ class TestFSDPV2LayerNormRecompute:
             "current_stream",
             "no_event",
             "defer_bind",
+            "retain_weight_storage",
         }
         if diagnostic_mode in no_neighbor_modes:
             monkeypatch.setenv("MCORE_FSDP_DISABLE_NEIGHBOR_PREFETCH", "1")
@@ -83,6 +88,9 @@ class TestFSDPV2LayerNormRecompute:
             monkeypatch.setenv("MCORE_FSDP_DISABLE_UNSHARD_PREFETCH", "1")
         if diagnostic_mode == "defer_bind":
             monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
+        if diagnostic_mode == "retain_weight_storage":
+            monkeypatch.setenv("MCORE_FSDP_DEFER_UNSHARD_BIND", "1")
+            monkeypatch.setenv("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "1")
         original_checkpoint = CheckpointWithoutOutput.checkpoint
         original_recompute = CheckpointWithoutOutput._recompute
         original_record_stream = DataParallelBuffer.record_unsharded_buffer_stream
@@ -222,3 +230,31 @@ class TestFSDPV2LayerNormRecompute:
         except Exception:
             traceback.print_exc()
             raise
+
+    def test_retain_weight_storage_uses_distinct_generation(self, monkeypatch):
+        monkeypatch.setenv("MCORE_FSDP_RETAIN_WEIGHT_STORAGE", "1")
+        allocator = StorageFreeingBucketAllocator()
+        device = torch.device("cuda", torch.cuda.current_device())
+        size = 1024
+
+        weight_key = ((0, 0), "model_weight")
+        old_weight = allocator.allocate(
+            key=weight_key, size=size, dtype=torch.uint8, device=device
+        ).data
+        old_weight_view = old_weight[:]
+        old_weight_ptr = old_weight.data_ptr()
+        allocator.free(weight_key)
+        assert old_weight_view._typed_storage()._size() == size
+
+        new_weight = allocator.allocate(
+            key=weight_key, size=size, dtype=torch.uint8, device=device
+        ).data
+        assert new_weight.data_ptr() != old_weight_ptr
+
+        grad_key = ((0, 0), "main_grad")
+        old_grad = allocator.allocate(
+            key=grad_key, size=size, dtype=torch.bfloat16, device=device
+        ).data
+        old_grad_view = old_grad[:]
+        allocator.free(grad_key)
+        assert old_grad_view._typed_storage()._size() == 0
