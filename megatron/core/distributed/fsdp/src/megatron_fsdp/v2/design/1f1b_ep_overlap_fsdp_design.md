@@ -548,6 +548,13 @@ its consumer stream wait for the parameter all-gather stream after unshard.
 This deliberately waits for all earlier work on that stream and is therefore a
 diagnostic, not the final fine-grained dependency implementation.
 
+Set `MCORE_CHECKPOINT_RECOMPUTE_FORCE_UNSHARD` to the checkpoint name for a
+stronger readiness/lifetime ablation. Before the selected LayerNorm recompute,
+the owning FSDP layer discards its cached unsharded state and performs fresh
+synchronous backward- and forward-phase unshards on the consumer stream. This
+is intentionally expensive and exists only to distinguish stale module-global
+unshard state from a LayerNorm or checkpoint-storage failure.
+
 Set `MCORE_MOE_ROUTER_INPUT_LIFETIME_CHECK=<layer-number>` for a short eager
 combined-1F1B run to retain that layer's router input and compare it against an
 immutable clone at the preprocess, dispatch, expert, combine, and backward
