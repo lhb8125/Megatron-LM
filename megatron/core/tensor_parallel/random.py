@@ -870,7 +870,7 @@ class CheckpointWithoutOutput(object):
             self.debug_forward_outputs = tuple(output.detach().clone() for output in self.outputs)
             if self.debug_module is not None:
                 self.debug_forward_parameters = tuple(
-                    (name, parameter.detach().clone())
+                    (name, parameter, parameter.detach().clone(), parameter.data_ptr())
                     for name, parameter in self.debug_module.named_parameters()
                 )
             for output, reference in zip(self.outputs, self.debug_forward_outputs):
@@ -941,10 +941,18 @@ class CheckpointWithoutOutput(object):
             if self.debug_module is not None:
                 recompute_parameters = tuple(self.debug_module.named_parameters())
                 assert len(recompute_parameters) == len(self.debug_forward_parameters)
-                for (name, parameter), (reference_name, reference) in zip(
-                    recompute_parameters, self.debug_forward_parameters
-                ):
+                for (name, parameter), (
+                    reference_name,
+                    reference_parameter,
+                    reference,
+                    reference_data_ptr,
+                ) in zip(recompute_parameters, self.debug_forward_parameters):
                     assert name == reference_name
+                    assert parameter is reference_parameter, (
+                        f"Checkpoint parameter object was not rebound at {self.debug_name} "
+                        f"parameter={name}: recompute_type={type(parameter).__name__}, "
+                        f"forward_type={type(reference_parameter).__name__}"
+                    )
                     required_bytes = (
                         parameter.storage_offset() + parameter.numel()
                     ) * parameter.element_size()
@@ -958,10 +966,16 @@ class CheckpointWithoutOutput(object):
                     ).all(), (
                         f"Non-finite checkpoint parameter at {self.debug_name} parameter={name}"
                     )
-                    assert torch.equal(parameter, reference), (
-                        f"Checkpoint parameter differs from forward at {self.debug_name} "
-                        f"parameter={name}"
-                    )
+                    if not torch.equal(parameter, reference):
+                        max_abs_diff = (parameter.float() - reference.float()).abs().max().item()
+                        raise AssertionError(
+                            f"Checkpoint parameter differs from forward at {self.debug_name} "
+                            f"parameter={name}: data_ptr={parameter.data_ptr()}, "
+                            f"forward_data_ptr={reference_data_ptr}, "
+                            f"range=[{parameter.min().item()}, {parameter.max().item()}], "
+                            f"forward_range=[{reference.min().item()}, "
+                            f"{reference.max().item()}], max_abs_diff={max_abs_diff}"
+                        )
             for index, (output, reference) in enumerate(zip(outputs, self.debug_forward_outputs)):
                 assert torch.isfinite(
                     output
