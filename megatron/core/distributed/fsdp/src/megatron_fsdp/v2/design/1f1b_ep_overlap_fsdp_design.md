@@ -414,6 +414,17 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
+### 3.9 Singleton expert-DP collectives
+
+Expert modules always remain independent FSDP units on the expert-DP mesh. This matters for
+EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameters into the
+parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
+
+When the expert-DP process group has world size one, `DataParallelBuffer` preserves the normal
+unsharded and optimizer-facing buffers but implements all-gather and reduce-scatter as local
+copy, scale, and accumulation operations. This removes redundant NCCL kernels without changing
+the FSDP unit boundary, allocator lifetime, or gradient-accumulation semantics.
+
 ---
 
 ## 4. Hook behavior — v2 implementation

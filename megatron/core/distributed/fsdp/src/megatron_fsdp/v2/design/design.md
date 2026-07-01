@@ -28,6 +28,15 @@ registered with `with_kwargs=True`. The fused path passes empty args/kwargs
 because these hooks may trigger parameter all-gathers but may not modify
 inputs; any non-`None` hook return remains an error.
 
+### Singleton Process-Group Fast Path
+
+Expert modules remain independent FSDP units even when expert data parallelism has world size
+one. This preserves their expert-DP mesh, DTensor placement, and gradient-scaling factor when
+the dense DP mesh is larger. `DataParallelBuffer` skips NCCL all-gather, reduce-scatter, and
+all-reduce calls for singleton process groups, replacing them with the equivalent local copy,
+scaling, and accumulation while retaining the same buffers and allocator lifetimes. The
+unshard helper also avoids entering a coalescing manager when its process group is singleton.
+
 ---
 
 ## `_FSDPRootContext` — Shared Coordination Object
