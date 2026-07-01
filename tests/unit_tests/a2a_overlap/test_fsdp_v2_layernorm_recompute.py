@@ -158,11 +158,39 @@ class TestFSDPV2LayerNormRecompute:
                     child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
                 ]
                 assert expert_units
-                assert all(not isinstance(child, FSDPModule) for child in expert_units)
+                assert all(isinstance(child, FSDPModule) for child in expert_units)
+                expert_dp_groups = {
+                    param_group.dp_group
+                    for child in expert_units
+                    for param_group in child._fsdp_param_groups
+                }
+                assert expert_dp_groups
+                assert all(
+                    torch.distributed.get_world_size(group) == 1 for group in expert_dp_groups
+                )
                 assert all(
                     isinstance(layer, FSDPModule) for layer in recompute_model.decoder.layers
                 )
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
+
+                singleton_collectives = []
+                original_all_gather = torch.distributed.all_gather_into_tensor
+                original_reduce_scatter = torch.distributed.reduce_scatter_tensor
+
+                def track_all_gather(*args, **kwargs):
+                    if kwargs.get("group") in expert_dp_groups:
+                        singleton_collectives.append("all_gather")
+                    return original_all_gather(*args, **kwargs)
+
+                def track_reduce_scatter(*args, **kwargs):
+                    if kwargs.get("group") in expert_dp_groups:
+                        singleton_collectives.append("reduce_scatter")
+                    return original_reduce_scatter(*args, **kwargs)
+
+                monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", track_all_gather)
+                monkeypatch.setattr(
+                    torch.distributed, "reduce_scatter_tensor", track_reduce_scatter
+                )
 
                 rank = torch.distributed.get_rank()
                 recompute_loss = overlap_train_step(
@@ -185,6 +213,7 @@ class TestFSDPV2LayerNormRecompute:
                     forward_stream == recompute_stream
                     for forward_stream, recompute_stream in recompute_stream_pairs
                 ), "LayerNorm recompute must run on its original compute stream"
+                assert not singleton_collectives
 
                 del recompute_fsdp, recompute_opt
                 gc.collect()

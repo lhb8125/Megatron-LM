@@ -38,7 +38,7 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
     """Unshard one same-process-group buffer run and order async completion."""
     cm = (
         _coalescing_manager(dp_group, async_ops=async_op)
-        if len(weight_buffers) > 1
+        if len(weight_buffers) > 1 and getattr(weight_buffers[0], "_dp_world_size", 2) > 1
         else nullcontext()
     )
     with cm as coalescing_event:

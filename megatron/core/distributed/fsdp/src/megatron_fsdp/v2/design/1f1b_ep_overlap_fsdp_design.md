@@ -414,15 +414,16 @@ embedding backward. Embedding inputs are integer token IDs and do not require gr
 the post-backward wrapper may not be inserted there; the root final callback remains the
 required fallback and handles that unit after embedding backward.
 
-### 3.9 Singleton expert FSDP units
+### 3.9 Singleton expert-DP collectives
 
-The default v2 wrapping policy omits nested `TEGroupedMLP` and `SequentialMLP` units when both
-the dense DP and expert DP meshes have size one. Their parameters are then owned by the parent
-`TransformerLayer`, whose fine-grained hooks still unshard them before direct attention/MLP
-schedule calls. Since both placements and both gradient-scaling factors are identical at
-world size one, this preserves optimizer semantics while removing redundant nested-unit
-all-gather and reduce-scatter collectives. Multi-rank DP or expert-DP configurations retain
-the separate expert units and expert mesh.
+Expert modules always remain independent FSDP units on the expert-DP mesh. This matters for
+EP-heavy topologies such as dense DP=64 and expert DP=1: moving expert parameters into the
+parent `TransformerLayer` would incorrectly apply the dense-DP placement and scaling rules.
+
+When the expert-DP process group has world size one, `DataParallelBuffer` preserves the normal
+unsharded and optimizer-facing buffers but implements all-gather and reduce-scatter as local
+copy, scale, and accumulation operations. This removes redundant NCCL kernels without changing
+the FSDP unit boundary, allocator lifetime, or gradient-accumulation semantics.
 
 ---
 

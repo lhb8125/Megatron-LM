@@ -28,19 +28,14 @@ registered with `with_kwargs=True`. The fused path passes empty args/kwargs
 because these hooks may trigger parameter all-gathers but may not modify
 inputs; any non-`None` hook return remains an error.
 
-### Singleton Expert Unit Coalescing
+### Singleton Process-Group Fast Path
 
-The adapter normally creates nested `TEGroupedMLP` or `SequentialMLP` FSDP units so expert
-parameters use the expert-data-parallel mesh independently from dense parameters. When both
-the dense DP and expert DP meshes have size one, the two meshes have identical placement and
-gradient-scaling semantics: every rank already owns its complete local dense and expert
-parameters. In that case, the default wrapping policy leaves expert modules inside their
-parent `TransformerLayer` FSDP unit.
-
-This matches the v1 unit boundary and avoids a second unshard/reshard cycle with size-one
-all-gather and reduce-scatter collectives for every layer and micro-batch. Explicit
-`fsdp_unit_modules` remain authoritative, and nested expert units are still created whenever
-either mesh has more than one rank.
+Expert modules remain independent FSDP units even when expert data parallelism has world size
+one. This preserves their expert-DP mesh, DTensor placement, and gradient-scaling factor when
+the dense DP mesh is larger. `DataParallelBuffer` skips NCCL all-gather, reduce-scatter, and
+all-reduce calls for singleton process groups, replacing them with the equivalent local copy,
+scaling, and accumulation while retaining the same buffers and allocator lifetimes. The
+unshard helper also avoids entering a coalescing manager when its process group is singleton.
 
 ---
 
