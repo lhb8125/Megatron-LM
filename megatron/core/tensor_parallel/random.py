@@ -995,15 +995,17 @@ class CheckpointWithoutOutput(object):
                     assert torch.isfinite(
                         input_
                     ).all(), f"Non-finite checkpoint input at {self.debug_name} input={index}"
+            if self._debug_native_rmsnorm_enabled() or self._debug_stable_parameter_enabled():
+                assert self.debug_module is not None
+                from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
+                    mfsdp_forward_pre_hook,
+                )
+
+                mfsdp_forward_pre_hook(self.debug_module, inputs, {})
             self._bind_debug_parameter_storage()
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
                 if self._debug_native_rmsnorm_enabled():
                     assert self.debug_module is not None and len(inputs) == 1
-                    from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
-                        mfsdp_forward_pre_hook,
-                    )
-
-                    mfsdp_forward_pre_hook(self.debug_module, inputs, {})
                     weight = self.debug_module.weight
                     if getattr(self.debug_module, "zero_centered_gamma", False):
                         weight = weight + 1

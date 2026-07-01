@@ -553,7 +553,8 @@ only for short eager diagnostics.
 
 Set `MCORE_CHECKPOINT_RECOMPUTE_STABLE_PARAMETER` to the checkpoint name for a
 parameter-storage lifetime ablation. Immediately before recompute, the selected
-module's parameters are rebound to independent clones and remain bound through
+module first runs its FSDP pre-forward hook, then rebinds its parameters to
+independent clones that remain bound through
 the checkpoint's nested backward; the original FSDP-managed storage is restored
 afterward. If this removes the failure, the parameter values were valid when
 inspected but their backing storage did not remain valid for the asynchronous TE
