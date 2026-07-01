@@ -771,6 +771,12 @@ are freed via `_free_storage(p.data)`. The module holds DTensor shard views and 
 rebinds `.data` to the all-gathered buffer, so the original storage is dead and freeing it
 reduces peak memory during model construction.
 
+After all parameter groups have initialized, `fully_shard()` runs `gc.collect()` followed by
+`torch.cuda.empty_cache()`. This returns the dead original-parameter segments before persistent
+model buffers, paged-stash buffers, or CUDA-graph allocations can reuse a few holes and pin the
+rest of those expandable segments for the lifetime of training. The cleanup is once per wrapped
+FSDP module and mirrors the initialization cleanup in the v1 implementation.
+
 ---
 
 ## Configuration

@@ -37,6 +37,7 @@ Single-GPU tests:
         -k "test_double_shard_rejected or test_no_params_module"
 """
 
+import gc
 import sys
 from pathlib import Path
 
@@ -217,6 +218,27 @@ def _count_fsdp_modules(module):
 
 
 class TestFullyShardBasic:
+    def test_reclaims_original_parameter_cache_after_buffer_init(self, monkeypatch):
+        events = []
+        real_collect = gc.collect
+        real_empty_cache = torch.cuda.empty_cache
+
+        def collect():
+            events.append("collect")
+            return real_collect()
+
+        def empty_cache():
+            events.append("empty_cache")
+            return real_empty_cache()
+
+        monkeypatch.setattr(gc, "collect", collect)
+        monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
+
+        model = SimpleMLP(64).to(_device())
+        fully_shard(model)
+
+        assert events[-2:] == ["collect", "empty_cache"]
+
     def test_module_class_becomes_fsdp(self):
         """fully_shard should dynamically convert the module class to a FSDPModule mixin."""
         torch.manual_seed(42)

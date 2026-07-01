@@ -20,6 +20,7 @@ The implementation is split across:
 - hooks.py: forward/backward hook registration
 """
 
+import gc
 from typing import Callable, Optional
 
 import torch
@@ -122,6 +123,11 @@ def fully_shard(
         gradient_scaling_factor=gradient_scaling_factor,
         sharding_strategy=sharding_strategy,
     )
+    # ParameterGroup initialization copies values into FSDP-owned buffers and
+    # frees the original parameter storages. Return those dead cached segments
+    # before later persistent allocations can pin their expandable pages.
+    gc.collect()
+    torch.cuda.empty_cache()
     module._init_fsdp_state(
         enable_unshard_prefetch=enable_unshard_prefetch,
         enable_async_reduce_grad=enable_async_reduce_grad,
