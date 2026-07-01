@@ -401,6 +401,19 @@ root pre-forward hook is designed to be called repeatedly — it is idempotent
 (both the root-level bookkeeping and the per-module `unshard()` are safe to
 repeat).
 
+### 3.8 Untied embedding and output units
+
+The v2 adapter makes the direct owners of untied embedding and output weights separate FSDP
+units. This prevents their large buffers from being concatenated into the root unit and lets
+the full-iteration trace pool reuse stable slots across their non-overlapping execution.
+
+Unlike TransformerLayer and TEGroupedMLP units, these native modules keep the standard
+autograd post-backward callback when `delay_wgrad_compute=True`. Output-layer wgrad is complete
+when that callback fires, so its grad buffer can be reduced and logically released before
+embedding backward. Embedding inputs are integer token IDs and do not require gradients, so
+the post-backward wrapper may not be inserted there; the root final callback remains the
+required fallback and handles that unit after embedding backward.
+
 ---
 
 ## 4. Hook behavior — v2 implementation

@@ -10,6 +10,7 @@ import torch
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as fsdp_module_impl
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import FSDPModule
 from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
@@ -154,6 +155,9 @@ class TestFSDPV2LayerNormRecompute:
                     module=recompute_model,
                     fsdp_unit_modules=[TransformerLayer],
                 )
+                assert recompute_config.untie_embeddings_and_output_weights
+                assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
+                assert isinstance(recompute_model.output_layer, FSDPModule)
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
                 rank = torch.distributed.get_rank()

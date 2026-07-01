@@ -123,6 +123,20 @@ for child in self.modules():
 `forward_order` is **static** (module tree topology, computed once). There is no first-pass
 dynamic recording phase.
 
+### Untied embedding and output FSDP units
+
+For ZeRO-3, the MCore adapter wraps modules that directly own parameters marked
+`is_embedding_or_output_parameter` as child FSDP units when embeddings and output weights are
+untied. Without this split, both large matrices remain in the root parameter group even though
+they execute at opposite ends of the iteration. Full-iteration CUDA graphs would then keep a
+concatenated root weight slot and a concatenated root gradient slot resident for every replay.
+
+The child units share the root `TracePoolAllocator`, so non-overlapping embedding/output weight
+and gradient lifetimes can map to the same stable slots. These units retain the normal autograd
+post-backward callback even when TransformerLayer callbacks are skipped for delayed TE wgrad:
+their native embedding/output gradients are not delayed. Tied embeddings are excluded because
+the same parameter may be consumed by two owner modules.
+
 **Safety constraint.** `_init_fsdp_state()` must be called **before** any forward/backward pass
 runs.  The method includes a runtime guard that rejects re-initialization if any child
 FSDPModule is still unsharded (`unshard_done_events` live) or has pending reduce-scatter

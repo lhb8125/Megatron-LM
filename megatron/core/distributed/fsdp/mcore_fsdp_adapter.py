@@ -68,6 +68,23 @@ from .checkpoint import _propagate_chunk_metadata_to_state_dict
 logger = logging.getLogger(__name__)
 
 
+def _get_embedding_output_fsdp_units(module: nn.Module) -> List[nn.Module]:
+    """Return disjoint modules that directly own untied embedding/output weights."""
+    units = []
+    seen_params = set()
+    for candidate in module.modules():
+        params = [
+            param
+            for param in candidate.parameters(recurse=False)
+            if getattr(param, "is_embedding_or_output_parameter", False)
+        ]
+        if not params or any(param in seen_params for param in params):
+            continue
+        units.append(candidate)
+        seen_params.update(params)
+    return units
+
+
 class FullyShardedDataParallel(_BaseDataParallel):
     """
     Fully Sharded Data Parallel (FSDP) wrapper for the Megatron model.
@@ -317,6 +334,28 @@ class FullyShardedDataParallel(_BaseDataParallel):
             dp_world_size = pg_collection.dp.size()
             gradient_scaling_factor = 1.0 / dp_world_size
             expert_gradient_scaling_factor = 1.0 / dp_world_size
+
+        # Untied embedding and output weights execute at opposite ends of the
+        # iteration. Keeping both in the root FSDP unit concatenates them into
+        # one large weight/grad buffer whose full-CG slots cannot be reused.
+        # Shard their direct owner modules independently so the trace allocator
+        # can reuse those slots across their non-overlapping lifetimes. Their
+        # native wgrads are not delayed, so normal post-backward hooks are safe.
+        if (
+            ddp_config.use_megatron_fsdp
+            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
+            and getattr(config, "untie_embeddings_and_output_weights", False)
+        ):
+            standalone_kwargs = dict(kwargs)
+            standalone_kwargs["skip_backward_callback"] = False
+            for standalone_unit in _get_embedding_output_fsdp_units(module):
+                fully_shard(
+                    standalone_unit,
+                    mesh=dp_mesh,
+                    gradient_scaling_factor=gradient_scaling_factor,
+                    enable_cuda_graph=False,
+                    **standalone_kwargs,
+                )
 
         if fsdp_unit_modules is not None:
             cuda_graph_on = set(ddp_config.mfsdp_cuda_graph_modules)
