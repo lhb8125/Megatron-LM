@@ -402,18 +402,6 @@ class MixedPrecisionPolicy:
         """Return whether ``tensor`` needs an extra transpose/columnwise buffer."""
         return HAVE_TE_MXFP8 and isinstance(tensor, MXFP8Tensor)
 
-    def needs_post_unshard(self, params: List[torch.Tensor], *, bwd_pass: bool = False) -> bool:
-        """Return whether this phase must rebuild quantized parameter state."""
-        if not params:
-            return False
-        if self.is_nvfp4_param(params[0]):
-            return bwd_pass
-        if not self.is_fp8_param(params[0]):
-            return False
-        if self.needs_transpose_weight_buffer(params[0]):
-            return bwd_pass
-        return True
-
     def main_params_dtype_for_param(self, tensor: torch.Tensor) -> Optional[torch.dtype]:
         """Return the dtype for the optimizer main-weight buffer.
 
@@ -626,7 +614,7 @@ class MixedPrecisionPolicy:
 
         # ZeRO-1/2 refresh only this rank's slice; gather before next compute.
         def mark_dirty(buffer):
-            if buffer is not None and not buffer.is_distributed and buffer.dp_world_size > 1:
+            if buffer is not None and not buffer.is_distributed:
                 buffer.data._dirty = True
 
         if model_weight_buffer.sharding_strategy != "no_shard":

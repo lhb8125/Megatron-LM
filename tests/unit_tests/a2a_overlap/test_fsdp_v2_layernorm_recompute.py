@@ -15,7 +15,6 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
 from megatron.core.transformer import TransformerLayer
-from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     build_gpt_model,
@@ -154,21 +153,10 @@ class TestFSDPV2LayerNormRecompute:
                     config=recompute_config,
                     ddp_config=make_ddp_config(),
                     module=recompute_model,
-                    fsdp_unit_modules=[TransformerLayer, TEGroupedMLP],
+                    fsdp_unit_modules=[TransformerLayer],
                 )
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
-                expert_units = [
-                    child for child in recompute_model.modules() if isinstance(child, TEGroupedMLP)
-                ]
-                assert expert_units
-                assert all(isinstance(child, FSDPModule) for child in expert_units)
-                for expert_unit in expert_units:
-                    for param_group in expert_unit._fsdp_param_groups:
-                        assert not param_group.model_weight_buffer.is_distributed
-                        if param_group.transpose_weight_buffer is not None:
-                            assert not param_group.transpose_weight_buffer.is_distributed
-                        assert param_group.main_grad_buffer.is_distributed
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
                 rank = torch.distributed.get_rank()

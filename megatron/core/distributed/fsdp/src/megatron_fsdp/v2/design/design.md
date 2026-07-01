@@ -241,14 +241,6 @@ readiness event. This inserts the NCCL completion dependency into `ag_stream`;
 otherwise the readiness event can run before the backend stream finishes
 writing the gathered buffers.
 
-**Singleton compute-weight groups.** A size-one data-parallel group keeps model and transpose
-weight buffers local because its optimizer shard already spans the complete parameter. Main-weight
-and gradient buffers retain their normal sharded lifecycle, so optimizer and TE fused-wgrad
-semantics are unchanged. Quantized local buffers still participate in the logical unshard phase:
-`ParameterGroup` tracks whether recipe-specific `post_unshard()` processing has completed for the
-forward and backward phase independently. Reshard resets those phase flags. This preserves MXFP8
-columnwise rebuilds and paged-stash wrapper state without launching singleton weight all-gathers.
-
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
