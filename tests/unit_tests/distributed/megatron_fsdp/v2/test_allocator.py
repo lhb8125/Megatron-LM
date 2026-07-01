@@ -182,10 +182,7 @@ class TestTracePoolFullIterationGradBuffers:
         )
         with pytest.raises(RuntimeError, match="slot collision"):
             allocator.allocate(
-                key=(1, "main_grad"),
-                size=16,
-                dtype=torch.float32,
-                device=torch.device("cpu"),
+                key=(1, "main_grad"), size=16, dtype=torch.float32, device=torch.device("cpu")
             )
 
 

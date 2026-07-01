@@ -698,9 +698,7 @@ class DataParallelBuffer:
         caching-allocator behaviour.
         """
         if self.is_distributed:
-            logically_released = getattr(
-                self, "_unsharded_buffer_released_for_reuse", False
-            )
+            logically_released = getattr(self, "_unsharded_buffer_released_for_reuse", False)
             if self._unsharded_buffer is None or logically_released:
                 bucket = self.allocator.allocate(
                     key=self.alloc_key,
