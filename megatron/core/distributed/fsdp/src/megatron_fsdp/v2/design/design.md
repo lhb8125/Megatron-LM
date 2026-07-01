@@ -475,6 +475,14 @@ including scale and amax metadata updates, through
 retains its existing batched multi-tensor metadata copies; full-iteration CUDA
 graphs do not replace those copies with a separate per-tensor implementation.
 
+The root weight refresh defers FP8 updates from individual `ParameterGroup`s and
+batches all requests that use the same data-parallel process group into one TE
+call. Per-parameter master shards, logical offsets, and rowwise/columnwise target
+fragments are preserved. This lets MXFP8 pack its amax metadata into one buffer
+and issue one reduction per process group instead of one reduction per FSDP unit.
+Different process groups, non-FP8 copies, NVFP4 updates, and dirty-buffer marking
+retain their existing behavior.
+
 The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where
 `weight_buffers_for_unshard(..., bwd_pass=True)` selects it.

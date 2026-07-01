@@ -27,7 +27,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .allocator import BucketAllocator, TracePoolAllocator
-from .mixed_precision import MixedPrecisionPolicy
+from .mixed_precision import FP8WeightUpdate, MixedPrecisionPolicy, apply_fp8_weight_updates
 from .param_group import ParameterGroup
 from .utils import ParamGroupIdx, _replace_module_parameter
 
@@ -958,11 +958,13 @@ class FSDPModule:
 
     def _copy_main_weights_to_model_weights(self):
         """Copy main weight buffer to model weight buffer."""
+        fp8_weight_updates: List[FP8WeightUpdate] = []
         for child in self.modules():
             if not isinstance(child, FSDPModule):
                 continue
             for param_group in child._fsdp_param_groups:
-                param_group.copy_main_weights_to_model_weights()
+                param_group.copy_main_weights_to_model_weights(fp8_weight_updates)
+        apply_fp8_weight_updates(fp8_weight_updates)
 
     def _compute_per_param_norms(self) -> Dict[str, Dict[str, float]]:
         """
