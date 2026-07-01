@@ -117,6 +117,7 @@ class ParameterGroup:
         self.hsdp_wbuf: Optional[DataParallelBuffer] = None
         self.hsdp_gbuf: Optional[DataParallelBuffer] = None
         self.hsdp_comm_gbuf: Optional[DataParallelBuffer] = None
+        self._post_unshard_done = {False: False, True: False}
         # Initialize buffers and distributed parameters
         self._init_buffers()
 
@@ -161,7 +162,7 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
+        shard_weights = s == "optim_grads_params" and self._dp_world_size > 1
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
@@ -230,6 +231,7 @@ class ParameterGroup:
     def post_unshard(self, bwd_pass: bool = False):
         """Run post-unshard processing after required buffers have been gathered."""
         self.mp_policy.post_unshard(self.params, bwd_pass=bwd_pass)
+        self._post_unshard_done[bwd_pass] = True
 
     def unshard(self, bwd_pass: bool = False, bind_params: bool = True):
         """
@@ -251,6 +253,8 @@ class ParameterGroup:
                 continue
             if not weight_buffer.is_unsharded():
                 return False
+        if self.mp_policy.needs_post_unshard(self.params, bwd_pass=bwd_pass):
+            return self._post_unshard_done[bwd_pass]
         return True
 
     def reshard(self):
@@ -259,6 +263,8 @@ class ParameterGroup:
         if self.transpose_weight_buffer is not None:
             self.transpose_weight_buffer.reshard()
         self.mp_policy.post_reshard(self.params)
+        self._post_unshard_done[False] = False
+        self._post_unshard_done[True] = False
 
     @torch.no_grad()
     def copy_main_weights_to_model_weights(self):
