@@ -1262,6 +1262,9 @@ def validate_args(args, defaults={}):
             and args.moe_router_force_load_balancing
         ):
             disabled_router_features = []
+            if args.moe_router_fusion:
+                args.moe_router_fusion = False
+                disabled_router_features.append('moe_router_fusion')
             if args.moe_router_load_balancing_type != 'none':
                 args.moe_router_load_balancing_type = 'none'
                 args.moe_aux_loss_coeff = 0.0
@@ -1270,8 +1273,8 @@ def validate_args(args, defaults={}):
                 warn_rank_0(
                     'Megatron-FSDP v2 full-iteration CUDA graph with force-load-balanced '
                     f'routing disables {", ".join(disabled_router_features)} because these '
-                    'loss paths can produce non-finite HybridEP gradients during capture-stream '
-                    'warmup. Keeping the selected router implementation without auxiliary loss.',
+                    'paths can produce non-finite HybridEP gradients during capture-stream '
+                    'warmup. Falling back to the unfused router without auxiliary router loss.',
                     args.rank,
                 )
         # Optimizer compatibility check. Megatron-FSDP supports sgd/adam, plus the

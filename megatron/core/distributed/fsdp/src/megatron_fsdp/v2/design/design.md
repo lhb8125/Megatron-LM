@@ -245,13 +245,6 @@ Prefetched modules' data also becomes valid when their own pre-hook later calls 
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
 
-**Force-balanced router validation.** Full-iteration graph validation disables auxiliary
-router load-balancing loss for force-balanced benchmark routing because that loss path can
-produce non-finite HybridEP gradients during capture-stream warmup. Router fusion is independent
-of the auxiliary loss and remains enabled when requested. The production-shape regression covers
-the fused force-balanced router together with MXFP8, HybridEP, delayed wgrad, and LayerNorm
-recompute.
-
 ### `_get_prefetch_next_modules(bwd_pass)`
 
 ```python
