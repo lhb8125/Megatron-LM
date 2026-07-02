@@ -180,7 +180,12 @@ class ParameterGroup:
         self.model_weight_buffer = wbuf
 
         if self.mp_policy.needs_transpose_weight_buffer(self.params[0]):
-            tbuf = self._create_buffer(torch.uint8, shard_weights, "transpose_weight")
+            # ``keep_fp8_transpose_cache`` trades one full MXFP8 columnwise
+            # payload per rank for reuse across micro-batches. The optimizer
+            # updates only this rank's virtual shard and marks the buffer dirty;
+            # the first backward unshard in the next iteration refreshes it.
+            shard_transpose_weights = shard_weights and not self.mp_policy.fp8.keep_transpose_cache
+            tbuf = self._create_buffer(torch.uint8, shard_transpose_weights, "transpose_weight")
             tbuf.init_data(torch.empty(tbuf.data_size, dtype=tbuf.dtype, device=self.device))
             for i, p in enumerate(self.params):
                 tbuf.set_item(i, self.mp_policy.get_param_data(p, transpose=True))

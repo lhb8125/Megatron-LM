@@ -50,24 +50,19 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
         coalescing_event.wait()
 
 
-def _uses_singleton_dp_for_unshard(
-    module, *, bwd_pass: bool, include_forward_buffers: bool = False
-) -> bool:
+def _uses_singleton_dp_for_unshard(module, *, bwd_pass: bool) -> bool:
     """Return whether every weight buffer for this unshard has DP world size one."""
     weight_buffers = []
     for param_group in module._fsdp_param_groups:
-        passes = (True, False) if bwd_pass and include_forward_buffers else (bwd_pass,)
-        for current_pass in passes:
-            weight_buffers.extend(
-                weight_buffer
-                for weight_buffer in param_group.mp_policy.weight_buffers_for_unshard(
-                    param_group.model_weight_buffer,
-                    param_group.transpose_weight_buffer,
-                    bwd_pass=current_pass,
-                )
-                if weight_buffer is not None
-                and all(existing is not weight_buffer for existing in weight_buffers)
+        weight_buffers.extend(
+            weight_buffer
+            for weight_buffer in param_group.mp_policy.weight_buffers_for_unshard(
+                param_group.model_weight_buffer,
+                param_group.transpose_weight_buffer,
+                bwd_pass=bwd_pass,
             )
+            if weight_buffer is not None
+        )
     return bool(weight_buffers) and all(
         getattr(weight_buffer, "_dp_world_size", 2) == 1 for weight_buffer in weight_buffers
     )
@@ -691,9 +686,7 @@ class FSDPModule:
         if any(module._fsdp_state.enable_cuda_graph for module in forward_order):
             root_context.enable_cuda_graph = True
 
-    def unshard(
-        self, async_op: bool = False, bwd_pass: bool = False, include_forward_buffers: bool = False
-    ):
+    def unshard(self, async_op: bool = False, bwd_pass: bool = False):
         """
         Unshard parameters by all-gathering from the sharded buffer.
 
@@ -712,20 +705,16 @@ class FSDPModule:
             prefetch_modules = ctx.get_prefetch_next_modules(self, bwd_pass=bwd_pass)
         else:
             prefetch_modules = []
-        passes = (True, False) if bwd_pass and include_forward_buffers else (bwd_pass,)
         for module in [self] + prefetch_modules:
             if all(
-                param_group.has_unsharded_weight_buffers(bwd_pass=current_pass)
+                param_group.has_unsharded_weight_buffers(bwd_pass=bwd_pass)
                 for param_group in module._fsdp_param_groups
-                for current_pass in passes
             ):
                 continue
             if bwd_pass and id(module) in ctx.backward_done_modules:
                 continue  # Skip prefetch for modules whose backward is already done
 
-            singleton_dp = async_op and _uses_singleton_dp_for_unshard(
-                module, bwd_pass=bwd_pass, include_forward_buffers=include_forward_buffers
-            )
+            singleton_dp = async_op and _uses_singleton_dp_for_unshard(module, bwd_pass=bwd_pass)
             module_stream = caller_stream if singleton_dp else stream
             if async_op and not singleton_dp and not ag_stream_ordered:
                 # Make caller-stream parameter updates visible before a real
@@ -749,14 +738,7 @@ class FSDPModule:
                             ).all(), f"Non-finite value detected in dist param for parameter {name}"
 
                     pending_post_unshard.append(param_group)
-                    requested_buffers = []
-                    for current_pass in passes:
-                        for weight_buffer in param_group.weight_buffers_for_unshard(
-                            bwd_pass=current_pass
-                        ):
-                            if all(existing is not weight_buffer for existing in requested_buffers):
-                                requested_buffers.append(weight_buffer)
-                    for weight_buffer in requested_buffers:
+                    for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
                         if (
                             param_group.defer_full_param_and_grad_sync
                             and weight_buffer.is_unsharded()

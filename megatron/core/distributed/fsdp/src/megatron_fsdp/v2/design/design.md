@@ -157,14 +157,16 @@ behavior.
 module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
 
 # _register_backward_pre_hook (called inside register_multi_grad_hook):
-module.unshard(
-    async_op=ctx.enable_unshard_prefetch,
-    bwd_pass=True,
-    include_forward_buffers=True,
-)
+module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
 ```
 
-### `FSDPModule.unshard(async_op, bwd_pass, include_forward_buffers)`
+During activation recompute, the forward pre-hook first requests the backward
+MXFP8 columnwise buffer and then requests the forward rowwise buffer. A
+persistent columnwise buffer can make the first request communication-free;
+the two phase requests remain explicit because grouping them with
+`_coalescing_manager` does not combine their payloads into one NCCL kernel.
+
+### `FSDPModule.unshard(async_op, bwd_pass)`
 
 ```python
 stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
@@ -497,6 +499,16 @@ graphs do not replace those copies with a separate per-tensor implementation.
 The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where
 `weight_buffers_for_unshard(..., bwd_pass=True)` selects it.
+
+When `keep_fp8_transpose_cache=True`, v2 stores the MXFP8 transpose buffer as a
+replicated persistent compute buffer while retaining sharded main weights and
+optimizer state. After an optimizer step, only the local virtual shard is
+updated and the buffer is marked dirty. The first backward unshard of the next
+iteration all-gathers those shards in place and clears the dirty bit; later
+micro-batches reuse the clean columnwise payload without another all-gather.
+This is an explicit memory/performance tradeoff: it retains one full
+columnwise FP8 payload per rank. With the flag disabled, the transpose buffer
+keeps the ordinary temporary ZeRO-3 lifecycle.
 
 ### FP8 normalization groups with iteration-delayed synchronization
 

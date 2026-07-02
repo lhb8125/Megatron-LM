@@ -91,14 +91,8 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
 
     # ---- unshard parameters for this module -------------------------------
     if ctx.backward_phase:
-        # Activation recompute needs the forward (rowwise) MXFP8 payload while
-        # the following backward needs its columnwise payload. Queue both in one
-        # unshard so same-group collectives are coalesced and share one event.
-        target.unshard(
-            async_op=ctx.enable_unshard_prefetch, bwd_pass=True, include_forward_buffers=True
-        )
-    else:
-        target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
+        target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
+    target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
 
     # ---- free stale grad data (safe to repeat, idempotent) ----------------
     for param_group in target._fsdp_param_groups:

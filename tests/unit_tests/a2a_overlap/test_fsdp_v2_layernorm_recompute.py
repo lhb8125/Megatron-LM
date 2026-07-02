@@ -122,7 +122,7 @@ def test_singleton_unshard_detection(world_sizes, expected):
     assert fsdp_module_impl._uses_singleton_dp_for_unshard(module, bwd_pass=True) is expected
 
 
-def test_backward_recompute_requests_forward_and_backward_buffers(monkeypatch):
+def test_backward_recompute_requests_backward_then_forward_buffers(monkeypatch):
     calls = []
 
     class FakeParamGroup:
@@ -147,7 +147,8 @@ def test_backward_recompute_requests_forward_and_backward_buffers(monkeypatch):
     hooks_impl.mfsdp_forward_pre_hook(torch.nn.Identity(), (), {})
 
     assert calls == [
-        {"async_op": True, "bwd_pass": True, "include_forward_buffers": True},
+        {"async_op": True, "bwd_pass": True},
+        {"async_op": True, "bwd_pass": False},
         "free_grad",
     ]
 
@@ -284,6 +285,7 @@ class TestFSDPV2LayerNormRecompute:
                 overlap_grad_reduce=True,
                 overlap_param_gather=True,
                 fp8_param_gather=True,
+                keep_fp8_transpose_cache=True,
                 megatron_fsdp_main_params_dtype=torch.float32,
                 # This focused lifecycle test uses native SGD rather than the
                 # production precision-aware optimizer, so params/grads must match.
@@ -320,6 +322,7 @@ class TestFSDPV2LayerNormRecompute:
                         assert param_group.sharding_strategy == "optim_grads_params"
                         if param_group.transpose_weight_buffer is not None:
                             mxfp8_groups.append((param_names, param_group))
+                            assert not param_group.transpose_weight_buffer.is_distributed
                         if param_group.defer_full_param_and_grad_sync:
                             deferred_groups.append((param_names, param_group))
                             assert param_group.replicate_model_weight_buffer
