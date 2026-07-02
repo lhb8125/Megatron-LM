@@ -269,18 +269,6 @@ manually for the TransformerLayer via `set_fsdp_reshard_hooks` →
 are handled by `mfsdp_post_backward_final_callback` (called at
 `combined_1f1b.py:629`), which runs after all `backward_dw()` calls complete.
 
-Force-balanced performance runs have an additional compatibility fallback.
-When Megatron-FSDP v2 and full-iteration CUDA graphs are combined with forced
-router load balancing, argument validation disables router fusion and auxiliary
-router load-balancing losses with a rank-0 warning.  At full Qwen3 scale, each
-path can independently return non-finite HybridEP/router gradients during the
-eager capture-stream warmup.  The unfused router without auxiliary router loss,
-and the same fused router without full-iteration graphs, produce matching finite
-loss and gradient norms.  Auxiliary router objectives are not meaningful in
-this benchmark mode because `RandomSTE` replaces the learned forward logits.
-The fallback is restricted to forced benchmark routing, so learned router
-training keeps the requested fusion and auxiliary-loss settings.
-
 For EP overlap **without** `delay_wgrad_compute`, the autograd hook fires at
 the right time (all grads are ready inline during backward), so it is
 **not** skipped.

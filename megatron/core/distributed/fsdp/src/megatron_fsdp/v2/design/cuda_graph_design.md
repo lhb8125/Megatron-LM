@@ -305,6 +305,15 @@ tested TE/PyTorch stack, TE wgrad-accumulation replay can write non-finite
 gradients even though regular wgrad accumulation is finite.  The validator
 falls back to non-fused wgrad accumulation until the TE replay path is safe.
 
+Force-balanced performance runs have an additional compatibility fallback.
+When Megatron-FSDP v2 and full-iteration CUDA graphs are combined with forced
+router load balancing, argument validation disables router fusion and auxiliary
+router load-balancing losses with a rank-0 warning. At full Qwen3 scale, each
+path can independently return non-finite HybridEP/router gradients during the
+eager capture-stream warmup. The fallback is restricted to forced benchmark
+routing, where `RandomSTE` replaces learned router logits, so learned router
+training keeps the requested fusion and auxiliary-loss settings.
+
 ### 12.1 Singleton-DP and MXFP8 support groups
 
 Full-iteration capture treats data-parallel groups of size one as process-local.
