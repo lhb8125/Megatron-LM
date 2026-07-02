@@ -27,18 +27,21 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from .allocator import BucketAllocator, TracePoolAllocator
-from .mixed_precision import MixedPrecisionPolicy
+from .mixed_precision import FP8WeightUpdate, MixedPrecisionPolicy, apply_fp8_weight_updates
 from .param_group import ParameterGroup
 from .utils import ParamGroupIdx, _replace_module_parameter
 
 logger = logging.getLogger(__name__)
+
+_UNSHARDED_WITHOUT_EVENT = object()
+_FP8_WEIGHT_UPDATE_BATCH_SIZE = 8
 
 
 def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None:
     """Unshard one same-process-group buffer run and order async completion."""
     cm = (
         _coalescing_manager(dp_group, async_ops=async_op)
-        if len(weight_buffers) > 1
+        if len(weight_buffers) > 1 and getattr(weight_buffers[0], "_dp_world_size", 2) > 1
         else nullcontext()
     )
     with cm as coalescing_event:
@@ -46,6 +49,30 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
             weight_buffer.unshard(bind_params=True)
     if async_op and coalescing_event is not None:
         coalescing_event.wait()
+
+
+def _uses_singleton_dp_for_unshard(module, *, bwd_pass: bool) -> bool:
+    """Return whether every weight buffer for this unshard has DP world size one."""
+    weight_buffers = []
+    for param_group in module._fsdp_param_groups:
+        weight_buffers.extend(
+            weight_buffer
+            for weight_buffer in param_group.mp_policy.weight_buffers_for_unshard(
+                param_group.model_weight_buffer,
+                param_group.transpose_weight_buffer,
+                bwd_pass=bwd_pass,
+            )
+            if weight_buffer is not None
+        )
+    return bool(weight_buffers) and all(
+        getattr(weight_buffer, "_dp_world_size", 2) == 1 for weight_buffer in weight_buffers
+    )
+
+
+def _uses_singleton_dp_for_reduce_grad(param_group) -> bool:
+    """Return whether this param group's gradient reduction is process-local."""
+    grad_buffer = param_group.main_grad_buffer
+    return grad_buffer is not None and getattr(grad_buffer, "_dp_world_size", 2) == 1
 
 
 class _FSDPState:
@@ -107,7 +134,7 @@ class _FSDPRootContext:
     # ------------------------------------------------------------------
     # Unshard (all-gather) tracking
     # ------------------------------------------------------------------
-    unshard_done_events: Dict[int, Optional[torch.cuda.Event]] = field(default_factory=dict)
+    unshard_done_events: Dict[int, Any] = field(default_factory=dict)
     """
     Maps module_id -> CUDA event signaling completion of parameter unshard.
 
@@ -419,6 +446,7 @@ class FSDPModule:
         mp_policy: MixedPrecisionPolicy,
         gradient_scaling_factor: Optional[float] = None,
         sharding_strategy: str = "optim_grads_params",
+        enable_full_iteration_cuda_graph: bool = False,
     ):
         """
         Initialize parameter groups and build param name mapping.
@@ -450,6 +478,7 @@ class FSDPModule:
             ignored_params=ignored_params,
             gradient_scaling_factor=gradient_scaling_factor,
             sharding_strategy=sharding_strategy,
+            enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
         )
         setattr(self, "_fsdp_param_groups", fsdp_param_groups)
 
@@ -671,7 +700,9 @@ class FSDPModule:
         """
         torch.cuda.nvtx.range_push("MFSDP unshard")
         ctx = self._fsdp_root_context
-        stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
+        caller_stream = torch.cuda.current_stream()
+        stream = ctx.ag_stream if async_op else caller_stream
+        ag_stream_ordered = False
 
         # Unshard this module and optionally prefetch next modules in the forward/backward pass
         if async_op:
@@ -687,10 +718,18 @@ class FSDPModule:
             if bwd_pass and id(module) in ctx.backward_done_modules:
                 continue  # Skip prefetch for modules whose backward is already done
 
+            singleton_dp = async_op and _uses_singleton_dp_for_unshard(module, bwd_pass=bwd_pass)
+            module_stream = caller_stream if singleton_dp else stream
+            if async_op and not singleton_dp and not ag_stream_ordered:
+                # Make caller-stream parameter updates visible before a real
+                # all-gather reads the shards on the AG stream.
+                stream.wait_stream(caller_stream)
+                ag_stream_ordered = True
+
             # Unshard parameters for this module.  Coalesce consecutive all-gathers
             # that target the same process group, then run TE post-processing after
             # the coalesced collective has been queued on the same stream.
-            with torch.cuda.stream(stream):
+            with torch.cuda.stream(module_stream):
                 pending_post_unshard = []
                 buffer_runs = []
 
@@ -704,28 +743,37 @@ class FSDPModule:
 
                     pending_post_unshard.append(param_group)
                     for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=bwd_pass):
+                        if (
+                            param_group.defer_full_param_and_grad_sync
+                            and weight_buffer.is_unsharded()
+                        ):
+                            continue
                         if buffer_runs and buffer_runs[-1][0] is weight_buffer.dp_group:
                             buffer_runs[-1][1].append(weight_buffer)
                         else:
                             buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
 
                 for dp_group, weight_buffers in buffer_runs:
-                    _unshard_weight_buffers(dp_group, weight_buffers, async_op=async_op)
+                    _unshard_weight_buffers(
+                        dp_group, weight_buffers, async_op=async_op and not singleton_dp
+                    )
 
                 for param_group in pending_post_unshard:
                     param_group.post_unshard(bwd_pass=bwd_pass)
 
             # Record event to track when unshard is done for this module
             if async_op:
-                event = stream.record_event()
-                ctx.unshard_done_events[id(module)] = event
+                ctx.unshard_done_events[id(module)] = (
+                    _UNSHARDED_WITHOUT_EVENT if singleton_dp else module_stream.record_event()
+                )
 
         # Ensure unshard is complete before forward.
         # The event is NOT cleared here — it persists as a "currently unsharded"
         # flag and is only cleared by reshard().  This prevents redundant
         # all-gathers during activation recompute and prefetch re-entry.
-        if ctx.unshard_done_events[id(self)] is not None:
-            ctx.unshard_done_events[id(self)].wait()
+        unshard_done = ctx.unshard_done_events[id(self)]
+        if unshard_done is not None and unshard_done is not _UNSHARDED_WITHOUT_EVENT:
+            unshard_done.wait()
 
         # Replace module parameters with unsharded versions
         for param_names, param_group in self._named_param_groups:
@@ -776,7 +824,7 @@ class FSDPModule:
             if module is self:
                 break
 
-    def reduce_grad(self, async_op: bool = False):
+    def reduce_grad(self, async_op: bool = False, finish_grad_sync_only: bool = False):
         """
         Reduce gradients across data-parallel ranks.
 
@@ -787,7 +835,8 @@ class FSDPModule:
         """
         torch.cuda.nvtx.range_push("MFSDP reduce_grad")
         ctx = self._fsdp_root_context
-        stream = ctx.rs_stream if async_op else torch.cuda.current_stream()
+        caller_stream = torch.cuda.current_stream()
+        stream = ctx.rs_stream if async_op else caller_stream
 
         # Handle pending reduce events before this module to release buffers promptly.
         self._wait_for_previous_async_reduce_grad()
@@ -797,8 +846,21 @@ class FSDPModule:
             if not param_group.requires_grad:
                 continue
 
+            defer_sync = param_group.defer_full_param_and_grad_sync
+            delayed_sync_group = defer_sync or param_group.sharding_strategy in (
+                "no_shard",
+                "optim",
+            )
+            if finish_grad_sync_only:
+                if not delayed_sync_group:
+                    continue
+                if defer_sync and not param_group._deferred_grad_accumulated:
+                    continue
+
             # Initialize main gradient buffer and param -> main_grad mapping if not already done.
             param_group._init_dist_grads()
+            singleton_dp = async_op and _uses_singleton_dp_for_reduce_grad(param_group)
+            param_stream = caller_stream if singleton_dp else stream
 
             # NaN check before reduction
             if getattr(self, "_enable_nan_checks", False):
@@ -818,60 +880,76 @@ class FSDPModule:
             # the Python-side ``setattr(param, "grad_added_to_main_grad", True)`` that
             # accompanies the eager backward is captured away.  We record the per-param
             # flag during the trace micro-batch and restore it here.
-            zero_targets = []
-            copy_srcs = []
-            copy_dsts = []
+            if not (finish_grad_sync_only and defer_sync):
+                first_deferred_grad = defer_sync and not param_group._deferred_grad_accumulated
+                zero_targets = []
+                copy_srcs = []
+                copy_dsts = []
+                add_srcs = []
+                add_dsts = []
 
-            for name, param in zip(param_names, param_group.params):
-                grad_added = getattr(param, "grad_added_to_main_grad", False)
-                recorded = getattr(param, "_mfsdp_recorded_te_wgrad", False)
-
-                if grad_added or recorded:
-                    if param.grad is not None:
+                for name, param in zip(param_names, param_group.params):
+                    grad_added = getattr(param, "grad_added_to_main_grad", False)
+                    recorded = getattr(param, "_mfsdp_recorded_te_wgrad", False)
+                    if grad_added or recorded:
+                        if param.grad is not None:
+                            del param.grad
+                        # Record TE wgrad-fusion flags for CUDA graph restore.
+                        # The trace backward ran eagerly, so TE set
+                        # grad_added_to_main_grad on each param it wrote to.
+                        # Under CUDA graph replay only the GPU kernel runs;
+                        # we record the flags here and restore them in
+                        # the CG replay backward.
+                        if grad_added and (
+                            self._fsdp_state.enable_cuda_graph
+                            or self._fsdp_state.enable_full_iteration_cuda_graph
+                        ):
+                            setattr(param, "_mfsdp_recorded_te_wgrad", True)
+                    elif param.grad is None:
+                        if not defer_sync or first_deferred_grad:
+                            main_grad = param.get_main_grad()
+                            param_main_grad = getattr(param, "main_grad", None)
+                            if (
+                                param_main_grad is None
+                                or param_main_grad.data_ptr() != main_grad.data_ptr()
+                            ):
+                                zero_targets.append(main_grad.view(-1))
+                    else:
+                        main_grad = param.get_main_grad()
+                        if defer_sync and not first_deferred_grad:
+                            add_srcs.append(param.grad.detach().view(-1))
+                            add_dsts.append(main_grad.view(-1))
+                        else:
+                            copy_srcs.append(param.grad.detach().view(-1))
+                            copy_dsts.append(main_grad.view(-1))
                         del param.grad
-                    # Record TE wgrad-fusion flags for CUDA graph restore.
-                    # The trace backward ran eagerly, so TE set
-                    # grad_added_to_main_grad on each param it wrote to.
-                    # Under CUDA graph replay only the GPU kernel runs;
-                    # we record the flags here and restore them in
-                    # the CG replay backward.
-                    if grad_added and (
-                        self._fsdp_state.enable_cuda_graph
-                        or self._fsdp_state.enable_full_iteration_cuda_graph
-                    ):
-                        setattr(param, "_mfsdp_recorded_te_wgrad", True)
-                elif param.grad is None:
-                    main_grad = param.get_main_grad()
-                    param_main_grad = getattr(param, "main_grad", None)
-                    if (
-                        param_main_grad is None
-                        or param_main_grad.data_ptr() != main_grad.data_ptr()
-                    ):
-                        zero_targets.append(main_grad.view(-1))
-                else:
-                    main_grad = param.get_main_grad()
-                    copy_srcs.append(param.grad.detach().view(-1))
-                    copy_dsts.append(main_grad.view(-1))
-                    del param.grad
 
-            # 2 kernel launches total (instead of N)
-            if zero_targets:
-                torch._foreach_zero_(zero_targets)
-            if copy_dsts:
-                torch._foreach_copy_(copy_dsts, copy_srcs)
+                if zero_targets:
+                    torch._foreach_zero_(zero_targets)
+                if copy_dsts:
+                    torch._foreach_copy_(copy_dsts, copy_srcs)
+                if add_dsts:
+                    torch._foreach_add_(add_dsts, add_srcs)
 
-            if async_op:
+            if defer_sync and not finish_grad_sync_only:
+                param_group._deferred_grad_accumulated = True
+                continue
+
+            if async_op and not singleton_dp:
                 # ---- Overlapped path ----
                 # Switch to rs_stream for the reduce-scatter kernel
-                param_group.reduce_grad(stream=stream)
+                param_group.reduce_grad(stream=param_stream)
             else:
                 # ---- Non-overlapped path ----
                 # Reduce gradients immediately and release grad buffer
                 param_group.reduce_grad()
                 param_group.release_grad_buffer()
 
+            if defer_sync:
+                param_group._deferred_grad_accumulated = False
+
             # Install reduced gradients to distributed parameters
-            with torch.cuda.stream(stream):
+            with torch.cuda.stream(param_stream):
                 for name, param, dist_param, dist_grad in zip(
                     param_names, param_group.params, param_group.dist_params, param_group.dist_grads
                 ):
@@ -885,20 +963,20 @@ class FSDPModule:
                             del dist_param.grad
                     else:
                         assert dist_grad is None or dist_param.dtype == dist_grad.dtype, (
-                            f"{name} Dist param dtype {dist_param.dtype} does not match dist grad "
-                            f"dtype {dist_grad.dtype}"
+                            f"{name} Dist param dtype {dist_param.dtype} does not match "
+                            f"dist grad dtype {dist_grad.dtype}"
                         )
                         setattr(dist_param, "grad", dist_grad)
                         if hasattr(dist_param, "decoupled_grad"):
                             dist_param.decoupled_grad = None
 
-            if async_op:
-                event = stream.record_event()
+            if async_op and not singleton_dp:
+                event = param_stream.record_event()
                 ctx.reduce_grad_buckets[id(self)].append((event, param_group))
 
             # NaN check after reduction
             if getattr(self, "_enable_nan_checks", False):
-                with torch.cuda.stream(stream):
+                with torch.cuda.stream(param_stream):
                     for name, dist_grad in zip(param_names, param_group.dist_grads):
                         if dist_grad is not None:
                             assert torch.isfinite(
@@ -916,13 +994,16 @@ class FSDPModule:
                 continue
             if any(
                 param_group.sharding_strategy in ("no_shard", "optim")
+                or param_group.defer_full_param_and_grad_sync
                 for param_group in child._fsdp_param_groups
             ):
-                # no_shard and ZeRO-1 keep gradients replicated during backward.
-                # Sync them once at the iteration grad-sync boundary: no_shard
-                # all-reduces full grads, ZeRO-1 reduce-scatters virtual shards.
-                child.reduce_grad(async_op=False)
+                # no_shard, ZeRO-1, and selected FP8 norm groups keep full
+                # gradients during backward. Sync only those groups once at
+                # the iteration grad-sync boundary.
+                child.reduce_grad(async_op=False, finish_grad_sync_only=True)
             for param_group in child._fsdp_param_groups:
+                if param_group.defer_full_param_and_grad_sync:
+                    param_group.reshard(force=True)
                 for param, dist_grad in zip(param_group.params, param_group.dist_grads):
                     if param.requires_grad:
                         # v1 replaces module params with optimizer-facing distributed
@@ -963,11 +1044,32 @@ class FSDPModule:
 
     def _copy_main_weights_to_model_weights(self):
         """Copy main weight buffer to model weight buffer."""
+        fp8_weight_update_batches: List[Tuple[Any, List[FP8WeightUpdate]]] = []
         for child in self.modules():
             if not isinstance(child, FSDPModule):
                 continue
             for param_group in child._fsdp_param_groups:
-                param_group.copy_main_weights_to_model_weights()
+                updates: List[FP8WeightUpdate] = []
+                param_group.copy_main_weights_to_model_weights(updates)
+                for update in updates:
+                    batch = next(
+                        (
+                            candidate
+                            for group, candidate in fp8_weight_update_batches
+                            if group is update.data_parallel_group
+                        ),
+                        None,
+                    )
+                    if batch is None:
+                        batch = []
+                        fp8_weight_update_batches.append((update.data_parallel_group, batch))
+                    batch.append(update)
+                    if len(batch) == _FP8_WEIGHT_UPDATE_BATCH_SIZE:
+                        apply_fp8_weight_updates(batch)
+                        batch.clear()
+
+        for _, batch in fp8_weight_update_batches:
+            apply_fp8_weight_updates(batch)
 
     def _compute_per_param_norms(self) -> Dict[str, Dict[str, float]]:
         """
@@ -1095,7 +1197,8 @@ class FSDPModule:
                 lines.append(
                     f"- {module_name} #{group_idx} dp={dp_size} "
                     f"strategy={param_group.sharding_strategy} "
-                    f"chunk_factor={param_group.chunk_size_factor}"
+                    f"chunk_factor={param_group.chunk_size_factor} "
+                    f"defer_sync={param_group.defer_full_param_and_grad_sync}"
                 )
                 lines.append(
                     f"  {numel:,} elems x {_fmt_dtype(param_group.dtype)} "
@@ -1164,14 +1267,16 @@ def _get_module_fsdp_param_groups(
     ignored_params: Optional[set[nn.Parameter]] = None,
     gradient_scaling_factor: Optional[float] = None,
     sharding_strategy: str = "optim_grads_params",
+    enable_full_iteration_cuda_graph: bool = False,
 ) -> List[ParameterGroup]:
     """
-    Group module parameters by (device, dtype, requires_grad) and create ParameterGroups.
+    Group module parameters by buffer-compatible attributes and create ParameterGroups.
 
     Parameters are grouped because they share the same buffer management
     and sharding strategy. Each group gets its own DataParallelBuffer.
     """
     param_groups = {}
+    param_to_name = {param: name for name, param in module.named_parameters()}
 
     for param in module.parameters():
         if ignored_params is not None and param in ignored_params:
@@ -1188,6 +1293,13 @@ def _get_module_fsdp_param_groups(
     # Create ParameterGroup for each group
     fsdp_param_groups = []
     for i, params in enumerate(param_groups.values()):
+        param_names = [param_to_name[param] for param in params]
+        defer_full_param_and_grad_sync = (
+            enable_full_iteration_cuda_graph
+            and _should_defer_fp8_norm_sync(
+                module, param_names, params, mp_policy, sharding_strategy
+            )
+        )
         fsdp_param_groups.append(
             ParameterGroup(
                 params,
@@ -1196,7 +1308,90 @@ def _get_module_fsdp_param_groups(
                 mp_policy=mp_policy,
                 gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
+                defer_full_param_and_grad_sync=defer_full_param_and_grad_sync,
+                replicate_model_weight_buffer=defer_full_param_and_grad_sync,
             )
         )
 
     return fsdp_param_groups
+
+
+def _is_fp8_norm_param(
+    module: nn.Module,
+    param_name: str,
+    param: nn.Parameter,
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Return whether one parameter is eligible for delayed FP8 norm synchronization."""
+    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+        return False
+
+    hidden_size = getattr(getattr(module, "config", None), "hidden_size", None)
+    if not isinstance(hidden_size, int) or hidden_size <= 0:
+        return False
+
+    normalized_name = param_name.lower().replace("_", "")
+    return (
+        ("layernorm" in normalized_name or "rmsnorm" in normalized_name)
+        and not mp_policy.is_fp8_param(param)
+        and not mp_policy.is_nvfp4_param(param)
+        and param.ndim <= 1
+        and param.numel() <= hidden_size
+    )
+
+
+def _is_fp8_router_param(
+    module: nn.Module,
+    param_name: str,
+    param: nn.Parameter,
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Return whether one bounded MoE router matrix may share delayed norm sync."""
+    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+        return False
+
+    config = getattr(module, "config", None)
+    hidden_size = getattr(config, "hidden_size", None)
+    num_moe_experts = getattr(config, "num_moe_experts", None)
+    if (
+        not isinstance(hidden_size, int)
+        or hidden_size <= 0
+        or not isinstance(num_moe_experts, int)
+        or num_moe_experts <= 0
+    ):
+        return False
+
+    return (
+        param_name.lower().endswith("router.weight")
+        and not mp_policy.is_fp8_param(param)
+        and not mp_policy.is_nvfp4_param(param)
+        and param.ndim == 2
+        and param.shape[-1] == hidden_size
+        and param.shape[0] <= num_moe_experts
+        and param.numel() <= hidden_size * num_moe_experts
+    )
+
+
+def _should_defer_fp8_norm_sync(
+    module: nn.Module,
+    param_names: List[str],
+    params: List[nn.Parameter],
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Select bounded FP8 support groups containing norms and an optional router."""
+    assert len(param_names) == len(params)
+    norm_flags = [
+        _is_fp8_norm_param(module, name, param, mp_policy, sharding_strategy)
+        for name, param in zip(param_names, params)
+    ]
+    return (
+        bool(params)
+        and any(norm_flags)
+        and all(
+            is_norm or _is_fp8_router_param(module, name, param, mp_policy, sharding_strategy)
+            for name, param, is_norm in zip(param_names, params, norm_flags)
+        )
+    )

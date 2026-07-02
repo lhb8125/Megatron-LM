@@ -304,3 +304,21 @@ argument validation for Megatron-FSDP v2 plus full-iteration CUDA graph.  In the
 tested TE/PyTorch stack, TE wgrad-accumulation replay can write non-finite
 gradients even though regular wgrad accumulation is finite.  The validator
 falls back to non-fused wgrad accumulation until the TE replay path is safe.
+
+### 12.1 Singleton-DP and MXFP8 support groups
+
+Full-iteration capture treats data-parallel groups of size one as process-local.
+Unshard and gradient-reduction paths use local copies or scaling instead of
+recording empty collectives, coalescing managers, and cross-stream completion
+events.
+
+For FP8 training with `optim_grads_params`, bounded parameter groups made only
+of normalization parameters and an optional router matrix keep replicated
+compute-weight buffers. Their gradients accumulate across microbatches and
+synchronize once at the iteration boundary. This avoids repeatedly gathering
+small support tensors without changing the sharding of optimizer main weights.
+
+MXFP8 main-to-model updates are queued by parameter group and combined in
+bounded batches that share a data-parallel process group. A retained transpose
+cache remains replicated and is marked dirty after local optimizer updates so
+the next unshard refreshes every virtual shard before reuse.

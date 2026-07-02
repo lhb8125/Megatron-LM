@@ -30,7 +30,7 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 from ..uneven_dtensor import make_uneven_dtensor, update_uneven_dtensor_chunk_metadata
 from .allocator import BucketAllocator, TemporaryBucketAllocator, _free_storage
 from .dp_buffer import DataParallelBuffer
-from .mixed_precision import MixedPrecisionPolicy
+from .mixed_precision import FP8WeightUpdate, MixedPrecisionPolicy
 from .utils import ParamGroupIdx
 
 
@@ -69,6 +69,8 @@ class ParameterGroup:
         sharding_strategy: str = "optim_grads_params",
         gradient_scaling_factor: Optional[float] = None,
         allocator: Optional[BucketAllocator] = None,
+        defer_full_param_and_grad_sync: bool = False,
+        replicate_model_weight_buffer: bool = False,
     ):
         self.params = params
         self.param_idx: Dict[torch.nn.Parameter, int] = {p: i for i, p in enumerate(params)}
@@ -108,6 +110,9 @@ class ParameterGroup:
         self.gradient_scaling_factor = gradient_scaling_factor
         self.allocator = allocator if allocator is not None else TemporaryBucketAllocator()
         self.enable_full_iteration_cuda_graph = False
+        self.defer_full_param_and_grad_sync = defer_full_param_and_grad_sync
+        self.replicate_model_weight_buffer = replicate_model_weight_buffer
+        self._deferred_grad_accumulated = False
 
         # Buffer references (initialized in _init_buffers)
         self.model_weight_buffer: Optional[DataParallelBuffer] = None
@@ -164,7 +169,7 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
+        shard_weights = s == "optim_grads_params" and not self.replicate_model_weight_buffer
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
@@ -178,7 +183,12 @@ class ParameterGroup:
         self.model_weight_buffer = wbuf
 
         if self.mp_policy.needs_transpose_weight_buffer(self.params[0]):
-            tbuf = self._create_buffer(torch.uint8, shard_weights, "transpose_weight")
+            # ``keep_fp8_transpose_cache`` trades one full MXFP8 columnwise
+            # payload per rank for reuse across micro-batches. The optimizer
+            # updates only this rank's virtual shard and marks the buffer dirty;
+            # the first backward unshard in the next iteration refreshes it.
+            shard_transpose_weights = shard_weights and not self.mp_policy.fp8.keep_transpose_cache
+            tbuf = self._create_buffer(torch.uint8, shard_transpose_weights, "transpose_weight")
             tbuf.init_data(torch.empty(tbuf.data_size, dtype=tbuf.dtype, device=self.device))
             for i, p in enumerate(self.params):
                 tbuf.set_item(i, self.mp_policy.get_param_data(p, transpose=True))
@@ -271,15 +281,25 @@ class ParameterGroup:
                 return False
         return True
 
-    def reshard(self):
-        """Reshard model weights by releasing unsharded buffer."""
+    def reshard(self, *, force: bool = False):
+        """Reshard model weights by releasing unsharded buffer.
+
+        Selected small normalization groups use a replicated compute-weight
+        buffer and keep it across micro-batches. The iteration grad-sync
+        boundary still passes ``force=True`` to complete the common lifecycle;
+        ``DataParallelBuffer.reshard()`` is a no-op for that replicated buffer.
+        """
+        if self.defer_full_param_and_grad_sync and not force:
+            return
         self.model_weight_buffer.reshard()
         if self.transpose_weight_buffer is not None:
             self.transpose_weight_buffer.reshard()
         self.mp_policy.post_reshard(self.params)
 
     @torch.no_grad()
-    def copy_main_weights_to_model_weights(self):
+    def copy_main_weights_to_model_weights(
+        self, fp8_weight_updates: Optional[List[FP8WeightUpdate]] = None
+    ):
         """Install optimized main weights into model compute weights."""
         self._ensure_buffers_on_gpu()
         self.mp_policy.copy_main_weights_to_model_weights(
@@ -289,6 +309,7 @@ class ParameterGroup:
             self.model_weight_buffer,
             self.main_weight_buffer,
             self.transpose_weight_buffer,
+            fp8_weight_updates,
         )
 
     def reduce_grad(self, stream: Optional[torch.cuda.Stream] = None):
@@ -491,6 +512,7 @@ class ParameterGroup:
 
     def zero_grad(self, set_to_none: bool = True):
         """Zero the main gradient buffer and mark grads as zeroed."""
+        self._deferred_grad_accumulated = False
         if self.enable_full_iteration_cuda_graph:
             if self.main_grad_buffer is not None:
                 if self.main_grad_buffer.data is not None:
