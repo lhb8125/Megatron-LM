@@ -284,12 +284,9 @@ class TestFSDPV2LayerNormRecompute:
                         assert param_group.sharding_strategy == "optim_grads_params"
                         if param_group.defer_full_param_and_grad_sync:
                             deferred_groups.append((param_names, param_group))
-                            assert param_group.replicate_full_state
-                            assert param_group.buffer_sharding_strategy == "no_shard"
+                            assert param_group.replicate_model_weight_buffer
                             assert not param_group.model_weight_buffer.is_distributed
-                            assert not param_group.main_grad_buffer.is_distributed
-                            if param_group.main_weight_buffer is not None:
-                                assert not param_group.main_weight_buffer.is_distributed
+                            assert param_group.main_grad_buffer.is_distributed
                             normalized_names = [
                                 name.lower().replace("_", "") for name in param_names
                             ]
@@ -332,7 +329,7 @@ class TestFSDPV2LayerNormRecompute:
                 ), "LayerNorm recompute must run on its original compute stream"
                 assert all(
                     not param_group._deferred_grad_accumulated
-                    and param_group.model_weight_buffer.is_unsharded()
+                    and not param_group.model_weight_buffer.is_unsharded()
                     for _, param_group in deferred_groups
                 )
 

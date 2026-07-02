@@ -1267,7 +1267,7 @@ def _get_module_fsdp_param_groups(
                 gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
                 defer_full_param_and_grad_sync=defer_full_param_and_grad_sync,
-                replicate_full_state=defer_full_param_and_grad_sync,
+                replicate_model_weight_buffer=defer_full_param_and_grad_sync,
             )
         )
 
