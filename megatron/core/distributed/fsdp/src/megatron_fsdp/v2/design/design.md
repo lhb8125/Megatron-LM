@@ -507,18 +507,20 @@ micro-batch of a full-iteration CUDA graph:
 
 1. The model-weight buffer is replicated while the FP32 main-weight buffer and
    optimizer-facing DTensor remain sharded. After the optimizer updates this
-   rank's shard, the replicated buffer is marked dirty; the first micro-batch
-   of the next iteration all-gathers the updated shards in place. Later
-   micro-batches reuse the clean full buffer without another all-gather.
+   rank's shard, `_copy_main_weights_to_model_weights()` batches the selected
+   buffers and all-gathers the updated shards in place at the iteration
+   boundary. The next iteration therefore enters every micro-batch with a
+   clean full buffer and records no support-weight all-gather in its forward
+   CUDA graph.
 2. Backward gradients accumulate in the temporary full gradient buffer across
    micro-batches. TE fused accumulation keeps `overwrite_main_grad=False` for
    this group; ordinary `.grad` tensors use `copy_` on the first micro-batch
    and `add_` afterwards.
 3. `finish_grad_sync()` performs one reduce-scatter into the persistent local
    grad shard and releases the full grad buffer. Its common force-reshard call
-   is a no-op for the replicated compute buffer; dirty tracking after the
-   optimizer step guarantees that the next iteration gathers updated shards
-   rather than reusing stale weights.
+   is a no-op for the replicated compute buffer; the optimizer-tail refresh
+   guarantees that the next iteration uses updated weights rather than stale
+   replicated data.
 
 The group's declared strategy remains `optim_grads_params`: main weights,
 persistent gradients, optimizer parameters, and optimizer state remain

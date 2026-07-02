@@ -306,16 +306,17 @@ class TestFSDPV2LayerNormRecompute:
                 recompute_opt = torch.optim.SGD(recompute_fsdp.parameters(), lr=LR)
 
                 rank = torch.distributed.get_rank()
-                recompute_loss = overlap_train_step(
-                    recompute_fsdp,
-                    recompute_opt,
-                    recompute_config,
-                    data,
-                    num_microbatches=NUM_MICROBATCHES,
-                )
-                assert torch.isfinite(
-                    recompute_loss
-                ), f"[rank {rank}] Non-finite loss: {recompute_loss.item()}"
+                for _ in range(2):
+                    recompute_loss = overlap_train_step(
+                        recompute_fsdp,
+                        recompute_opt,
+                        recompute_config,
+                        data,
+                        num_microbatches=NUM_MICROBATCHES,
+                    )
+                    assert torch.isfinite(
+                        recompute_loss
+                    ), f"[rank {rank}] Non-finite loss: {recompute_loss.item()}"
                 for name, param in recompute_fsdp.named_parameters():
                     if param.grad is not None:
                         assert torch.isfinite(
@@ -328,7 +329,7 @@ class TestFSDPV2LayerNormRecompute:
                 ), "LayerNorm recompute must run on its original compute stream"
                 assert all(
                     not param_group._deferred_grad_accumulated
-                    and not param_group.model_weight_buffer.is_unsharded()
+                    and param_group.model_weight_buffer.is_unsharded()
                     for _, param_group in deferred_groups
                 )
 
