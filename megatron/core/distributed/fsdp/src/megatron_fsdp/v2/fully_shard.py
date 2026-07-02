@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ The implementation is split across:
 
 from typing import Callable, Optional
 
-import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import Shard
@@ -60,6 +59,7 @@ def fully_shard(
     enable_trace_pool: bool = False,
     sharding_strategy: str = "optim_grads_params",
     enable_cuda_graph: bool = False,
+    enable_full_iteration_cuda_graph: bool = False,
     fine_grained_hooks: bool = False,
     skip_backward_callback: bool = False,  # Skip autograd RegisterFSDPBackwardFunction.
     skip_final_backward_callback: bool = False,
@@ -108,16 +108,13 @@ def fully_shard(
     use_trace_pool = (
         enable_trace_pool
         or enable_cuda_graph
+        or enable_full_iteration_cuda_graph
         or any(
             getattr(m._fsdp_state, "enable_cuda_graph", False)
             for m in module.modules()
             if isinstance(m, FSDPModule) and m is not module
         )
-    ) and sharding_strategy in (
-        "optim",
-        "optim_grads",
-        "optim_grads_params",
-    )
+    ) and sharding_strategy in ("optim", "optim_grads", "optim_grads_params")
     bucket_allocator = TracePoolAllocator() if use_trace_pool else StorageFreeingBucketAllocator()
 
     module._init_named_param_groups(
@@ -132,6 +129,8 @@ def fully_shard(
         enable_async_reduce_grad=enable_async_reduce_grad,
         bucket_allocator=bucket_allocator,
         enable_cuda_graph=enable_cuda_graph,
+        enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
+        defer_trace_pool_plan=(enable_full_iteration_cuda_graph and skip_final_backward_callback),
     )
     module._init_param_main_grad_func()
 
@@ -144,9 +143,7 @@ def fully_shard(
     )
     _register_forward_hook(module)
     _register_backward_pre_hook(
-        module,
-        fine_grained=fine_grained_hooks,
-        skip_final_callback=skip_final_backward_callback,
+        module, fine_grained=fine_grained_hooks, skip_final_callback=skip_final_backward_callback
     )
     # When delay_wgrad_compute is enabled, skip the autograd post-backward
     # hook.  Per-layer reshard+reduce_grad still fires via set_fsdp_reshard_hooks

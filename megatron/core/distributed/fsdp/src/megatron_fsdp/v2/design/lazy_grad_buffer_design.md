@@ -187,6 +187,36 @@ After the first call, `_init_dist_grads()` is a no-op. Subsequent calls just
 do the reduce as before. `overwrite_grad=False` ensures proper accumulation
 across micro-batches.
 
+### Full-iteration CUDA graph
+
+`cuda_graph_impl="full_iteration"` is an explicit exception to the normal lazy
+freeing policy.  Once the full step is captured, CUDA graph replay requires the
+gradient shard, fetched full grad buffer, and optimizer-facing `decoupled_grad`
+objects to keep the same device addresses.
+
+When `enable_full_iteration_cuda_graph=True`:
+
+- `_pre_backward_setup()` allocates dist grads and fetches the full grad buffer
+  before capture.
+- `release_grad_buffer()` records allocator free events while retaining the
+  tensor/view object. During tracing, a later use of the same key restores its
+  storage; after planning, the stable slot storage remains resident.
+- The trace-phase full grad buffer is rebound to the planned
+  `TracePoolAllocator` slot immediately after `plan()`, then zeroed. Hook-managed
+  schedules plan after their first complete backward. Externally managed 1F1B
+  overlap traces all forward-only, steady, and backward-only phases before
+  planning. The captured graph therefore uses optimized slot addresses without
+  retaining a duplicate trace bucket.
+- `_maybe_free_grad_data()` keeps optimizer-facing gradient storage alive.
+- `zero_grad()` clears existing storage in place and marks the grad buffer fresh
+  instead of setting storage to `None`.
+- Optimizer zero-grad keeps marked `decoupled_grad` DTensors and zeroes their
+  local storage.
+
+This trades away the forward-memory saving of lazy grad buffers only for the
+full-iteration CUDA graph path.  The eager and per-module CUDA graph paths keep
+the lazy allocation/free behavior described above.
+
 ### Activation recomputation
 
 During recomputation, the forward pre-hook fires again. `_maybe_free_grad_data()`

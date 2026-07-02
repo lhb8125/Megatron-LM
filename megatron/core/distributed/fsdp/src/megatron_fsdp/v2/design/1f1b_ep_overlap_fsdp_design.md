@@ -227,6 +227,8 @@ line 292: b_layer.attn.backward(grad)            ← autograd backward:
                                                    2. TE attn backward (act grads only if delay_wgrad)
                                                    3. autograd post-bwd hook → SKIPPED (delay_wgrad)
 line 301: b_layer.attn.backward_dw()             ← delayed TE attn wgrad
+                                                   → caller stream waits for the
+                                                     attn node's compute stream
                                                    → fires mfsdp_post_backward_hook(layer)
                                                    → layer.reshard() + layer.reduce_grad()
 ```
@@ -269,11 +271,73 @@ manually for the TransformerLayer via `set_fsdp_reshard_hooks` →
 are handled by `mfsdp_post_backward_final_callback` (called at
 `combined_1f1b.py:629`), which runs after all `backward_dw()` calls complete.
 
+The explicit layer callback also establishes a producer-to-consumer CUDA
+stream dependency before it reads gradients.  `TransformerLayerNode` queues
+normal backward and delayed wgrad kernels on the node stream, then calls
+`torch.cuda.current_stream().wait_stream(self.stream)` before invoking
+`mfsdp_post_backward_hook`.  Without this dependency, v2 can copy or
+reduce-scatter a router/wgrad tensor while its producer stream is still
+writing it.  The wait is GPU-asynchronous and is used for both delayed and
+inline wgrad callback paths.
+
+Force-balanced performance runs have an additional compatibility fallback.
+When Megatron-FSDP v2 and full-iteration CUDA graphs are combined with forced
+router load balancing, argument validation disables router fusion and auxiliary
+router load-balancing losses with a rank-0 warning.  At full Qwen3 scale, each
+path can independently return non-finite HybridEP/router gradients during the
+eager capture-stream warmup.  The unfused router without auxiliary router loss,
+and the same fused router without full-iteration graphs, produce matching finite
+loss and gradient norms.  Auxiliary router objectives are not meaningful in
+this benchmark mode because `RandomSTE` replaces the learned forward logits.
+The fallback is restricted to forced benchmark routing, so learned router
+training keeps the requested fusion and auxiliary-loss settings.
+
 For EP overlap **without** `delay_wgrad_compute`, the autograd hook fires at
 the right time (all grads are ready inline during backward), so it is
 **not** skipped.
 
-### 3.5 Hook fire count — what to expect
+### 3.5 Per-microbatch LayerNorm recompute state
+
+The overlap schedule can have several schedule plans for the same transformer
+layer in flight at once. Each plan owns a distinct `TransformerLayerState`.
+`CheckpointWithoutOutput` for the pre-MLP LayerNorm must therefore be stored on
+that per-plan state, not on the shared `TransformerLayer` instance. Otherwise a
+later microbatch can replace the checkpoint before an earlier microbatch reaches
+the expert boundary, causing the earlier path to discard or hook the wrong
+LayerNorm output. Router backward then reads invalid restored storage and can
+produce a non-finite `mlp.router.weight.grad`.
+
+### 3.6 LayerNorm checkpoint lifetime through HybridEP combine
+
+HybridEP `dispatch_preprocess()` returns a view of the pre-MLP LayerNorm output,
+and the dispatch handle remains live until `hybrid_ep_combine()` completes. The
+fine-grained schedule must therefore not discard the LayerNorm checkpoint output
+at the routed-expert boundary. FSDP v2's allocator can reuse that released
+storage while HybridEP still owns the dispatch lifetime, corrupting the router
+path seen during backward.
+
+The overlap path now waits for MoE combine and postprocess to produce the
+complete MLP output, then discards the checkpoint output immediately before
+BDA. Storage release and hook placement are intentionally separate: the hook is
+registered on the routed-expert output retained by the per-plan state. It fires
+with MLP backward on the compute stream, after combine backward and before
+dispatch/router backward. This preserves HybridEP's forward lifetime without
+running LayerNorm recompute from the combine node's communication stream.
+
+The Blackwell regression in
+`tests/unit_tests/a2a_overlap/test_fsdp_v2_layernorm_recompute.py` covers four
+interleaved microbatches with HybridEP, `topk=8`, MXFP8 parameter gather,
+delayed wgrad, and combined `moe_act` + `layernorm` recomputation. It also
+asserts that each LayerNorm recompute runs on the same compute stream as its
+original forward.
+
+### 3.7 Hook fire count — what to expect
+
+The FSDP 1F1B overlap regression suite includes a Blackwell-only production
+configuration with v2 FSDP, MXFP8 parameter gather, delayed wgrad, and
+selective pre-MLP LayerNorm recompute. It compares multi-step loss and final
+parameters against the standard v2 FSDP schedule so recompute coverage cannot
+silently fall back to the v1 implementation.
 
 `mfsdp_forward_pre_hook` fires on **every** `Module.__call__()`, not just on
 the FSDP unit modules.  Because the EP overlap schedule invokes sub-modules
@@ -402,6 +466,16 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
      calls `module.reduce_grad()` — copy grads → reduce-scatter → install DTensor grads.
   5. Sets `module.post_backward_issued = True`.
 
+For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
+the allocator `free` event but retains the buffer's tensor/view object. The
+trace spans the complete combined 1F1B iteration, including forward-only,
+steady-state overlap, and backward-only phases, so buffers are shared only when
+their lifetimes do not overlap in any phase. A logically released trace buffer
+is resurrected in place when a later microbatch uses the same key. After the
+last backward-only phase, each retained view is rebound to its planned address
+before graph capture; graph replay keeps that address while the recorded kernel
+order preserves the traced reuse lifetime.
+
 ### 4.5 Gradient sync suppression — `no_sync()`
 
 - **v2 status**: Returns `nullcontext` (no-op).
@@ -449,6 +523,7 @@ When `overlap_moe_expert_parallel_comm=True`, the following constraints apply:
 | M-FSDP v2 EP overlap e2e | `tests/unit_tests/distributed/megatron_fsdp/v2/test_mcore_nd_parallel.py` |
 | delay_wgrad_compute unit test | `tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py` |
 | FSDP 1F1B overlap test | `tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py` |
+| v2 MXFP8 LayerNorm recompute | `tests/unit_tests/a2a_overlap/test_fsdp_v2_layernorm_recompute.py` |
 
 ---
 

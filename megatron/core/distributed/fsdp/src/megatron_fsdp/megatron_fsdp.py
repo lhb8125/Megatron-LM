@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1289,7 +1289,9 @@ class MegatronFSDP(torch.nn.Module):
         """
         Synchronize parameter all-gather operations for all model parameters.
         """
-        self.all_gather_pipeline.reset()
+        self.all_gather_pipeline.reset(
+            preserve_non_fsdp_units=self.ddp_config.megatron_fsdp_cuda_graph_mode
+        )
         self._replace_param_with_distributed_if_needed()
 
     def synchronize_gradient_reduce(self):

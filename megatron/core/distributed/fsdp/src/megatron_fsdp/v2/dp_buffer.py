@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -442,10 +442,7 @@ class DataParallelBuffer:
         return True
 
     def _move_data_to(
-        self,
-        target_device: torch.device,
-        pin_memory: bool = False,
-        non_blocking: bool = True,
+        self, target_device: torch.device, pin_memory: bool = False, non_blocking: bool = True
     ) -> None:
         """Move ``self.data`` to *target_device*, optionally using pinned memory.
 
@@ -584,9 +581,7 @@ class DataParallelBuffer:
 
     @torch.no_grad()
     def unshard(
-        self,
-        bind_params: bool = False,
-        stream: Optional[torch.cuda.Stream] = None,
+        self, bind_params: bool = False, stream: Optional[torch.cuda.Stream] = None
     ) -> torch.Tensor:
         """All-gather the full buffer from all shards and bind parameter storage.
 
@@ -603,14 +598,17 @@ class DataParallelBuffer:
 
         sm = self.buffer_index.shard_meta
         shard_buffer = self.data[sm.local_data_index : sm.local_data_index + sm.size]
-        stream = stream or torch.cuda.current_stream()
-        stream.wait_stream(torch.cuda.current_stream())
+        caller_stream = torch.cuda.current_stream()
+        stream = stream or caller_stream
+        stream.wait_stream(caller_stream)
         with torch.cuda.stream(stream):
             torch.distributed.all_gather_into_tensor(
-                output_tensor=full_buffer,
-                input_tensor=shard_buffer,
-                group=self.dp_group,
+                output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
             )
+            if full_buffer.is_cuda:
+                # Temporary all-gather buckets may be released from another stream before
+                # the collective finishes; record the producer stream for allocator safety.
+                full_buffer.record_stream(stream)
 
         if bind_params:
             self._bind_buffer_to_params(full_buffer)
@@ -640,6 +638,54 @@ class DataParallelBuffer:
         self.allocator.free(self.alloc_key)
         self._unsharded_buffer = None
 
+    @torch.no_grad()
+    def release_unsharded_buffer_for_reuse(self) -> None:
+        """End this buffer's allocator lifetime while retaining its tensor view.
+
+        Full-iteration CUDA graphs need the tensor object and its eventual slot
+        address to remain stable through capture. The trace planner still needs
+        the logical free event so non-overlapping buffers can share that slot.
+        """
+        if not self.is_distributed or self._unsharded_buffer is None:
+            return
+        self.allocator.free(self.alloc_key)
+
+    @torch.no_grad()
+    def rebind_unsharded_buffer_to_allocator(self, *, zero: bool = False) -> bool:
+        """Rebind a cached full buffer to the optimized allocator slot.
+
+        During the TracePoolAllocator trace phase, ``fetch_buffer()`` caches the
+        trace bucket in ``_unsharded_buffer``.  Once ``plan()`` switches the
+        allocator to optimized slots, callers that intentionally keep the cached
+        buffer alive (full-iteration CUDA graph) must refresh this reference so
+        capture records the planned stable address instead of the trace bucket.
+        """
+        if not self.is_distributed or self._unsharded_buffer is None:
+            return False
+        if getattr(self.allocator, "phase", None) != "optimized":
+            return False
+
+        old_buffer = self._unsharded_buffer
+        bucket = self.allocator.allocate(
+            key=self.alloc_key,
+            size=self.buffer_index.bucket_meta.size,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        new_buffer = bucket.data
+        self.allocator.free(self.alloc_key)
+
+        if zero:
+            new_buffer.zero_()
+        else:
+            new_buffer.copy_(old_buffer)
+
+        dirty = getattr(old_buffer, "_dirty", None)
+        if dirty is not None:
+            setattr(new_buffer, "_dirty", dirty)
+        self._unsharded_buffer = new_buffer
+        return new_buffer.data_ptr() != old_buffer.data_ptr()
+
     def fetch_buffer(self, *, as_shard: bool = False) -> torch.Tensor:
         """Return the buffer, allocating the full unsharded view if needed.
 
@@ -653,7 +699,12 @@ class DataParallelBuffer:
         caching-allocator behaviour.
         """
         if self.is_distributed:
-            if self._unsharded_buffer is None:
+            trace_storage_was_released = (
+                self._unsharded_buffer is not None
+                and getattr(self.allocator, "phase", None) == "trace"
+                and self._unsharded_buffer._typed_storage()._size() == 0
+            )
+            if self._unsharded_buffer is None or trace_storage_was_released:
                 bucket = self.allocator.allocate(
                     key=self.alloc_key,
                     size=self.buffer_index.bucket_meta.size,

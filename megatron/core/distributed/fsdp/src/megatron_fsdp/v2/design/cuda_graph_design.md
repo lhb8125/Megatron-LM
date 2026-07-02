@@ -246,3 +246,55 @@ See `te_graph_runtime/README.md` for details and upstream attribution.
 | Graph replay | Automatic (MB2+, via `Graphed.apply`) |
 | RNG state | Handled by `make_graphed_callables` internally |
 | Slot state | Automatic (snapshot/restore) |
+
+## 12. Full-iteration CUDA graph integration
+
+Megatron's full-iteration CUDA graph wrapper (`cuda_graph_impl="full_iteration"`)
+captures the whole forward/backward step outside of the per-module
+`CudaGraphRunner` path described above.  FSDP v2 still needs stable buffer
+addresses for any tensors touched by the captured graph, so the adapter passes
+`enable_full_iteration_cuda_graph=True` into `fully_shard()` when
+`use_megatron_fsdp_v2` is active and the transformer config requests
+full-iteration capture.
+
+Forward-only validation/evaluation remains eager under the training
+full-iteration wrapper.  This keeps training CUDA graph capture independent from
+validation warmup side-stream state (for example FGAO h2d/d2h streams).
+
+The full-iteration path uses the same `TracePoolAllocator` stable-address
+foundation as per-module CUDA graphs, but it does not pop FSDP hooks.  Instead,
+the global wrapper captures the normal FSDP hook lifecycle.  This adds a few
+requirements:
+
+- `fully_shard()` selects `TracePoolAllocator` when
+  `enable_full_iteration_cuda_graph=True`.
+- `_pre_backward_setup()` pre-allocates dist grads and fetches the full
+  `main_grad_buffer` before capture so TE and FSDP write to fixed addresses.
+- `ParameterGroup.release_grad_buffer()` records logical allocator free events
+  while retaining the full `main_grad_buffer` tensor/view object. This lets
+  non-overlapping buffers share planned storage without changing capture-visible
+  tensor identities.
+- Hook-managed schedules call `TracePoolAllocator.plan()` after their first
+  complete backward. The externally managed combined 1F1B schedule defers the
+  plan until its full forward-only, steady, and backward-only trace is complete.
+  Cached full grad buffers are then rebound from trace buckets to planned slots
+  and zeroed before full-iteration capture, so trace and optimized storage do not
+  remain resident together.
+- `_maybe_free_grad_data()` keeps optimizer-facing gradient storage resident
+  for full-iteration replay.
+- `ParameterGroup.zero_grad()` clears existing buffer storage instead of
+  dropping the tensor objects, preserving the addresses captured by CUDA graph.
+- The full-iteration wrapper synchronizes outstanding FSDP parameter gathers
+  before capture, clears completed pre-capture v2 unshard event sentinels so
+  capture records fresh stream dependencies, joins v2 FSDP side streams before
+  the capture body exits, then zeros FSDP grad buffers after capture and before
+  the first replay so the captured backward does not immediately accumulate on
+  top of capture-time gradients.
+- Optimizer zero-grad preserves `decoupled_grad` objects marked by FSDP v2 and
+  zeros their local storage, keeping optimizer-facing DTensor addresses stable.
+
+Transformer Engine gradient-accumulation fusion is currently disabled by
+argument validation for Megatron-FSDP v2 plus full-iteration CUDA graph.  In the
+tested TE/PyTorch stack, TE wgrad-accumulation replay can write non-finite
+gradients even though regular wgrad accumulation is finite.  The validator
+falls back to non-fused wgrad accumulation until the TE replay path is safe.

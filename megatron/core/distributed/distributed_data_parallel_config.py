@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
@@ -222,6 +222,12 @@ class DistributedDataParallelConfig:
     """If true, Megatron-FSDP's ParamAndGradBuffer uses the precision-aware optimizer
       gradient path (e.g. `decoupled_grad` on optimizer parameters) instead of casting
       main gradients to parameter dtype for `.grad`.
+    """
+
+    megatron_fsdp_cuda_graph_mode: bool = False
+    """If true, Megatron-FSDP uses CUDA graph-safe operations, such as preserving
+    parameter gradient references after the optimizer step so replay writes into the
+    same storage captured by the graph.
     """
 
     use_megatron_fsdp_v2: bool = False

@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -79,9 +79,7 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
         return
 
     ctx = target._fsdp_root_context
-    assert not ctx.cuda_graph_active, (
-        "hooks must not fire during CUDA graph capture"
-    )
+    assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
 
     # ---- root: forward-phase setup (once per micro-batch) ------------------
     if target._fsdp_state._is_root:
@@ -112,9 +110,7 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
         and target.cuda_graph_compatible
     ):
         if ctx.cuda_graph_runner is None:
-            ctx.cuda_graph_runner = CudaGraphRunner(
-                graph_pool=ctx.cuda_graph_pool,
-            )
+            ctx.cuda_graph_runner = CudaGraphRunner(graph_pool=ctx.cuda_graph_pool)
         ctx.cuda_graph_runner.record_module(target, args, kwargs)
 
 
@@ -127,13 +123,10 @@ def mfsdp_post_forward_hook(module: nn.Module, *unused):
     """
     if not isinstance(module, FSDPModule):
         raise TypeError(
-            "mfsdp_post_forward_hook only supports FSDPModule, "
-            f"got {type(module).__name__}"
+            "mfsdp_post_forward_hook only supports FSDPModule, " f"got {type(module).__name__}"
         )
     ctx = module._fsdp_root_context
-    assert not ctx.cuda_graph_active, (
-        "hooks must not fire during CUDA graph capture"
-    )
+    assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
     if ctx.backward_phase and id(module) == ctx.backward_module:
         return
     module.reshard()
@@ -144,9 +137,7 @@ def mfsdp_post_forward_hook(module: nn.Module, *unused):
 # ---------------------------------------------------------------------------
 
 
-def _register_forward_pre_hook(
-    module: FSDPModule, fine_grained: bool = False
-) -> None:
+def _register_forward_pre_hook(module: FSDPModule, fine_grained: bool = False) -> None:
     """Register a pre-forward hook on the FSDP module or its sub-modules.
 
     Args:
@@ -162,27 +153,15 @@ def _register_forward_pre_hook(
             if fsdp_module is None or fsdp_module is not module:
                 continue
             submodule.register_forward_pre_hook(
-                mfsdp_forward_pre_hook, prepend=True, with_kwargs=True,
+                mfsdp_forward_pre_hook, prepend=True, with_kwargs=True
             )
     else:
-        module.register_forward_pre_hook(
-            mfsdp_forward_pre_hook, prepend=True, with_kwargs=True
-        )
+        module.register_forward_pre_hook(mfsdp_forward_pre_hook, prepend=True, with_kwargs=True)
 
 
 def _register_forward_hook(module: FSDPModule):
     """Register post-forward hook to reshard parameters."""
     module._mfsdp_forward_hook = module.register_forward_hook(mfsdp_post_forward_hook)
-
-
-
-def _maybe_capture_cuda_graphs(ctx, root_module) -> None:
-    """Trigger batch CUDA graph capture via ``ctx.cuda_graph_runner``."""
-    if ctx.cuda_graph_runner is not None:
-        with torch.enable_grad():
-            ctx.cuda_graph_runner.capture_and_install(
-                root_module, capture_stream=ctx.cuda_graph_stream,
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -231,13 +210,10 @@ def mfsdp_post_backward_hook(module: nn.Module):
     """
     if not isinstance(module, FSDPModule):
         raise TypeError(
-            "mfsdp_post_backward_hook only supports FSDPModule, "
-            f"got {type(module).__name__}"
+            "mfsdp_post_backward_hook only supports FSDPModule, " f"got {type(module).__name__}"
         )
     ctx = module._fsdp_root_context
-    assert not ctx.cuda_graph_active, (
-        "hooks must not fire during CUDA graph capture"
-    )
+    assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
 
     for submodule in module._get_fsdp_modules(recursive=True):
         if submodule.post_backward_issued:
@@ -269,14 +245,10 @@ def mfsdp_post_backward_final_callback(root_module: nn.Module):
             f"got {type(root_module).__name__}"
         )
     if not root_module._fsdp_state._is_root:
-        raise RuntimeError(
-            "mfsdp_post_backward_final_callback requires root FSDP module"
-        )
+        raise RuntimeError("mfsdp_post_backward_final_callback requires root FSDP module")
 
     ctx = root_module._fsdp_root_context
-    assert not ctx.cuda_graph_active, (
-        "hooks must not fire during CUDA graph capture"
-    )
+    assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
 
     # ---- handle modules whose per-module post-backward was skipped ----
     for module in reversed(ctx.forward_order):
@@ -308,25 +280,50 @@ def mfsdp_post_backward_final_callback(root_module: nn.Module):
     for module in ctx.forward_order:
         module._fsdp_pre_backward_done = False
 
-    # ---- trace → optimized transition (first micro-batch only) --------
-    if isinstance(ctx.bucket_allocator, TracePoolAllocator):
-        bucket_alloc = ctx.bucket_allocator
-        if bucket_alloc.phase == "trace":
-            if torch.distributed.get_rank() == 0:
-                logger.debug(bucket_alloc.dump_trace())
-                for m in ctx.forward_order:
-                    logger.debug(
-                        f"module_id={id(m)}, module_name={m._fsdp_module_name}"
-                    )
-            bucket_alloc.plan()
-        elif bucket_alloc.phase != "optimized":
-            raise ValueError(
-                f"Unexpected bucket allocator phase: {bucket_alloc.phase}"
-            )
+    if not ctx.defer_trace_pool_plan:
+        mfsdp_finalize_trace_pool(root_module)
+
+
+def mfsdp_finalize_trace_pool(root_module: nn.Module) -> None:
+    """Plan traced slots and rebind retained full-iteration gradient views."""
+    if not isinstance(root_module, FSDPModule):
+        raise TypeError(
+            "mfsdp_finalize_trace_pool only supports FSDPModule, "
+            f"got {type(root_module).__name__}"
+        )
+    if not root_module._fsdp_state._is_root:
+        raise RuntimeError("mfsdp_finalize_trace_pool requires root FSDP module")
+
+    ctx = root_module._fsdp_root_context
+    if not isinstance(ctx.bucket_allocator, TracePoolAllocator):
+        return
+
+    bucket_alloc = ctx.bucket_allocator
+    if bucket_alloc.phase == "optimized":
+        return
+    if bucket_alloc.phase != "trace":
+        raise ValueError(f"Unexpected bucket allocator phase: {bucket_alloc.phase}")
+
+    if torch.distributed.get_rank() == 0:
+        logger.debug(bucket_alloc.dump_trace())
+        for module in ctx.forward_order:
+            logger.debug(f"module_id={id(module)}, module_name={module._fsdp_module_name}")
+    bucket_alloc.plan()
+
+    rebound_grad_buffers = 0
+    for module in ctx.forward_order:
+        for param_group in module._fsdp_param_groups:
+            if param_group.rebind_full_iteration_grad_buffer():
+                rebound_grad_buffers += 1
+    if rebound_grad_buffers and torch.distributed.get_rank() == 0:
+        logger.debug(
+            "Rebound %s full-iteration CUDA graph grad buffers to "
+            "TracePoolAllocator planned slots",
+            rebound_grad_buffers,
+        )
 
     # ---- CUDA graph: batch capture (after first optimized forward+backward) --
     _maybe_capture_cuda_graphs(ctx, root_module)
-
 
 
 def _maybe_capture_cuda_graphs(ctx, root_module) -> None:
@@ -337,16 +334,15 @@ def _maybe_capture_cuda_graphs(ctx, root_module) -> None:
     """
     if ctx.cuda_graph_runner is not None:
         allocator = ctx.bucket_allocator
-        assert isinstance(allocator, TracePoolAllocator), (
-            "CUDA graph capture requires TracePoolAllocator"
-        )
+        assert isinstance(
+            allocator, TracePoolAllocator
+        ), "CUDA graph capture requires TracePoolAllocator"
         assert allocator.phase == "optimized", (
-            f"CUDA graph capture requires allocator phase='optimized', "
-            f"got '{allocator.phase}'"
+            f"CUDA graph capture requires allocator phase='optimized', " f"got '{allocator.phase}'"
         )
         with torch.enable_grad(), torch.cuda.amp.autocast(enabled=False):
             ctx.cuda_graph_runner.capture_and_install(
-                root_module, capture_stream=ctx.cuda_graph_stream,
+                root_module, capture_stream=ctx.cuda_graph_stream
             )
 
 
@@ -356,9 +352,7 @@ def _maybe_capture_cuda_graphs(ctx, root_module) -> None:
 
 
 def _create_custom_backward_hook(
-    module: nn.Module,
-    custom_backward_handler: Callable,
-    ctx_module: Optional[nn.Module] = None,
+    module: nn.Module, custom_backward_handler: Callable, ctx_module: Optional[nn.Module] = None
 ):
     """Wrap *module* so that ``custom_backward_handler`` fires as a
     pre-backward hook via ``register_multi_grad_hook``.
@@ -375,12 +369,10 @@ def _create_custom_backward_hook(
     @torch.compiler.disable
     def forward_hook(_module, inputs, output):
         if hasattr(_ctx_source, '_fsdp_root_context'):
-            assert not _ctx_source._fsdp_root_context.cuda_graph_active, (
-                "hooks must not fire during CUDA graph capture"
-            )
-        output = tree_map(
-            lambda t: t.view_as(t) if torch.is_tensor(t) else t, output
-        )
+            assert (
+                not _ctx_source._fsdp_root_context.cuda_graph_active
+            ), "hooks must not fire during CUDA graph capture"
+        output = tree_map(lambda t: t.view_as(t) if torch.is_tensor(t) else t, output)
 
         output_list = []
         if isinstance(output, torch.Tensor):
@@ -389,18 +381,14 @@ def _create_custom_backward_hook(
             output_list = [t for t in output if isinstance(t, torch.Tensor)]
 
         torch.autograd.graph.register_multi_grad_hook(
-            output_list,
-            lambda grads: custom_backward_handler(_module, grads),
-            mode="any",
+            output_list, lambda grads: custom_backward_handler(_module, grads), mode="any"
         )
         return output
 
     return module.register_forward_hook(forward_hook)
 
 
-def _pre_backward_setup(
-    module: FSDPModule, skip_final_callback: bool = False
-):
+def _pre_backward_setup(module: FSDPModule, skip_final_callback: bool = False):
     """Shared pre-backward logic: root setup, unshard, TE flags.
 
     Used by both the normal and fine-grained backward pre-hook paths.
@@ -421,9 +409,7 @@ def _pre_backward_setup(
        here so that memory addresses are fixed across graph replay iterations.
     """
     ctx = module._fsdp_root_context
-    assert not ctx.cuda_graph_active, (
-        "hooks must not fire during CUDA graph capture"
-    )
+    assert not ctx.cuda_graph_active, "hooks must not fire during CUDA graph capture"
 
     # ---- root: backward-phase setup -----------------------------------
     if module._fsdp_state._is_root:
@@ -444,10 +430,7 @@ def _pre_backward_setup(
     for param_group in module._fsdp_param_groups:
         for param in param_group.params:
             param.grad_added_to_main_grad = False
-            if param_group.sharding_strategy in (
-                "optim_grads_params",
-                "optim_grads",
-            ):
+            if param_group.sharding_strategy in ("optim_grads_params", "optim_grads"):
                 param.overwrite_main_grad = True
         # CUDA graph + TE wgrad fusion: during graph capture the eager backward
         # runs once and TE sets grad_added_to_main_grad=True on each param it
@@ -456,7 +439,10 @@ def _pre_backward_setup(
         # buffer and its full unsharded fetch-buffer BEFORE capture so that
         # memory addresses are fixed across replay iterations.  Without this,
         # TE would write to stale or uninitialised buffer addresses on replay.
-        if module._fsdp_state.enable_cuda_graph and param_group.main_grad_buffer is not None:
+        if (
+            module._fsdp_state.enable_cuda_graph
+            or module._fsdp_state.enable_full_iteration_cuda_graph
+        ) and param_group.main_grad_buffer is not None:
             param_group._init_dist_grads()
             param_group.main_grad_buffer.fetch_buffer()
 
@@ -469,9 +455,7 @@ def _pre_backward_setup(
 
 
 def _register_backward_pre_hook(
-    module: FSDPModule,
-    fine_grained: bool = False,
-    skip_final_callback: bool = False,
+    module: FSDPModule, fine_grained: bool = False, skip_final_callback: bool = False
 ):
     """Register backward pre-hook using multi-grad hooks on output tensors.
 
@@ -495,7 +479,8 @@ def _register_backward_pre_hook(
         return
 
     module._mfsdp_backward_pre_hook = _create_custom_backward_hook(
-        module, custom_backward_handler=lambda m, g: mfsdp_pre_backward_setup(
+        module,
+        custom_backward_handler=lambda m, g: mfsdp_pre_backward_setup(
             m, g, skip_final_callback=skip_final_callback
         ),
     )
@@ -509,6 +494,7 @@ def _register_backward_hook(module: FSDPModule):
     that triggers ``mfsdp_post_backward_hook`` after gradients are
     computed — resharding parameters and reducing gradients.
     """
+
     @torch.compiler.disable
     def _register_post_backward_hook(
         post_backward_hook: Callable,
@@ -523,9 +509,9 @@ def _register_backward_hook(module: FSDPModule):
         input tensors in an autograd Function. The Function's backward
         calls the post_backward_hook after gradients are computed.
         """
-        assert not module._fsdp_root_context.cuda_graph_active, (
-            "hooks must not fire during CUDA graph capture"
-        )
+        assert (
+            not module._fsdp_root_context.cuda_graph_active
+        ), "hooks must not fire during CUDA graph capture"
         if not torch.is_grad_enabled():
             return args, kwargs
 
@@ -562,8 +548,7 @@ def _register_backward_hook(module: FSDPModule):
         return args, kwargs
 
     module._mfsdp_backward_hook = module.register_forward_pre_hook(
-        functools.partial(_register_post_backward_hook, mfsdp_post_backward_hook),
-        with_kwargs=True,
+        functools.partial(_register_post_backward_hook, mfsdp_post_backward_hook), with_kwargs=True
     )
 
 
@@ -572,9 +557,7 @@ def _register_backward_hook(module: FSDPModule):
 # ---------------------------------------------------------------------------
 
 
-def _register_post_backward_final_callback(
-    state: _FSDPState, module: nn.Module
-) -> None:
+def _register_post_backward_final_callback(state: _FSDPState, module: nn.Module) -> None:
     """
     Enqueue a *single* engine callback that fires after every module's
     backward pass has completed.

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import contextlib
 from contextlib import nullcontext
@@ -69,10 +69,20 @@ def _get_mfsdp_post_backward_final_callback(root_module: nn.Module):
         from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
             mfsdp_post_backward_final_callback,
         )
+
         return mfsdp_post_backward_final_callback
 
     # v1
     return root_module.post_backward
+
+
+def _finalize_mfsdp_trace_pool(root_module: nn.Module) -> None:
+    """Finalize a deferred v2 trace after the complete 1F1B iteration."""
+    if not hasattr(root_module, '_fsdp_root_context'):
+        return
+    from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import mfsdp_finalize_trace_pool
+
+    mfsdp_finalize_trace_pool(root_module)
 
 
 def _get_mfsdp_pre_backward_setup(root_module: nn.Module):
@@ -90,9 +100,7 @@ def _get_mfsdp_pre_backward_setup(root_module: nn.Module):
         )
 
         def _v2_pre_backward(hook_module, grads=None, *, skip_final_callback=True):
-            mfsdp_pre_backward_setup(
-                hook_module, grads, skip_final_callback=skip_final_callback
-            )
+            mfsdp_pre_backward_setup(hook_module, grads, skip_final_callback=skip_final_callback)
 
         return _v2_pre_backward
 
@@ -116,6 +124,7 @@ def _get_mfsdp_reshard_hooks(root_module: nn.Module):
             mfsdp_post_backward_hook,
             mfsdp_post_forward_hook,
         )
+
         return mfsdp_post_forward_hook, mfsdp_post_backward_hook
 
     # v1
@@ -255,6 +264,8 @@ def combined_1f1b_schedule_for_no_pipelining(
         is_mfsdp=is_mfsdp,
         is_v1=is_v1,
     )
+    if is_v2:
+        _finalize_mfsdp_trace_pool(root_module)
     return forward_data_store, total_num_tokens
 
 

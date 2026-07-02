@@ -1244,6 +1244,39 @@ def validate_args(args, defaults={}):
         args.use_distributed_optimizer = True
         # Optimizer step MXFP8 buffer operation that is not relevant or supported for Megatron-FSDP.
         args.reuse_grad_buf_for_mxfp8_param_ag = False
+        if (
+            getattr(args, 'use_megatron_fsdp_v2', False)
+            and args.cuda_graph_impl == 'full_iteration'
+            and args.gradient_accumulation_fusion
+        ):
+            warn_rank_0(
+                'Megatron-FSDP v2 full-iteration CUDA graph currently disables '
+                'gradient_accumulation_fusion because TE wgrad-accumulation replay can '
+                'produce non-finite gradients. Falling back to regular wgrad accumulation.',
+                args.rank,
+            )
+            args.gradient_accumulation_fusion = False
+        if (
+            getattr(args, 'use_megatron_fsdp_v2', False)
+            and args.cuda_graph_impl == 'full_iteration'
+            and args.moe_router_force_load_balancing
+        ):
+            disabled_router_features = []
+            if args.moe_router_fusion:
+                args.moe_router_fusion = False
+                disabled_router_features.append('moe_router_fusion')
+            if args.moe_router_load_balancing_type != 'none':
+                args.moe_router_load_balancing_type = 'none'
+                args.moe_aux_loss_coeff = 0.0
+                disabled_router_features.append('router auxiliary load-balancing loss')
+            if disabled_router_features:
+                warn_rank_0(
+                    'Megatron-FSDP v2 full-iteration CUDA graph with force-load-balanced '
+                    f'routing disables {", ".join(disabled_router_features)} because these '
+                    'paths can produce non-finite HybridEP gradients during capture-stream '
+                    'warmup. Falling back to the unfused router without auxiliary router loss.',
+                    args.rank,
+                )
         # Optimizer compatibility check. Megatron-FSDP supports sgd/adam, plus the
         # single-root distributed Muon (FullyShardV2Muon) on the v2 path only
         # (the v2 ParameterGroup sets the dist_param back-references it needs).
