@@ -299,28 +299,27 @@ def mfsdp_finalize_trace_pool(root_module: nn.Module) -> None:
         return
 
     bucket_alloc = ctx.bucket_allocator
-    if bucket_alloc.phase == "optimized":
-        return
-    if bucket_alloc.phase != "trace":
+    if bucket_alloc.phase not in ("trace", "optimized"):
         raise ValueError(f"Unexpected bucket allocator phase: {bucket_alloc.phase}")
 
-    if torch.distributed.get_rank() == 0:
-        logger.debug(bucket_alloc.dump_trace())
-        for module in ctx.forward_order:
-            logger.debug(f"module_id={id(module)}, module_name={module._fsdp_module_name}")
-    bucket_alloc.plan()
+    if bucket_alloc.phase == "trace":
+        if torch.distributed.get_rank() == 0:
+            logger.debug(bucket_alloc.dump_trace())
+            for module in ctx.forward_order:
+                logger.debug(f"module_id={id(module)}, module_name={module._fsdp_module_name}")
+        bucket_alloc.plan()
 
-    rebound_grad_buffers = 0
-    for module in ctx.forward_order:
-        for param_group in module._fsdp_param_groups:
-            if param_group.rebind_full_iteration_grad_buffer():
-                rebound_grad_buffers += 1
-    if rebound_grad_buffers and torch.distributed.get_rank() == 0:
-        logger.debug(
-            "Rebound %s full-iteration CUDA graph grad buffers to "
-            "TracePoolAllocator planned slots",
-            rebound_grad_buffers,
-        )
+        rebound_grad_buffers = 0
+        for module in ctx.forward_order:
+            for param_group in module._fsdp_param_groups:
+                if param_group.rebind_full_iteration_grad_buffer():
+                    rebound_grad_buffers += 1
+        if rebound_grad_buffers and torch.distributed.get_rank() == 0:
+            logger.debug(
+                "Rebound %s full-iteration CUDA graph grad buffers to "
+                "TracePoolAllocator planned slots",
+                rebound_grad_buffers,
+            )
 
     # ---- CUDA graph: batch capture (after first optimized forward+backward) --
     _maybe_capture_cuda_graphs(ctx, root_module)
@@ -430,8 +429,18 @@ def _pre_backward_setup(module: FSDPModule, skip_final_callback: bool = False):
     for param_group in module._fsdp_param_groups:
         for param in param_group.params:
             param.grad_added_to_main_grad = False
-            if param_group.sharding_strategy in ("optim_grads_params", "optim_grads"):
+            if (
+                param_group.sharding_strategy in ("optim_grads_params", "optim_grads")
+                and not param_group.defer_full_param_and_grad_sync
+            ):
                 param.overwrite_main_grad = True
+        if (
+            param_group.defer_full_param_and_grad_sync
+            and not param_group._deferred_grad_accumulated
+            and param_group.main_grad_buffer is not None
+        ):
+            param_group._init_dist_grads()
+            param_group.main_grad_buffer.fetch_buffer().zero_()
         # CUDA graph + TE wgrad fusion: during graph capture the eager backward
         # runs once and TE sets grad_added_to_main_grad=True on each param it
         # writes to.  Under replay only the GPU kernel runs — the Python-side
