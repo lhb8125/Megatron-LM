@@ -70,6 +70,7 @@ class ParameterGroup:
         gradient_scaling_factor: Optional[float] = None,
         allocator: Optional[BucketAllocator] = None,
         defer_full_param_and_grad_sync: bool = False,
+        replicate_model_weight_buffer: bool = False,
     ):
         self.params = params
         self.param_idx: Dict[torch.nn.Parameter, int] = {p: i for i, p in enumerate(params)}
@@ -110,6 +111,7 @@ class ParameterGroup:
         self.allocator = allocator if allocator is not None else TemporaryBucketAllocator()
         self.enable_full_iteration_cuda_graph = False
         self.defer_full_param_and_grad_sync = defer_full_param_and_grad_sync
+        self.replicate_model_weight_buffer = replicate_model_weight_buffer
         self._deferred_grad_accumulated = False
 
         # Buffer references (initialized in _init_buffers)
@@ -164,7 +166,7 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
+        shard_weights = s == "optim_grads_params" and not self.replicate_model_weight_buffer
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
@@ -259,9 +261,10 @@ class ParameterGroup:
     def reshard(self, *, force: bool = False):
         """Reshard model weights by releasing unsharded buffer.
 
-        Selected small normalization groups keep their full parameter buffer
-        across micro-batches. The iteration grad-sync boundary passes
-        ``force=True`` so the next iteration gathers updated optimizer shards.
+        Selected small normalization groups use a replicated compute-weight
+        buffer and keep it across micro-batches. The iteration grad-sync
+        boundary still passes ``force=True`` to complete the common lifecycle;
+        ``DataParallelBuffer.reshard()`` is a no-op for that replicated buffer.
         """
         if self.defer_full_param_and_grad_sync and not force:
             return

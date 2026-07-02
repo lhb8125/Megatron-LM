@@ -549,6 +549,15 @@ class MixedPrecisionPolicy:
     ) -> None:
         """Install optimized main weights into model compute weights."""
         if main_weight_buffer is None:
+            if (
+                model_weight_buffer is not None
+                and not model_weight_buffer.is_distributed
+                and model_weight_buffer.sharding_strategy != "no_shard"
+            ):
+                # The optimizer updated only this rank's DTensor shard inside a
+                # replicated compute buffer. Gather the other shards before the
+                # next iteration reuses the full buffer.
+                model_weight_buffer.data._dirty = True
             return
 
         assert model_weight_buffer is not None, "main weights require a model-weight buffer"
