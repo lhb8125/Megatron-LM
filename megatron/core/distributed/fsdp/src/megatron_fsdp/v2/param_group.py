@@ -70,7 +70,7 @@ class ParameterGroup:
         gradient_scaling_factor: Optional[float] = None,
         allocator: Optional[BucketAllocator] = None,
         defer_full_param_and_grad_sync: bool = False,
-        replicate_model_weight_buffer: bool = False,
+        replicate_full_state: bool = False,
     ):
         self.params = params
         self.param_idx: Dict[torch.nn.Parameter, int] = {p: i for i, p in enumerate(params)}
@@ -98,6 +98,7 @@ class ParameterGroup:
         if sharding_strategy not in ("no_shard", "optim", "optim_grads", "optim_grads_params"):
             raise ValueError(f"Unsupported sharding strategy: {sharding_strategy}")
         self.sharding_strategy = sharding_strategy
+        self.buffer_sharding_strategy = "no_shard" if replicate_full_state else sharding_strategy
         self.param_group_id = param_group_id
 
         # Compute chunk size factor for alignment
@@ -111,7 +112,7 @@ class ParameterGroup:
         self.allocator = allocator if allocator is not None else TemporaryBucketAllocator()
         self.enable_full_iteration_cuda_graph = False
         self.defer_full_param_and_grad_sync = defer_full_param_and_grad_sync
-        self.replicate_model_weight_buffer = replicate_model_weight_buffer
+        self.replicate_full_state = replicate_full_state
         self._deferred_grad_accumulated = False
 
         # Buffer references (initialized in _init_buffers)
@@ -152,7 +153,7 @@ class ParameterGroup:
             param_group_id=self.param_group_id,
             gradient_scaling_factor=self.gradient_scaling_factor,
             chunk_size_factor=self.chunk_size_factor,
-            sharding_strategy=self.sharding_strategy,
+            sharding_strategy=self.buffer_sharding_strategy,
             mp_policy=self.mp_policy,
         )
 
@@ -165,8 +166,8 @@ class ParameterGroup:
         - main_weight_buffer: created if mp_policy.main_params_dtype is specified
         - main_grad_buffer: created if requires_grad
         """
-        s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params" and not self.replicate_model_weight_buffer
+        s = self.buffer_sharding_strategy
+        shard_weights = s == "optim_grads_params"
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
@@ -261,10 +262,9 @@ class ParameterGroup:
     def reshard(self, *, force: bool = False):
         """Reshard model weights by releasing unsharded buffer.
 
-        Selected small normalization groups use a replicated compute-weight
-        buffer and keep it across micro-batches. The iteration grad-sync
-        boundary still passes ``force=True`` to complete the common lifecycle;
-        ``DataParallelBuffer.reshard()`` is a no-op for that replicated buffer.
+        Selected small normalization support groups use replicated buffers and
+        keep them across micro-batches. ``DataParallelBuffer.reshard()`` is a
+        no-op for those buffers; ``force`` keeps the common caller contract.
         """
         if self.defer_full_param_and_grad_sync and not force:
             return
@@ -359,7 +359,7 @@ class ParameterGroup:
         """
         self.dist_params = []
         self.dist_grads = []  # placeholder, populated in _init_dist_grads
-        s = self.sharding_strategy
+        s = self.buffer_sharding_strategy
 
         # Determine placement based on sharding strategy
         is_param_shard = s in ("optim", "optim_grads", "optim_grads_params")
@@ -415,7 +415,7 @@ class ParameterGroup:
         gbuf.init_data(torch.empty(gbuf.data_size, dtype=gbuf.dtype, device=self.device))
 
         # Rebuild dist_grads views — dist_params are unchanged
-        s = self.sharding_strategy
+        s = self.buffer_sharding_strategy
         is_grad_shard = s in ("optim", "optim_grads", "optim_grads_params")
         placements = [Shard(dim=0)] if is_grad_shard else [Replicate()]
 
@@ -438,7 +438,7 @@ class ParameterGroup:
         auto-reload).  Updates the ``_local_tensor`` attribute inside existing
         DTensor objects so optimizer references remain valid.
         """
-        s = self.sharding_strategy
+        s = self.buffer_sharding_strategy
         is_param_shard = s in ("optim", "optim_grads", "optim_grads_params")
 
         for i, param in enumerate(self.params):

@@ -1027,23 +1027,11 @@ class FSDPModule:
 
     def _copy_main_weights_to_model_weights(self):
         """Copy main weight buffer to model weight buffer."""
-        replicated_weight_buffers = []
         for child in self.modules():
             if not isinstance(child, FSDPModule):
                 continue
             for param_group in child._fsdp_param_groups:
                 param_group.copy_main_weights_to_model_weights()
-                if param_group.replicate_model_weight_buffer:
-                    replicated_weight_buffers.append(param_group.model_weight_buffer)
-
-        buffer_runs = []
-        for weight_buffer in replicated_weight_buffers:
-            if buffer_runs and buffer_runs[-1][0] is weight_buffer.dp_group:
-                buffer_runs[-1][1].append(weight_buffer)
-            else:
-                buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
-        for dp_group, weight_buffers in buffer_runs:
-            _unshard_weight_buffers(dp_group, weight_buffers, async_op=False)
 
     def _compute_per_param_norms(self) -> Dict[str, Dict[str, float]]:
         """
@@ -1279,7 +1267,7 @@ def _get_module_fsdp_param_groups(
                 gradient_scaling_factor=gradient_scaling_factor,
                 sharding_strategy=sharding_strategy,
                 defer_full_param_and_grad_sync=defer_full_param_and_grad_sync,
-                replicate_model_weight_buffer=defer_full_param_and_grad_sync,
+                replicate_full_state=defer_full_param_and_grad_sync,
             )
         )
 

@@ -500,36 +500,30 @@ Under FP8 parameter gather, Transformer-layer normalization parameters and the
 MoE router stay in BF16 while the large attention/MLP matrices use quantized
 storage. For a ZeRO-3 parameter group containing hidden-size-bounded
 LayerNorm/RMSNorm parameters and, optionally, the bounded
-`[num_moe_experts, hidden_size]` router matrix, v2 keeps ZeRO-3 ownership for
-the optimizer-facing state but gives the small BF16 compute-weight buffer a
-replicated lifetime. This avoids recording the same small all-gather in every
+`[num_moe_experts, hidden_size]` router matrix, v2 treats the bounded BF16
+support state as a replicated exception to the requested ZeRO-3 strategy. This
+avoids recording the same small all-gather and reduce-scatter in every
 micro-batch of a full-iteration CUDA graph:
 
-1. The model-weight buffer is replicated while the FP32 main-weight buffer and
-   optimizer-facing DTensor remain sharded. After the optimizer updates this
-   rank's shard, `_copy_main_weights_to_model_weights()` batches the selected
-   buffers and all-gathers the updated shards in place at the iteration
-   boundary. The next iteration therefore enters every micro-batch with a
-   clean full buffer and records no support-weight all-gather in its forward
-   CUDA graph.
-2. Backward gradients accumulate in the temporary full gradient buffer across
+1. Model weights, main weights, optimizer-facing parameters, gradients, and
+   optimizer state are replicated for this bounded group. Every rank therefore
+   enters each micro-batch with the complete current support weights and no
+   parameter all-gather.
+2. Backward gradients accumulate in the full gradient buffer across
    micro-batches. TE fused accumulation keeps `overwrite_main_grad=False` for
    this group; ordinary `.grad` tensors use `copy_` on the first micro-batch
    and `add_` afterwards.
-3. `finish_grad_sync()` performs one reduce-scatter into the persistent local
-   grad shard and releases the full grad buffer. Its common force-reshard call
-   is a no-op for the replicated compute buffer; the optimizer-tail refresh
-   guarantees that the next iteration uses updated weights rather than stale
-   replicated data.
+3. `finish_grad_sync()` performs one all-reduce per iteration. Every rank then
+   applies the same optimizer update locally, so no optimizer-tail parameter
+   refresh is needed.
 
-The group's declared strategy remains `optim_grads_params`: main weights,
-persistent gradients, optimizer parameters, and optimizer state remain
-sharded. Only the small BF16 compute-weight buffer is replicated, while the
-temporary full gradient buffer spans the micro-batches.
+The group's requested strategy remains `optim_grads_params`, while
+`buffer_sharding_strategy` records the bounded `no_shard` exception used by
+its buffers and optimizer-facing DTensor. Large matrix state remains ZeRO-3.
 The selector requires an enabled FP8 policy, at least one exact normalization
 parameter, and no other parameters except the shape- and name-bounded router
 matrix. This preserves the existing same-dtype buffer and removes the whole
-small-group collective instead of splitting off a second collective. BF16
+small-group micro-batch collective instead of splitting off a second one. BF16
 training, quantized matrix weights, and any group containing another matrix
 retain the standard per-micro-batch ZeRO-3 lifecycle.
 
