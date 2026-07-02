@@ -1,8 +1,9 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_submodules,
@@ -16,6 +17,38 @@ from megatron.core.utils import is_te_min_version
 from megatron.training.arguments import parse_args
 from megatron.training.initialize import _set_random_seed
 from tests.unit_tests.test_utilities import Utils
+
+
+def test_fused_impl_pre_forward_hook_supports_hook_signatures():
+    linear_fc1 = nn.Module()
+    linear_fc2 = nn.Module()
+    calls = []
+
+    linear_fc1.register_forward_pre_hook(lambda module, args: calls.append(("args", module, args)))
+    linear_fc2.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(("kwargs", module, args, kwargs)),
+        with_kwargs=True,
+    )
+
+    grouped_mlp = type("GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2})()
+    hook = TEGroupedMLP._make_fused_impl_pre_forward_hook(grouped_mlp)
+    hook(nn.Module())
+
+    assert calls == [("args", linear_fc1, ()), ("kwargs", linear_fc2, (), {})]
+
+
+def test_fused_impl_pre_forward_hook_rejects_input_modification():
+    linear_fc1 = nn.Module()
+    linear_fc2 = nn.Module()
+    linear_fc1.register_forward_pre_hook(
+        lambda module, args, kwargs: (args, kwargs), with_kwargs=True
+    )
+
+    grouped_mlp = type("GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2})()
+    hook = TEGroupedMLP._make_fused_impl_pre_forward_hook(grouped_mlp)
+
+    with pytest.raises(RuntimeError, match="modifies the input tensor"):
+        hook(nn.Module())
 
 
 @pytest.mark.skipif(

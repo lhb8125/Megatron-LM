@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Portions of this code are from DeepSeek DeepEP project
 # Copyright (c) 2025 DeepSeek
 # Licensed under the MIT License - https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE
@@ -30,6 +30,57 @@ def get_hidden_bytes(x: torch.Tensor) -> int:
         int: Number of hidden bytes
     """
     return x.size(1) * max(x.element_size(), 2)
+
+
+def trim_hybridep_static_budget_padding(
+    tensor: torch.Tensor, target_num_rows: int, *, tensor_name: str, target_name: str
+) -> torch.Tensor:
+    """Trim static-budget padding rows while preserving the required row contract."""
+    if tensor.shape[0] == target_num_rows:
+        return tensor
+    if tensor.shape[0] < target_num_rows:
+        raise RuntimeError(
+            f"HybridEP returned fewer {tensor_name} rows than {target_name}: "
+            f"{tensor.shape[0]} < {target_num_rows}"
+        )
+    return tensor[:target_num_rows]
+
+
+def zero_hybridep_static_budget_padding_by_expert(
+    tensor: torch.Tensor,
+    padded_tokens_per_expert: list[int],
+    actual_tokens_per_expert: list[int],
+    *,
+    tensor_name: str,
+) -> torch.Tensor:
+    """Zero HybridEP static-budget padding rows within each expert segment."""
+    if len(padded_tokens_per_expert) != len(actual_tokens_per_expert):
+        raise RuntimeError(
+            f"HybridEP {tensor_name} padding metadata mismatch: "
+            f"{len(padded_tokens_per_expert)} padded counts vs "
+            f"{len(actual_tokens_per_expert)} actual counts"
+        )
+
+    offset = 0
+    for padded_count, actual_count in zip(padded_tokens_per_expert, actual_tokens_per_expert):
+        if actual_count > padded_count:
+            raise RuntimeError(
+                f"HybridEP {tensor_name} actual count exceeds padded segment: "
+                f"{actual_count} > {padded_count}"
+            )
+        next_offset = offset + padded_count
+        if next_offset > tensor.shape[0]:
+            raise RuntimeError(
+                f"HybridEP returned fewer {tensor_name} rows than padded expert segments: "
+                f"{tensor.shape[0]} < {next_offset}"
+            )
+        if actual_count < padded_count:
+            tensor.narrow(0, offset + actual_count, padded_count - actual_count).zero_()
+        offset = next_offset
+
+    if offset < tensor.shape[0]:
+        tensor.narrow(0, offset, tensor.shape[0] - offset).zero_()
+    return tensor
 
 
 def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
@@ -496,7 +547,16 @@ class HybridEPCombine(torch.autograd.Function):
     '''
 
     @staticmethod
-    def forward(ctx, x, handle, num_permuted_tokens=None, pad_multiple=None, fused=False):
+    def forward(
+        ctx,
+        x,
+        handle,
+        num_permuted_tokens=None,
+        pad_multiple=None,
+        fused=False,
+        padded_tokens_per_expert=None,
+        actual_tokens_per_expert=None,
+    ):
         '''
         Forward pass of fused combine of the HybridEP backend
         '''
@@ -507,9 +567,12 @@ class HybridEPCombine(torch.autograd.Function):
             **({"fuse_unpermute_combine": fused} if fused else {}),
         )
         ctx.handle = handle
+        ctx.input_num_tokens = x.shape[0]
         ctx.pad_multiple = pad_multiple
         ctx.num_permuted_tokens = num_permuted_tokens
         ctx.fused = fused
+        ctx.padded_tokens_per_expert = padded_tokens_per_expert
+        ctx.actual_tokens_per_expert = actual_tokens_per_expert
         return combined_hidden
 
     @staticmethod
@@ -526,7 +589,20 @@ class HybridEPCombine(torch.autograd.Function):
             num_permuted_tokens=ctx.num_permuted_tokens,
             **({"fuse_permute_dispatch": ctx.fused} if ctx.fused else {}),
         )
-        return dispatched_hidden, None, None, None, None
+        dispatched_hidden = trim_hybridep_static_budget_padding(
+            dispatched_hidden,
+            ctx.input_num_tokens,
+            tensor_name="combine-backward dispatched hidden",
+            target_name="the combine input",
+        )
+        if ctx.padded_tokens_per_expert is not None:
+            dispatched_hidden = zero_hybridep_static_budget_padding_by_expert(
+                dispatched_hidden,
+                ctx.padded_tokens_per_expert,
+                ctx.actual_tokens_per_expert,
+                tensor_name="combine-backward dispatched hidden grad",
+            )
+        return dispatched_hidden, None, None, None, None, None, None
 
 
 if HAVE_HYBRIDEP:
@@ -597,7 +673,15 @@ if HAVE_HYBRIDEP:
         )
 
     @internal_api
-    def hybrid_ep_combine(x, handle, num_permuted_tokens, pad_multiple, fused=False):
+    def hybrid_ep_combine(
+        x,
+        handle,
+        num_permuted_tokens,
+        pad_multiple,
+        fused=False,
+        padded_tokens_per_expert=None,
+        actual_tokens_per_expert=None,
+    ):
         '''
         Perform fused combine operation for unpermute + combine a2a + unpermute
         using the HybridEP backend
@@ -614,7 +698,15 @@ if HAVE_HYBRIDEP:
                 The alignment multiple required for FP8 GEMM. If not provided, no padding
                 is performed.
         '''
-        return HybridEPCombine.apply(x, handle, num_permuted_tokens, pad_multiple, fused)
+        return HybridEPCombine.apply(
+            x,
+            handle,
+            num_permuted_tokens,
+            pad_multiple,
+            fused,
+            padded_tokens_per_expert,
+            actual_tokens_per_expert,
+        )
 
 else:
     hybrid_ep_dispatch = None

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import pytest
 import torch
@@ -284,6 +284,16 @@ class TestPagedStashing:
             assert (
                 num_tokens_per_ep_rank > 0
             ), f"num_tokens_per_ep_rank={num_tokens_per_ep_rank} (expected > 0)"
+            map_tokens_per_expert = _tokens_per_expert_from_routing_map(
+                routing_map, container.moe_layer
+            )
+            map_tokens_per_expert = _pad_token_counts_to_align_size(
+                map_tokens_per_expert, get_align_size_for_quantization(container.config)
+            )
+            assert torch.equal(tokens_per_expert, map_tokens_per_expert), (
+                "paged stash must receive actual aligned expert token counts, not the "
+                "static dispatch-buffer capacity"
+            )
             assert routing_map_ref is not None and tokens_per_expert_ref is not None
             tpe_f = tokens_per_expert.float()
             ref_f = tokens_per_expert_ref.float()

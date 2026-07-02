@@ -180,6 +180,12 @@ models as well:
 --moe-paged-stash
 ```
 
+HybridEP records both padded and actual per-expert token counts during warmup. Capture reuses the
+cached padded counts to keep dispatch and grouped-expert shapes stable, while padding rows are
+zeroed before expert compute and combine backward. When full-iteration capture is used without an
+explicit expert-rank capacity factor, HybridEP reserves a 1.2x balanced-token budget for the same
+shape-stability guarantee.
+
 ---
 
 ## Additional Notes
