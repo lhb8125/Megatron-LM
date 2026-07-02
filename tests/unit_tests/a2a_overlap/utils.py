@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -196,7 +196,15 @@ def compare_captures(capture_ref, capture_a2a_overlap, verbose=False, skip_embed
     return True, "pass"
 
 
-def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_grouped_gemm=True):
+def get_test_config(
+    num_layers=1,
+    num_moe_experts=8,
+    extra_kwargs={},
+    moe_grouped_gemm=True,
+    multi_latent_attention=True,
+    num_attention_heads=128,
+    kv_channels=128,
+):
     config = MLATransformerConfig(
         attention_backend="unfused",
         pipeline_model_parallel_size=1,
@@ -208,12 +216,12 @@ def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_groupe
         num_layers=num_layers,
         hidden_size=512,
         add_bias_linear=False,
-        num_attention_heads=128,
+        num_attention_heads=num_attention_heads,
         ffn_hidden_size=512,
-        kv_channels=128,
+        kv_channels=kv_channels,
         hidden_dropout=0.0,
         attention_dropout=0.0,
-        multi_latent_attention=True,
+        multi_latent_attention=multi_latent_attention,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
         moe_router_dtype="fp32",
@@ -291,7 +299,7 @@ def forward_step_func(data_iterator, model, return_schedule_plan=False):
     return output, loss_func
 
 
-def overlap_train_step(model, optimizer, config, data):
+def overlap_train_step(model, optimizer, config, data, num_microbatches=1, finalize_fsdp=False):
     """One overlap forward-backward-optimizer step. Return scalar loss."""
     from contextlib import nullcontext
 
@@ -303,9 +311,9 @@ def overlap_train_step(model, optimizer, config, data):
     forward_data_store = []
     combined_1f1b_schedule_for_no_pipelining(
         forward_step_func=forward_step_func,
-        data_iterator=iter([data]),
+        data_iterator=iter([data] * num_microbatches),
         model=model,
-        num_microbatches=1,
+        num_microbatches=num_microbatches,
         input_tensor=None,
         output_tensor_grad=None,
         forward_data_store=forward_data_store,
@@ -318,8 +326,12 @@ def overlap_train_step(model, optimizer, config, data):
         check_first_val_step=lambda cond: cond,
     )
     torch.cuda.synchronize()
-    loss = forward_data_store[0]['lm loss'].detach().clone()
+    loss = torch.stack([entry['lm loss'] for entry in forward_data_store]).sum().detach().clone()
+    if finalize_fsdp:
+        model.finish_grad_sync()
     optimizer.step()
+    if finalize_fsdp:
+        model.param_and_grad_buffer.copy_main_weights_to_model_weights()
     return loss
 
 
