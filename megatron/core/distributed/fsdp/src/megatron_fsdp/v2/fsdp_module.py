@@ -1246,11 +1246,7 @@ def _get_module_fsdp_param_groups(
         # The policy owns dtype-sensitive grouping, including FP8/MXFP8 tensors
         # whose logical dtype may differ from their communication payload.
         param_dtype = mp_policy.group_key_dtype(param)
-        param_name = param_to_name[param]
-        defer_fp8_norm_sync = _is_fp8_norm_param(
-            module, param_name, param, mp_policy, sharding_strategy
-        )
-        param_attrs = (param.device, param_dtype, param.requires_grad, defer_fp8_norm_sync)
+        param_attrs = (param.device, param_dtype, param.requires_grad)
         if param_attrs not in param_groups:
             param_groups[param_attrs] = []
         param_groups[param_attrs].append(param)
@@ -1302,6 +1298,39 @@ def _is_fp8_norm_param(
     )
 
 
+def _is_fp8_router_param(
+    module: nn.Module,
+    param_name: str,
+    param: nn.Parameter,
+    mp_policy: MixedPrecisionPolicy,
+    sharding_strategy: str,
+) -> bool:
+    """Return whether one bounded MoE router matrix may share delayed norm sync."""
+    if sharding_strategy != "optim_grads_params" or not mp_policy.fp8.enabled:
+        return False
+
+    config = getattr(module, "config", None)
+    hidden_size = getattr(config, "hidden_size", None)
+    num_moe_experts = getattr(config, "num_moe_experts", None)
+    if (
+        not isinstance(hidden_size, int)
+        or hidden_size <= 0
+        or not isinstance(num_moe_experts, int)
+        or num_moe_experts <= 0
+    ):
+        return False
+
+    return (
+        param_name.lower().endswith("router.weight")
+        and not mp_policy.is_fp8_param(param)
+        and not mp_policy.is_nvfp4_param(param)
+        and param.ndim == 2
+        and param.shape[-1] == hidden_size
+        and param.shape[0] <= num_moe_experts
+        and param.numel() <= hidden_size * num_moe_experts
+    )
+
+
 def _should_defer_fp8_norm_sync(
     module: nn.Module,
     param_names: List[str],
@@ -1309,9 +1338,17 @@ def _should_defer_fp8_norm_sync(
     mp_policy: MixedPrecisionPolicy,
     sharding_strategy: str,
 ) -> bool:
-    """Select small non-quantized normalization groups in an FP8 ZeRO-3 module."""
+    """Select bounded FP8 support groups containing norms and an optional router."""
     assert len(param_names) == len(params)
-    return bool(params) and all(
+    norm_flags = [
         _is_fp8_norm_param(module, name, param, mp_policy, sharding_strategy)
         for name, param in zip(param_names, params)
+    ]
+    return (
+        bool(params)
+        and any(norm_flags)
+        and all(
+            is_norm or _is_fp8_router_param(module, name, param, mp_policy, sharding_strategy)
+            for name, param, is_norm in zip(param_names, params, norm_flags)
+        )
     )

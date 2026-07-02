@@ -14,6 +14,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as f
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import (
     FSDPModule,
     _is_fp8_norm_param,
+    _is_fp8_router_param,
     _should_defer_fp8_norm_sync,
 )
 from megatron.core.enums import Fp8Recipe
@@ -143,14 +144,14 @@ def test_fp8_norm_sync_selector_is_narrow():
             return False
 
     module = torch.nn.Module()
-    module.config = SimpleNamespace(hidden_size=16)
+    module.config = SimpleNamespace(hidden_size=16, num_moe_experts=4)
     params = [torch.nn.Parameter(torch.ones(16)), torch.nn.Parameter(torch.ones(16))]
     router = torch.nn.Parameter(torch.ones(4, 16))
 
     assert _is_fp8_norm_param(
         module, "input_layernorm.weight", params[0], FakePolicy(), "optim_grads_params"
     )
-    assert not _is_fp8_norm_param(
+    assert _is_fp8_router_param(
         module, "mlp.router.weight", router, FakePolicy(), "optim_grads_params"
     )
 
@@ -161,10 +162,17 @@ def test_fp8_norm_sync_selector_is_narrow():
         FakePolicy(),
         "optim_grads_params",
     )
-    assert not _should_defer_fp8_norm_sync(
+    assert _should_defer_fp8_norm_sync(
         module,
         ["input_layernorm.weight", "router.weight"],
-        params,
+        [params[0], router],
+        FakePolicy(),
+        "optim_grads_params",
+    )
+    assert not _should_defer_fp8_norm_sync(
+        module,
+        ["input_layernorm.weight", "mlp.linear_fc1.weight"],
+        [params[0], router],
         FakePolicy(),
         "optim_grads_params",
     )
@@ -276,10 +284,18 @@ class TestFSDPV2LayerNormRecompute:
                         assert param_group.sharding_strategy == "optim_grads_params"
                         if param_group.defer_full_param_and_grad_sync:
                             deferred_groups.append((param_names, param_group))
+                            normalized_names = [
+                                name.lower().replace("_", "") for name in param_names
+                            ]
+                            assert any(
+                                "layernorm" in name or "rmsnorm" in name
+                                for name in normalized_names
+                            )
                             assert all(
-                                "layernorm" in name.lower().replace("_", "")
-                                or "rmsnorm" in name.lower().replace("_", "")
-                                for name in param_names
+                                "layernorm" in name
+                                or "rmsnorm" in name
+                                or name.endswith("router.weight")
+                                for name in normalized_names
                             )
                 assert deferred_groups
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)

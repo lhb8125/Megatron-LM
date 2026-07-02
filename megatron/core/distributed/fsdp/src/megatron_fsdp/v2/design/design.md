@@ -496,11 +496,13 @@ transpose buffer is refreshed on backward unshard, where
 
 ### FP8 normalization groups with iteration-delayed synchronization
 
-Under FP8 parameter gather, Transformer-layer normalization parameters stay
-in BF16 while matrix weights use quantized storage. For a ZeRO-3 parameter
-group containing only one-dimensional LayerNorm/RMSNorm parameters bounded by
-the module hidden size, v2 keeps the ZeRO-3 ownership model but delays its
-temporary full-buffer synchronization to the iteration boundary:
+Under FP8 parameter gather, Transformer-layer normalization parameters and the
+MoE router stay in BF16 while the large attention/MLP matrices use quantized
+storage. For a ZeRO-3 parameter group containing hidden-size-bounded
+LayerNorm/RMSNorm parameters and, optionally, the bounded
+`[num_moe_experts, hidden_size]` router matrix, v2 keeps the ZeRO-3 ownership
+model but delays its temporary full-buffer synchronization to the iteration
+boundary:
 
 1. The first micro-batch all-gathers the full normalization weights. Normal
    post-forward/post-backward reshard calls reinstall optimizer-facing
@@ -517,12 +519,12 @@ temporary full-buffer synchronization to the iteration boundary:
 The group's declared strategy remains `optim_grads_params`: model weights,
 main weights, persistent gradients, and optimizer state are all still sharded.
 Only the small temporary full weight/gradient buffers span the micro-batches.
-The selector requires an enabled FP8 policy and exact normalization-only
-groups. The parameter-group key includes this eligibility bit so normalization
-parameters are separated from same-dtype parameters such as the MoE router
-matrix before group construction. BF16 training, quantized matrix weights, and
-the non-normalization subgroup retain the standard per-micro-batch ZeRO-3
-lifecycle.
+The selector requires an enabled FP8 policy, at least one exact normalization
+parameter, and no other parameters except the shape- and name-bounded router
+matrix. This preserves the existing same-dtype buffer and removes the whole
+small-group collective instead of splitting off a second collective. BF16
+training, quantized matrix weights, and any group containing another matrix
+retain the standard per-micro-batch ZeRO-3 lifecycle.
 
 ---
 
