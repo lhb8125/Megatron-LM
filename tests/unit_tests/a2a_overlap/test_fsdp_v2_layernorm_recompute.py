@@ -11,6 +11,7 @@ import torch
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module as fsdp_module_impl
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import hooks as hooks_impl
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.fsdp_module import (
     FSDPModule,
     _is_fp8_norm_param,
@@ -119,6 +120,36 @@ def test_singleton_unshard_detection(world_sizes, expected):
     module = type("FakeModule", (), {"_fsdp_param_groups": [FakeParamGroup(buffers)]})()
 
     assert fsdp_module_impl._uses_singleton_dp_for_unshard(module, bwd_pass=True) is expected
+
+
+def test_backward_recompute_requests_forward_and_backward_buffers(monkeypatch):
+    calls = []
+
+    class FakeParamGroup:
+        @staticmethod
+        def _maybe_free_grad_data():
+            calls.append("free_grad")
+
+    class FakeTarget:
+        _fsdp_state = SimpleNamespace(_is_root=False, enable_cuda_graph=False)
+        _fsdp_root_context = SimpleNamespace(
+            cuda_graph_active=False, backward_phase=True, enable_unshard_prefetch=True
+        )
+        _fsdp_param_groups = [FakeParamGroup()]
+
+        @staticmethod
+        def unshard(**kwargs):
+            calls.append(kwargs)
+
+    target = FakeTarget()
+    monkeypatch.setattr(hooks_impl, "_find_fsdp_target", lambda _module: target)
+
+    hooks_impl.mfsdp_forward_pre_hook(torch.nn.Identity(), (), {})
+
+    assert calls == [
+        {"async_op": True, "bwd_pass": True, "include_forward_buffers": True},
+        "free_grad",
+    ]
 
 
 @pytest.mark.parametrize(("world_size", "expected"), [(1, True), (2, False), (None, False)])

@@ -157,10 +157,14 @@ behavior.
 module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
 
 # _register_backward_pre_hook (called inside register_multi_grad_hook):
-module.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
+module.unshard(
+    async_op=ctx.enable_unshard_prefetch,
+    bwd_pass=True,
+    include_forward_buffers=True,
+)
 ```
 
-### `FSDPModule.unshard(async_op, bwd_pass)`
+### `FSDPModule.unshard(async_op, bwd_pass, include_forward_buffers)`
 
 ```python
 stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
