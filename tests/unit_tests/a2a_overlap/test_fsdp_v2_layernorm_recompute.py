@@ -352,6 +352,7 @@ class TestFSDPV2LayerNormRecompute:
                         recompute_config,
                         data,
                         num_microbatches=NUM_MICROBATCHES,
+                        finalize_fsdp=True,
                     )
                     assert torch.isfinite(
                         recompute_loss

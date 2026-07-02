@@ -299,7 +299,7 @@ def forward_step_func(data_iterator, model, return_schedule_plan=False):
     return output, loss_func
 
 
-def overlap_train_step(model, optimizer, config, data, num_microbatches=1):
+def overlap_train_step(model, optimizer, config, data, num_microbatches=1, finalize_fsdp=False):
     """One overlap forward-backward-optimizer step. Return scalar loss."""
     from contextlib import nullcontext
 
@@ -327,7 +327,11 @@ def overlap_train_step(model, optimizer, config, data, num_microbatches=1):
     )
     torch.cuda.synchronize()
     loss = torch.stack([entry['lm loss'] for entry in forward_data_store]).sum().detach().clone()
+    if finalize_fsdp:
+        model.finish_grad_sync()
     optimizer.step()
+    if finalize_fsdp:
+        model.param_and_grad_buffer.copy_main_weights_to_model_weights()
     return loss
 
 
