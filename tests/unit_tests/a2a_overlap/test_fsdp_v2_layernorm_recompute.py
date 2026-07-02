@@ -269,6 +269,7 @@ class TestFSDPV2LayerNormRecompute:
             "moe_permute_fusion": True,
             "fp8": mxfp8_flags[0][0],
             "fp8_recipe": mxfp8_flags[0][1],
+            "fp8_param": True,
             "overlap_moe_expert_parallel_comm": True,
             "delay_wgrad_compute": True,
             "recompute_granularity": "selective",
@@ -283,7 +284,8 @@ class TestFSDPV2LayerNormRecompute:
                 overlap_grad_reduce=True,
                 overlap_param_gather=True,
                 fp8_param_gather=True,
-                megatron_fsdp_main_params_dtype=None,
+                megatron_fsdp_main_params_dtype=torch.float32,
+                megatron_fsdp_main_grads_dtype=torch.bfloat16,
             )
 
         try:
@@ -308,11 +310,14 @@ class TestFSDPV2LayerNormRecompute:
                     fsdp_unit_modules=[TransformerLayer],
                 )
                 deferred_groups = []
+                mxfp8_groups = []
                 for fsdp_module in recompute_fsdp.modules():
                     if not isinstance(fsdp_module, FSDPModule):
                         continue
                     for param_names, param_group in fsdp_module._named_param_groups:
                         assert param_group.sharding_strategy == "optim_grads_params"
+                        if param_group.transpose_weight_buffer is not None:
+                            mxfp8_groups.append((param_names, param_group))
                         if param_group.defer_full_param_and_grad_sync:
                             deferred_groups.append((param_names, param_group))
                             assert param_group.replicate_model_weight_buffer
@@ -331,6 +336,7 @@ class TestFSDPV2LayerNormRecompute:
                                 or name.endswith("router.weight")
                                 for name in normalized_names
                             )
+                assert mxfp8_groups, "test model must contain MXFP8 parameter buffers"
                 assert deferred_groups
                 assert isinstance(recompute_model.embedding.word_embeddings, FSDPModule)
                 assert isinstance(recompute_model.output_layer, FSDPModule)
