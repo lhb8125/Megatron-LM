@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 from contextlib import nullcontext
 
 import pytest
@@ -286,6 +286,41 @@ class TestA2AOverlap:
                 capture_ref = run_transformer_layer_ref_with_capture(
                     gpt_model, input_tensors, microbatches
                 )
+            reset_model(gpt_model, params)
+            capture_a2a_overlap = run_transformer_layer_a2a_overlap_with_capture(
+                gpt_model, input_tensors, microbatches
+            )
+            comp_res = compare_captures(capture_ref, capture_a2a_overlap, True)
+            assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+
+    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
+    def test_transformer_layer_overlap_layernorm_recompute_multiple_microbatches(self):
+        """LayerNorm checkpoints must remain owned by their microbatch schedule plan."""
+        extra_kwargs = {
+            "moe_token_dispatcher_type": "alltoall",
+            "recompute_granularity": "selective",
+            "recompute_modules": ["layernorm"],
+        }
+        config = get_test_config(extra_kwargs=extra_kwargs)
+        microbatches = 4
+        with deterministic_mode():
+            transformer_layer_spec = get_gpt_decoder_block_spec(
+                config=config, use_transformer_engine=True
+            )
+            gpt_model = GPTModel(
+                config=config,
+                transformer_layer_spec=transformer_layer_spec,
+                vocab_size=100,
+                pre_process=True,
+                post_process=True,
+                max_sequence_length=300,
+            )
+
+            params = reset_model(gpt_model)
+            input_tensors = [build_data() for _ in range(microbatches)]
+            capture_ref = run_transformer_layer_ref_with_capture(
+                gpt_model, input_tensors, microbatches
+            )
             reset_model(gpt_model, params)
             capture_a2a_overlap = run_transformer_layer_a2a_overlap_with_capture(
                 gpt_model, input_tensors, microbatches

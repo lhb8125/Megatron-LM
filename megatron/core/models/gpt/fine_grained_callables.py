@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import weakref
 from contextlib import nullcontext
@@ -335,8 +335,13 @@ class TransformerLayerNode(ScheduleNode):
         """Execute backward pass and corresponding hooks."""
         grads = super().backward(*output_grad)
         if not self.delay_wgrad_compute and self.is_layer_first_node:
-            self._post_backward_hook()
+            self._run_post_backward_hook()
         return grads
+
+    def _run_post_backward_hook(self):
+        """Run the layer callback after work queued on this node's stream."""
+        torch.cuda.current_stream().wait_stream(self.stream)
+        self._post_backward_hook()
 
     def backward_dw(self):
         """Computes the weight gradients for the transformer layer node."""
@@ -377,7 +382,7 @@ class TransformerLayerNode(ScheduleNode):
 
         # Execute TransformerLayer backward hook.
         if self.is_layer_first_node:
-            self._post_backward_hook()
+            self._run_post_backward_hook()
 
         self.bwd_dw_callables = None
 
@@ -539,9 +544,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 mlp_norm_manager = off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm")
                 node.layer_state.mlp_norm_manager = mlp_norm_manager
                 if layer.recompute_pre_mlp_layernorm:
-                    layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+                    pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+                    node.layer_state.pre_mlp_norm_checkpoint = pre_mlp_norm_checkpoint
                     with mlp_norm_manager as hidden_states:
-                        pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
+                        pre_mlp_layernorm_output = pre_mlp_norm_checkpoint.checkpoint(
                             apply_module(layer.pre_mlp_layernorm), hidden_states
                         )
                 else:
@@ -623,16 +629,16 @@ def build_transformer_layer_callables(layer: TransformerLayer):
 
         expert_output, _ = layer.mlp.routed_experts_compute(dispatched_tokens, dispatched_probs)
 
+        if layer.recompute_pre_mlp_layernorm:
+            # Keep the compute-stream tensor so recompute runs with MLP backward rather than
+            # from the combine node's communication stream.
+            node.layer_state.pre_mlp_recompute_hook_tensor = expert_output
+
         # For HybridEP, tokens_per_expert is generated on comm stream, as the input to
         # `routed_experts_compute`, a ref is needed to prevent it from being freed.
         if enable_hybridep:
             tokens_per_expert = token_dispatcher._comm_manager.get_number_of_tokens_per_expert()
             node.layer_state.tokens_per_expert = tokens_per_expert
-
-        if layer.recompute_pre_mlp_layernorm:
-            # discard the output of the pre-mlp layernorm and register the recompute
-            # as a gradient hook of expert_output
-            layer.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
 
         return expert_output
 
@@ -649,6 +655,16 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
         output = layer.mlp.combine(output)
         output = layer.mlp.postprocess(output, shared_expert_output)
+
+        if layer.recompute_pre_mlp_layernorm:
+            # HybridEP keeps dispatch state alive through combine, and its dispatch input can be
+            # a view of the layernorm output. Match the regular TransformerLayer path by waiting
+            # until the complete MLP output exists before releasing the checkpoint output.
+            pre_mlp_norm_checkpoint = node.layer_state.pre_mlp_norm_checkpoint
+            recompute_hook_tensor = node.layer_state.pre_mlp_recompute_hook_tensor
+            pre_mlp_norm_checkpoint.discard_output_and_register_recompute(recompute_hook_tensor)
+            node.layer_state.pre_mlp_norm_checkpoint = None
+            node.layer_state.pre_mlp_recompute_hook_tensor = None
 
         mlp_output_with_bias = (output, None)
         if hasattr(layer, 'cuda_graphs') and layer.cuda_graphs:

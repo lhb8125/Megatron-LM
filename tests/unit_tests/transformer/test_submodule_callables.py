@@ -1,8 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import pytest
 import torch
 
-from megatron.core.models.gpt.fine_grained_callables import build_layer_callables
+from megatron.core.models.gpt.fine_grained_callables import (
+    TransformerLayerNode,
+    build_layer_callables,
+)
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_submodules,
 )
@@ -19,6 +22,25 @@ from tests.unit_tests.a2a_overlap.utils import (
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
+
+
+def test_post_backward_hook_waits_for_node_stream(monkeypatch):
+    """The manual FSDP callback must not read gradients before their producer stream."""
+    calls = []
+    producer_stream = object()
+
+    class FakeConsumerStream:
+        def wait_stream(self, stream):
+            calls.append(("wait", stream))
+
+    node = object.__new__(TransformerLayerNode)
+    node.stream = producer_stream
+    node._post_backward_hook = lambda: calls.append(("hook", None))
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: FakeConsumerStream())
+
+    node._run_post_backward_hook()
+
+    assert calls == [("wait", producer_stream), ("hook", None)]
 
 
 def run_model_ref_with_capture(model, input_tensors, iterations):
