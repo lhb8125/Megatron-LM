@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import gc
 import os
@@ -10,9 +10,11 @@ import torch
 
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import ChunkOffloadHandler
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import PipelineOffloadManager
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.transformer_config import MLATransformerConfig, TransformerConfig
@@ -104,6 +106,49 @@ def _make_gpt_inputs(
         device
     )
     return input_ids, position_ids, attention_mask
+
+
+def _make_chunk_handler_for_offload_checker() -> ChunkOffloadHandler:
+    handler = ChunkOffloadHandler.__new__(ChunkOffloadHandler)
+    handler.min_offloaded_tensor_size = 128
+    return handler
+
+
+class TensorLikeWrapper:
+    device = torch.device("cuda")
+
+    def __init__(self, data_tensors):
+        self._data_tensors = data_tensors
+
+    def numel(self):
+        return 1024
+
+    def get_data_tensors(self):
+        return self._data_tensors
+
+
+class DataTensor:
+    pass
+
+
+def test_chunk_offload_handler_respects_te_do_not_offload_on_wrapper_data_tensors():
+    handler = _make_chunk_handler_for_offload_checker()
+    wrapper = TensorLikeWrapper([DataTensor(), DataTensor()])
+    assert handler.tensor_need_offloading_checker(wrapper)
+
+    wrapper.get_data_tensors()[1]._TE_do_not_offload = True
+    assert not handler.tensor_need_offloading_checker(wrapper)
+
+
+def test_chunk_offload_handler_respects_megatron_do_not_offload_on_wrapper_data_tensors():
+    handler = _make_chunk_handler_for_offload_checker()
+    wrapper = TensorLikeWrapper([DataTensor(), DataTensor()])
+
+    manager = PipelineOffloadManager.__new__(PipelineOffloadManager)
+    manager.mark_not_offload(wrapper)
+
+    assert not handler.tensor_need_offloading_checker(wrapper)
+    assert getattr(wrapper.get_data_tensors()[0], "_do_not_offload", False)
 
 
 def _run_one_iter_and_capture(

@@ -50,6 +50,21 @@ TransformerConfig.fine_grained_offloading_max_inflight_offloads caps, per offloa
 
 With full-iteration CUDA graphs (`--cuda-graph-impl full_iteration`) and fine-grained activation offloading enabled, set it to a non-None integer: that path does not rely on record_stream, so explicit joins are required.
 
+The full-iteration schedule does not add a global D2H/H2D stream barrier before
+resetting the offload manager. D2H work is bounded by the per-group inflight
+limit above, while H2D reloads join the compute stream at their backward group
+boundaries.
+
+## Transformer Engine quantized tensors
+
+With `NVTE_CPU_OFFLOAD_V1=1`, Transformer Engine decomposes quantized activation
+storage into ordinary data tensors before calling `save_for_backward`; those
+data tensors are what the offload hooks move between GPU and CPU. Quantized
+weight wrappers remain resident and are excluded through `_TE_do_not_offload`.
+Because TE may attach that marker to a wrapper's data tensors, the checker
+examines both the wrapper and `get_data_tensors()`. FGAO intentionally does not
+serialize, release, or restore `QuantizedTensor` wrappers itself.
+
 ## Compatible With Fine-Grained Recomputation
 
 - For low-overhead modules such as LayerNorm or `moe_act`, use recomputation to save activation memory.

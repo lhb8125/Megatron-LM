@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from collections import defaultdict, deque
 from contextlib import nullcontext
@@ -23,6 +23,47 @@ def debug_rank(message):
     assert torch.distributed.is_initialized()
     if torch.distributed.get_rank() == DEBUG_RANK:
         print(message)
+
+
+def _get_data_tensors(tensor):
+    """Return data tensors from TE-style tensor wrappers when available."""
+    if not hasattr(tensor, "get_data_tensors"):
+        return ()
+    try:
+        data_tensors = tensor.get_data_tensors()
+    except Exception:  # pragma: no cover - best effort for third-party tensor wrappers
+        return ()
+    if data_tensors is None:
+        return ()
+    if isinstance(data_tensors, torch.Tensor):
+        return (data_tensors,)
+    return tuple(data_tensors)
+
+
+def _te_do_not_offload(tensor):
+    """Return whether TE marked a tensor-like object as non-offloadable."""
+    if getattr(tensor, "_TE_do_not_offload", False):
+        return True
+    data_tensors = _get_data_tensors(tensor)
+    if not data_tensors:
+        return False
+    return any(
+        data_tensor is not None and getattr(data_tensor, "_TE_do_not_offload", False)
+        for data_tensor in data_tensors
+    )
+
+
+def _megatron_do_not_offload(tensor):
+    """Return whether Megatron marked a tensor-like object as non-offloadable."""
+    if getattr(tensor, "_do_not_offload", False):
+        return True
+    data_tensors = _get_data_tensors(tensor)
+    if not data_tensors:
+        return False
+    return any(
+        data_tensor is not None and getattr(data_tensor, "_do_not_offload", False)
+        for data_tensor in data_tensors
+    )
 
 
 def print_offload_summary_table(total_offload_bytes: Dict[str, int]):
@@ -747,6 +788,14 @@ class PipelineOffloadManager:
         """Mark the current forward chunk as not offloadable."""
         if tensor is not None:
             tensor._do_not_offload = True
+            if hasattr(tensor, "get_data_tensors"):
+                try:
+                    data_tensors = tensor.get_data_tensors()
+                except Exception:  # pragma: no cover - best effort for third-party tensor wrappers
+                    return
+                for data_tensor in data_tensors:
+                    if data_tensor is not None:
+                        data_tensor._do_not_offload = True
 
     def __enter__(self):
         """Enter context manager to enable activation offloading hooks."""
@@ -948,9 +997,7 @@ class ChunkOffloadHandler:
         if tensor.numel() < self.min_offloaded_tensor_size:
             return False
         # Respect tensor's offload preference if specified
-        if getattr(tensor, "_TE_do_not_offload", False) or getattr(
-            tensor, "_do_not_offload", False
-        ):
+        if _te_do_not_offload(tensor) or _megatron_do_not_offload(tensor):
             return False
         return True
 
