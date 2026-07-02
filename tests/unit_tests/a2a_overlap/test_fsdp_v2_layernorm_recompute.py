@@ -285,7 +285,9 @@ class TestFSDPV2LayerNormRecompute:
                 overlap_param_gather=True,
                 fp8_param_gather=True,
                 megatron_fsdp_main_params_dtype=torch.float32,
-                megatron_fsdp_main_grads_dtype=torch.bfloat16,
+                # This focused lifecycle test uses native SGD rather than the
+                # production precision-aware optimizer, so params/grads must match.
+                megatron_fsdp_main_grads_dtype=torch.float32,
             )
 
         try:
