@@ -284,6 +284,12 @@ requirements:
   for full-iteration replay.
 - `ParameterGroup.zero_grad()` clears existing buffer storage instead of
   dropping the tensor objects, preserving the addresses captured by CUDA graph.
+- Untied embedding and output weights are placed in separate FSDP units. Their
+  non-overlapping lifetimes can then share allocator slots instead of remaining
+  concatenated in the root unit for the full iteration.
+- Planned slots inherit the CUDA stream used by their largest trace allocation.
+  This lets expandable CUDA allocator segments reuse storage released on that
+  stream without adding a global synchronization.
 - The full-iteration wrapper synchronizes outstanding FSDP parameter gathers
   before capture, clears completed pre-capture v2 unshard event sentinels so
   capture records fresh stream dependencies, joins v2 FSDP side streams before
