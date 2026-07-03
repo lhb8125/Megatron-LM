@@ -442,10 +442,7 @@ class DataParallelBuffer:
         return True
 
     def _move_data_to(
-        self,
-        target_device: torch.device,
-        pin_memory: bool = False,
-        non_blocking: bool = True,
+        self, target_device: torch.device, pin_memory: bool = False, non_blocking: bool = True
     ) -> None:
         """Move ``self.data`` to *target_device*, optionally using pinned memory.
 
@@ -584,9 +581,7 @@ class DataParallelBuffer:
 
     @torch.no_grad()
     def unshard(
-        self,
-        bind_params: bool = False,
-        stream: Optional[torch.cuda.Stream] = None,
+        self, bind_params: bool = False, stream: Optional[torch.cuda.Stream] = None
     ) -> torch.Tensor:
         """All-gather the full buffer from all shards and bind parameter storage.
 
@@ -607,9 +602,7 @@ class DataParallelBuffer:
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             torch.distributed.all_gather_into_tensor(
-                output_tensor=full_buffer,
-                input_tensor=shard_buffer,
-                group=self.dp_group,
+                output_tensor=full_buffer, input_tensor=shard_buffer, group=self.dp_group
             )
 
         if bind_params:
