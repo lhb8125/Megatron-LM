@@ -69,6 +69,7 @@ def _get_mfsdp_post_backward_final_callback(root_module: nn.Module):
         from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import (
             mfsdp_post_backward_final_callback,
         )
+
         return mfsdp_post_backward_final_callback
 
     # v1
@@ -90,9 +91,7 @@ def _get_mfsdp_pre_backward_setup(root_module: nn.Module):
         )
 
         def _v2_pre_backward(hook_module, grads=None, *, skip_final_callback=True):
-            mfsdp_pre_backward_setup(
-                hook_module, grads, skip_final_callback=skip_final_callback
-            )
+            mfsdp_pre_backward_setup(hook_module, grads, skip_final_callback=skip_final_callback)
 
         return _v2_pre_backward
 
@@ -116,6 +115,7 @@ def _get_mfsdp_reshard_hooks(root_module: nn.Module):
             mfsdp_post_backward_hook,
             mfsdp_post_forward_hook,
         )
+
         return mfsdp_post_forward_hook, mfsdp_post_backward_hook
 
     # v1
