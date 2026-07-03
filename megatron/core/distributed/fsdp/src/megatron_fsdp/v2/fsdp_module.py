@@ -46,6 +46,7 @@ class _FSDPState:
         self._is_root = True
         self._post_backward_callback_queued = False
         self.enable_cuda_graph: bool = False
+        self.enable_full_iteration_cuda_graph: bool = False
 
 
 @dataclass
@@ -136,6 +137,12 @@ class _FSDPRootContext:
 
     enable_cuda_graph: bool = False
     """Set by enable_cuda_graph() — tells hooks to manage the side stream."""
+
+    enable_full_iteration_cuda_graph: bool = False
+    """True when full-iteration CUDA graph capture needs stable FSDP buffers."""
+
+    defer_trace_pool_plan: bool = False
+    """Trace the complete externally managed schedule before planning slots."""
 
     cuda_graph_stream: Optional[torch.cuda.Stream] = None
     """Side stream for CUDA graph capture/replay.  Created lazily on the
@@ -533,6 +540,8 @@ class FSDPModule:
         enable_async_reduce_grad,
         bucket_allocator: BucketAllocator,
         enable_cuda_graph: bool = False,
+        enable_full_iteration_cuda_graph: bool = False,
+        defer_trace_pool_plan: bool = False,
     ):
         """Initialize FSDP state and mark nested FSDP modules as non-root.
 
@@ -584,16 +593,21 @@ class FSDPModule:
             unshard_done_events={id(module): None for module in forward_order},
             enable_unshard_prefetch=enable_unshard_prefetch,
             enable_async_reduce_grad=enable_async_reduce_grad,
+            enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
+            defer_trace_pool_plan=defer_trace_pool_plan,
             _reversed_order=list(reversed(forward_order)),
             bucket_allocator=bucket_allocator,
         )
         setattr(self, "_fsdp_state", _FSDPState())
+        self._fsdp_state.enable_full_iteration_cuda_graph = enable_full_iteration_cuda_graph
         setattr(self, "_fsdp_root_context", root_context)
 
         module_idx = 0
         for name, module in named_forward_modules:
+            module._fsdp_state.enable_full_iteration_cuda_graph = enable_full_iteration_cuda_graph
             for param_group in module._fsdp_param_groups:
                 param_group.set_allocator(root_context.bucket_allocator)
+                param_group.enable_full_iteration_cuda_graph = enable_full_iteration_cuda_graph
 
             if module is not self:
                 module._fsdp_state._is_root = False
@@ -820,6 +834,8 @@ class FSDPModule:
                     continue
                 if param_group.mp_policy.use_decoupled_grad:
                     setattr(dist_param, "decoupled_grad", dist_grad)
+                    if param_group.enable_full_iteration_cuda_graph and dist_grad is not None:
+                        setattr(dist_param, "_mfsdp_keep_decoupled_grad_for_cuda_graph", True)
                     if dist_param.grad is not None:
                         del dist_param.grad
                 else:

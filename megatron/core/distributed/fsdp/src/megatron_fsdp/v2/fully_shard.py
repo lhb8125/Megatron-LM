@@ -59,6 +59,7 @@ def fully_shard(
     enable_trace_pool: bool = False,
     sharding_strategy: str = "optim_grads_params",
     enable_cuda_graph: bool = False,
+    enable_full_iteration_cuda_graph: bool = False,
     fine_grained_hooks: bool = False,
     skip_backward_callback: bool = False,  # Skip autograd RegisterFSDPBackwardFunction.
     skip_final_backward_callback: bool = False,
@@ -74,6 +75,8 @@ def fully_shard(
     5. Replaces module parameters with DTensor representations
 
     Args:
+        enable_full_iteration_cuda_graph: If ``True``, keep graph-visible FSDP
+            gradient storage at stable addresses and use ``TracePoolAllocator``.
         fine_grained_hooks: If ``True``, register pre-forward/backward hooks
             on every sub-module (for EP-overlap / 1F1B schedules).
         skip_backward_callback: If ``True``, skip the autograd post-backward
@@ -107,6 +110,7 @@ def fully_shard(
     use_trace_pool = (
         enable_trace_pool
         or enable_cuda_graph
+        or enable_full_iteration_cuda_graph
         or any(
             getattr(m._fsdp_state, "enable_cuda_graph", False)
             for m in module.modules()
@@ -127,6 +131,8 @@ def fully_shard(
         enable_async_reduce_grad=enable_async_reduce_grad,
         bucket_allocator=bucket_allocator,
         enable_cuda_graph=enable_cuda_graph,
+        enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
+        defer_trace_pool_plan=(enable_full_iteration_cuda_graph and skip_final_backward_callback),
     )
     module._init_param_main_grad_func()
 

@@ -16,6 +16,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,7 +25,9 @@ sys.path.insert(0, str(Path(__file__).parents[2]))
 from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.allocator import (
     Bucket,
     TemporaryBucketAllocator,
+    TracePoolAllocator,
 )
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.dp_buffer import DataParallelBuffer
 
 
 def _run_allocator_tests(allocator: TemporaryBucketAllocator) -> None:
@@ -93,6 +96,67 @@ class TestTemporaryBucketAllocator:
 
     def test_full_lifecycle(self):
         _run_allocator_tests(TemporaryBucketAllocator())
+
+
+class TestTracePoolFullIterationGradBuffers:
+
+    @staticmethod
+    def _make_buffer(allocator, key, size):
+        buffer = DataParallelBuffer.__new__(DataParallelBuffer)
+        buffer.is_distributed = True
+        buffer.allocator = allocator
+        buffer.alloc_key = key
+        buffer.dtype = torch.float32
+        buffer.device = torch.device("cpu")
+        buffer.buffer_index = SimpleNamespace(bucket_meta=SimpleNamespace(size=size))
+        bucket = allocator.allocate(key=key, size=size, dtype=buffer.dtype, device=buffer.device)
+        buffer._unsharded_buffer = bucket.data
+        return buffer
+
+    def test_non_overlapping_grad_buffers_share_stable_slot(self):
+        allocator = TracePoolAllocator()
+        first = self._make_buffer(allocator, (0, "main_grad"), 16)
+        first_trace_tensor = first._unsharded_buffer
+        first.release_unsharded_buffer_for_reuse()
+
+        second = self._make_buffer(allocator, (1, "main_grad"), 16)
+        second_trace_tensor = second._unsharded_buffer
+        second.release_unsharded_buffer_for_reuse()
+
+        assert first._unsharded_buffer is first_trace_tensor
+        assert second._unsharded_buffer is second_trace_tensor
+        assert first_trace_tensor._typed_storage()._size() == 0
+        assert second_trace_tensor._typed_storage()._size() == 0
+
+        allocator.plan()
+
+        assert len(allocator._slots) == 1
+        assert first.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert second.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert first._unsharded_buffer.data_ptr() == second._unsharded_buffer.data_ptr()
+        assert first._unsharded_buffer.numel() == 16
+        assert second._unsharded_buffer.numel() == 16
+
+    def test_complete_trace_preserves_later_phase_conflicts(self):
+        allocator = TracePoolAllocator()
+        first = self._make_buffer(allocator, (0, "main_grad"), 16)
+        first.release_unsharded_buffer_for_reuse()
+        second = self._make_buffer(allocator, (1, "main_grad"), 16)
+        second.release_unsharded_buffer_for_reuse()
+
+        first_trace_tensor = first._unsharded_buffer
+        assert first.fetch_buffer() is first_trace_tensor
+        assert first_trace_tensor._typed_storage()._size() == 16
+        assert second.fetch_buffer()._typed_storage()._size() == 16
+        first.release_unsharded_buffer_for_reuse()
+        second.release_unsharded_buffer_for_reuse()
+
+        allocator.plan()
+
+        assert len(allocator._slots) == 2
+        assert first.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert second.rebind_unsharded_buffer_to_allocator(zero=True)
+        assert first._unsharded_buffer.data_ptr() != second._unsharded_buffer.data_ptr()
 
 
 if __name__ == "__main__":
