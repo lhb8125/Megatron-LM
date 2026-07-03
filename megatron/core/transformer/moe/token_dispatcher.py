@@ -1,4 +1,4 @@
-# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import logging
 from abc import ABC, abstractmethod
@@ -24,8 +24,6 @@ from megatron.core.transformer.moe.fused_a2a import (
     hybrid_ep_combine,
     hybrid_ep_dispatch,
     set_deepep_num_sms,
-    trim_hybridep_static_budget_padding,
-    zero_hybridep_static_budget_padding_by_expert,
 )
 from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
@@ -944,23 +942,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
                         )
                 self.d2h_event = self.cuda_dtoh_stream.record_event()
-                is_capturing = (
-                    torch.cuda.is_available()
-                    and getattr(torch.cuda, "is_current_stream_capturing", lambda: False)()
-                )
-                if is_capturing:
-                    torch.cuda.current_stream().wait_event(self.d2h_event)
 
             if point == self.cuda_sync_point:
                 # Synchronize with the DtoH stream at self.cuda_sync_point.
-                is_capturing = (
-                    torch.cuda.is_available()
-                    and getattr(torch.cuda, "is_current_stream_capturing", lambda: False)()
-                )
-                if is_capturing:
-                    torch.cuda.current_stream().wait_event(self.d2h_event)
-                else:
-                    self.d2h_event.synchronize()
+                self.d2h_event.synchronize()
 
         return tokens_per_expert
 
@@ -1054,11 +1039,8 @@ class _HybridEPManager(_DispatchManager):
         self.token_probs: Optional[torch.Tensor] = None
         # Handle used for combine operation
         self.handle = None
-        self._cuda_graph_handles = []
         # Used for padding the output for each expert
         self.pad_multiple = None
-        self._static_budget_padded_tokens_per_expert = None
-        self._static_budget_actual_tokens_per_expert = None
 
         if hybrid_ep_dispatch is None:
             raise ImportError(
@@ -1111,17 +1093,7 @@ class _HybridEPManager(_DispatchManager):
                 * self.config.moe_router_topk
                 * self.moe_expert_rank_capacity_factor
             )
-            if pad_multiple > 0:
-                budget += -budget % pad_multiple
-            self.num_permuted_tokens = budget
-        elif self.config.cuda_graph_impl == "full_iteration":
-            # Use a static budget even when rank capacity factor is unset, so the dispatch
-            # buffer shape is graph-stable without depending on capacity-factor mode.
-            pad_multiple = get_align_size_for_quantization(self.config)
-            budget_factor = 1.2
-            budget = int(padded_num_tokens * self.config.moe_router_topk * budget_factor)
-            if pad_multiple > 0:
-                budget += -budget % pad_multiple
+            budget += -budget % pad_multiple
             self.num_permuted_tokens = budget
         # Compute the capacity for each expert at the drop_and_pad mode
         if self.drop_and_pad:
@@ -1138,16 +1110,6 @@ class _HybridEPManager(_DispatchManager):
             self.tokens_per_expert = torch.full(
                 (self.num_local_experts,), self.capacity * self.group.size(), dtype=torch.long
             )
-
-    def _get_actual_tokens_per_local_expert(self) -> torch.Tensor:
-        """Return actual, unpadded token counts received by each local expert."""
-        group_size = self.group.size()
-        target_rank = torch.distributed.get_rank(group=self.group)
-        tokens_per_target_expert = (
-            self.routing_map.sum(dim=0).to(torch.int64).reshape(group_size, self.num_local_experts)
-        )
-        torch.distributed.all_reduce(tokens_per_target_expert, group=self.group)
-        return tokens_per_target_expert[target_rank]
 
     def dispatch(
         self,
@@ -1186,60 +1148,6 @@ class _HybridEPManager(_DispatchManager):
                 num_sms_preprocessing_api=self.config.moe_hybridep_num_sms_preprocessing,
             )
         )
-        self.dispatched_probs = trim_hybridep_static_budget_padding(
-            self.dispatched_probs,
-            dispatched_hidden.shape[0],
-            tensor_name="dispatched prob",
-            target_name="hidden state",
-        )
-        is_static_budget = (
-            self.moe_expert_rank_capacity_factor is not None
-            or self.config.cuda_graph_impl == "full_iteration"
-        )
-        # Paged stashing relies on a fixed-capacity dispatch buffer while preserving
-        # the actual expert token counts. Rewriting those counts to include static
-        # padding would make the stash treat every capacity row as live activation.
-        if is_static_budget and not self.config.moe_paged_stash:
-            is_capturing = (
-                torch.cuda.is_available()
-                and getattr(torch.cuda, "is_current_stream_capturing", lambda: False)()
-            )
-            if is_capturing:
-                padded_tokens_per_expert_list = getattr(
-                    self, "_cuda_graph_padded_tokens_per_expert_list", None
-                )
-                actual_tokens_per_expert_list = getattr(
-                    self, "_cuda_graph_actual_tokens_per_expert_list", None
-                )
-                if padded_tokens_per_expert_list is None or actual_tokens_per_expert_list is None:
-                    raise RuntimeError(
-                        "Full CUDA graph capture reached HybridEP dispatch before static-budget "
-                        "padding metadata was cached during warmup."
-                    )
-                padded_tokens_per_expert = self.tokens_per_expert
-            else:
-                actual_tokens_per_expert = self._get_actual_tokens_per_local_expert()
-                padded_tokens_per_expert = tokens_per_expert.to(torch.int64)
-                padded_tokens_per_expert_list = padded_tokens_per_expert.detach().cpu().tolist()
-                actual_tokens_per_expert_list = actual_tokens_per_expert.detach().cpu().tolist()
-                if self.config.cuda_graph_impl == "full_iteration":
-                    self._cuda_graph_padded_tokens_per_expert_list = padded_tokens_per_expert_list
-                    self._cuda_graph_actual_tokens_per_expert_list = actual_tokens_per_expert_list
-            dispatched_hidden = zero_hybridep_static_budget_padding_by_expert(
-                dispatched_hidden,
-                padded_tokens_per_expert_list,
-                actual_tokens_per_expert_list,
-                tensor_name="dispatched hidden state",
-            )
-            self.dispatched_probs = zero_hybridep_static_budget_padding_by_expert(
-                self.dispatched_probs,
-                padded_tokens_per_expert_list,
-                actual_tokens_per_expert_list,
-                tensor_name="dispatched prob",
-            )
-            self._static_budget_padded_tokens_per_expert = padded_tokens_per_expert_list
-            self._static_budget_actual_tokens_per_expert = actual_tokens_per_expert_list
-            tokens_per_expert = padded_tokens_per_expert
         if self.moe_expert_rank_capacity_factor is not None:
             over_budget = self.handle[-1] != 0  # this is overflow_flag
             self.over_budget |= over_budget
@@ -1248,7 +1156,7 @@ class _HybridEPManager(_DispatchManager):
             self.tokens_per_expert = tokens_per_expert.to(torch.int64)
             # self.num_permuted_tokens is necessary to allocate the output tensor for permute
             self.num_permuted_tokens = self.tokens_per_expert.sum()
-        if is_static_budget:
+        if self.moe_expert_rank_capacity_factor is not None:
             self.tokens_per_expert = tokens_per_expert.to(torch.int64)
         return dispatched_hidden
 
@@ -1264,8 +1172,6 @@ class _HybridEPManager(_DispatchManager):
             num_permuted_tokens=self.num_permuted_tokens,
             pad_multiple=self.pad_multiple,
             fused=self.config.moe_permute_fusion_into_hybridep,
-            padded_tokens_per_expert=self._static_budget_padded_tokens_per_expert,
-            actual_tokens_per_expert=self._static_budget_actual_tokens_per_expert,
         )
         if (
             self._padded_num_tokens is not None
@@ -1276,16 +1182,11 @@ class _HybridEPManager(_DispatchManager):
         # Release the used handle/num_permuted_tokens which could change in each iteration.
         # For drop_and_pad mode, we don't need to reset the num_permuted_tokens and
         # num_dispatched_tokens, because their values never change.
-        is_current_stream_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
-        if is_current_stream_capturing is not None and is_current_stream_capturing():
-            self._cuda_graph_handles.append(self.handle)
         self.handle = None
         if not self.drop_and_pad:
             self.num_permuted_tokens = None
         self._original_num_tokens = None
         self._padded_num_tokens = None
-        self._static_budget_padded_tokens_per_expert = None
-        self._static_budget_actual_tokens_per_expert = None
         return hidden_states
 
     def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:

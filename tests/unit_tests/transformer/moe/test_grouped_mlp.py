@@ -51,6 +51,30 @@ def test_fused_impl_pre_forward_hook_rejects_input_modification():
         hook(nn.Module())
 
 
+def test_fused_impl_post_forward_hook_supports_hook_signatures():
+    linear_fc1 = nn.Module()
+    linear_fc2 = nn.Module()
+    calls = []
+
+    def fc1_hook(module, args, output):
+        calls.append(("args", module, args))
+        return output + 1
+
+    def fc2_hook(module, args, kwargs, output):
+        calls.append(("kwargs", module, args, kwargs))
+        return output + 1
+
+    linear_fc1.register_forward_hook(fc1_hook)
+    linear_fc2.register_forward_hook(fc2_hook, with_kwargs=True)
+
+    grouped_mlp = type("GroupedMLPStub", (), {"linear_fc1": linear_fc1, "linear_fc2": linear_fc2})()
+    hook = TEGroupedMLP._make_fused_impl_post_forward_hook(grouped_mlp)
+    output = hook(nn.Module(), (), torch.zeros(2, 2))
+
+    assert calls == [("args", linear_fc1, ()), ("kwargs", linear_fc2, (), {})]
+    torch.testing.assert_close(output, torch.full_like(output, 2))
+
+
 @pytest.mark.skipif(
     not is_te_min_version("1.9.0.dev0"),
     reason="TE Grouped MLP is only supported in TE 1.9.0.dev0 and later.",
