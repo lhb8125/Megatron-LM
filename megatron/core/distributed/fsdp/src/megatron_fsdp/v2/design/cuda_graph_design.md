@@ -264,3 +264,24 @@ the CUDA graph private pool provides stable replay addresses and lifetime reuse.
   remains available for explicit and per-module CUDA graph modes.
 
 All behavior is gated by `enable_full_iteration_cuda_graph=False` by default.
+
+## 13. MCore full-iteration integration
+
+The MCore adapter enables the optimizer-gradient persistence mode when
+`TransformerConfig.cuda_graph_impl == "full_iteration"`. The global wrapper
+then coordinates capture with the normal FSDP hook lifecycle:
+
+- eager warmup runs on the future capture stream;
+- outstanding parameter gathers are drained before capture and pre-capture
+  unshard event sentinels are cleared so capture records fresh dependencies;
+- FSDP all-gather and reduce-scatter side streams are joined before the capture
+  body exits;
+- autograd multithreading is disabled and relaxed capture error handling is
+  used only for the v2 path;
+- graph-visible FSDP grad buffers are zeroed after capture and before the first
+  replay;
+- replay completion is made visible to the caller stream.
+
+Transient full weight and gradient buffers continue to use the CUDA graph
+private pool; no TracePool finalization or combined-schedule callback is
+required. Non-v2 models keep the existing full-iteration capture behavior.
