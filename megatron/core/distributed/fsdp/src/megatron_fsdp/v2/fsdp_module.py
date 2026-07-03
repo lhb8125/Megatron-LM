@@ -825,7 +825,10 @@ class FSDPModule:
                     # Under CUDA graph replay only the GPU kernel runs;
                     # we record the flags here and restore them in
                     # the CG replay backward.
-                    if grad_added and self._fsdp_state.enable_cuda_graph:
+                    if grad_added and (
+                        self._fsdp_state.enable_cuda_graph
+                        or self._fsdp_state.enable_full_iteration_cuda_graph
+                    ):
                         setattr(param, "_mfsdp_recorded_te_wgrad", True)
                 elif param.grad is None:
                     main_grad = param.get_main_grad()
