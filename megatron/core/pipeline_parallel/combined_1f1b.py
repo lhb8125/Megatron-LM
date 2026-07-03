@@ -76,6 +76,15 @@ def _get_mfsdp_post_backward_final_callback(root_module: nn.Module):
     return root_module.post_backward
 
 
+def _finalize_mfsdp_trace_pool(root_module: nn.Module) -> None:
+    """Finalize a deferred v2 trace after the complete 1F1B iteration."""
+    if not hasattr(root_module, '_fsdp_root_context'):
+        return
+    from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.hooks import mfsdp_finalize_trace_pool
+
+    mfsdp_finalize_trace_pool(root_module)
+
+
 def _get_mfsdp_pre_backward_setup(root_module: nn.Module):
     """Return a ``pre_backward_setup(hook_module, grads, *, skip_final_callback)``
     callable for *root_module*.
@@ -255,6 +264,8 @@ def combined_1f1b_schedule_for_no_pipelining(
         is_mfsdp=is_mfsdp,
         is_v1=is_v1,
     )
+    if is_v2:
+        _finalize_mfsdp_trace_pool(root_module)
     return forward_data_store, total_num_tokens
 
 

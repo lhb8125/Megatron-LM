@@ -268,3 +268,24 @@ integration are separate concerns.
   while FSDP and optimizer zero-grad clear captured storage in place.
 
 All behavior is gated by `enable_full_iteration_cuda_graph=False` by default.
+
+## 13. MCore full-iteration integration
+
+The MCore adapter enables the stable-storage mode when
+`TransformerConfig.cuda_graph_impl == "full_iteration"`. The global wrapper
+then coordinates capture with the normal FSDP hook lifecycle:
+
+- eager warmup runs on the future capture stream;
+- outstanding parameter gathers are drained before capture and pre-capture
+  unshard event sentinels are cleared so capture records fresh dependencies;
+- FSDP all-gather and reduce-scatter side streams are joined before the capture
+  body exits;
+- autograd multithreading is disabled and relaxed capture error handling is
+  used only for the v2 path;
+- graph-visible FSDP grad buffers are zeroed after capture and before the first
+  replay;
+- replay completion is made visible to the caller stream.
+
+For combined 1F1B, TracePool finalization is deferred until the complete
+forward-only, overlap, and backward-only schedule has executed once. Non-v2
+models keep the existing full-iteration capture behavior.

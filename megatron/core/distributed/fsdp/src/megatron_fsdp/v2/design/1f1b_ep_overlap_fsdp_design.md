@@ -400,7 +400,14 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
   3. Calls `module.reshard()` — release all-gathered params.
   4. If sharding strategy is `optim_grads` or `optim_grads_params`:
      calls `module.reduce_grad()` — copy grads → reduce-scatter → install DTensor grads.
-  5. Sets `module.post_backward_issued = True`.
+   5. Sets `module.post_backward_issued = True`.
+
+For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
+the allocator `free` event but retains the tensor/view object. The allocation
+trace spans forward-only, steady-state overlap, and backward-only phases. After
+the final backward-only phase, `combined_1f1b.py` calls
+`mfsdp_finalize_trace_pool()` so retained views are rebound to planned addresses
+only after the complete schedule has been observed.
 
 ### 4.5 Gradient sync suppression — `no_sync()`
 

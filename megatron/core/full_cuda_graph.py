@@ -4,6 +4,7 @@
 
 import gc
 import logging
+from contextlib import nullcontext
 
 import torch
 
@@ -16,6 +17,99 @@ logger = logging.getLogger(__name__)
 # tools/debug_cuda_graph_pool_memory*.py).
 _shared_graph_pool = None
 _shared_capture_stream = None
+
+
+def _walk_unique_modules(model):
+    """Yield unique modules from a model or model list."""
+    seen = set()
+    stack = list(model) if isinstance(model, (list, tuple)) else [model]
+    while stack:
+        module = stack.pop()
+        if module is None:
+            continue
+        module_id = id(module)
+        if module_id in seen:
+            continue
+        seen.add(module_id)
+        yield module
+        modules = getattr(module, "modules", None)
+        if callable(modules):
+            stack.extend(child for child in modules() if id(child) not in seen)
+
+
+def _has_v2_fsdp_modules(model):
+    """Return whether the model contains a Megatron-FSDP v2 wrapper."""
+    return any(
+        getattr(getattr(module, "ddp_config", None), "use_megatron_fsdp_v2", False)
+        for module in _walk_unique_modules(model)
+    )
+
+
+def _synchronize_fsdp_param_gathers(model):
+    """Drain v2 Megatron-FSDP parameter all-gathers before capture."""
+    synchronized = 0
+    for module in _walk_unique_modules(model):
+        ddp_config = getattr(module, "ddp_config", None)
+        if not getattr(ddp_config, "use_megatron_fsdp_v2", False):
+            continue
+        synchronize_param_gather = getattr(module, "synchronize_param_gather", None)
+        if callable(synchronize_param_gather):
+            synchronize_param_gather()
+            synchronized += 1
+    return synchronized
+
+
+def _stop_v2_fsdp_communication(model):
+    """Join Megatron-FSDP v2 side streams before full-iteration capture exits."""
+    stopped = 0
+    for module in _walk_unique_modules(model):
+        ddp_config = getattr(module, "ddp_config", None)
+        if not getattr(ddp_config, "use_megatron_fsdp_v2", False):
+            continue
+        stop_communication = getattr(module, "stop_communication", None)
+        if callable(stop_communication):
+            stop_communication()
+            stopped += 1
+    return stopped
+
+
+def _clear_v2_fsdp_uncaptured_unshard_events(model):
+    """Drop pre-capture v2 unshard events after their streams are drained."""
+    cleared = 0
+    seen_contexts = set()
+    for module in _walk_unique_modules(model):
+        ddp_config = getattr(module, "ddp_config", None)
+        fsdp_module = getattr(module, "module", None)
+        if not getattr(ddp_config, "use_megatron_fsdp_v2", False):
+            fsdp_module = module
+
+        ctx = getattr(fsdp_module, "_fsdp_root_context", None)
+        if ctx is None or id(ctx) in seen_contexts:
+            continue
+        seen_contexts.add(id(ctx))
+
+        unshard_done_events = getattr(ctx, "unshard_done_events", None)
+        if not unshard_done_events:
+            continue
+        for module_id, event in list(unshard_done_events.items()):
+            if event is not None:
+                unshard_done_events[module_id] = None
+                cleared += 1
+    return cleared
+
+
+def _reset_fsdp_full_iteration_grad_buffers(model):
+    """Restore FSDP grad buffers to the pre-capture state before first replay."""
+    reset_groups = 0
+    for module in _walk_unique_modules(model):
+        param_groups = getattr(module, "_fsdp_param_groups", None)
+        if not param_groups:
+            continue
+        for param_group in param_groups:
+            if getattr(param_group, "enable_full_iteration_cuda_graph", False):
+                param_group.zero_grad(set_to_none=True)
+                reset_groups += 1
+    return reset_groups
 
 
 def get_shared_capture_stream():
@@ -148,6 +242,16 @@ class FullCudaGraphWrapper:
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
         self.use_single_mempool = use_single_mempool
 
+    def _forward_backward_on_capture_stream(self, *args, **kwargs):
+        """Run eager warmup on the stream that will later be captured."""
+        capture_stream = get_shared_capture_stream()
+        current_stream = torch.cuda.current_stream()
+        capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(capture_stream):
+            result = self.forward_backward_func(*args, **kwargs)
+        current_stream.wait_stream(capture_stream)
+        return result
+
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
         if not isinstance(model, list) or len(model) == 1:
@@ -199,39 +303,68 @@ class FullCudaGraphWrapper:
         num_microbatches = kwargs['num_microbatches']
 
         training = not kwargs['forward_only']
+        training_str = 'training' if training else 'validation'
+        use_v2_fsdp = _has_v2_fsdp_modules(model)
+        curr_iteration = self.curr_iter(training_str)
+        capture_iteration = curr_iteration == self.cuda_graph_warmup_steps
         data_iterator = kwargs['data_iterator']
         data_list = self.data_read(data_iterator, model, training, num_microbatches)
         kwargs['data_iterator'] = data_list
 
-        training_str = 'training' if training else 'validation'
-        curr_iteration = self.curr_iter(training_str)
-        if curr_iteration == self.cuda_graph_warmup_steps:
+        if capture_iteration:
+            if use_v2_fsdp:
+                _synchronize_fsdp_param_gathers(model)
+                torch.cuda.synchronize()
+                _clear_v2_fsdp_uncaptured_unshard_events(model)
             logger.info(f'Capture CUDA graph for {training_str}!!!')
             torch.distributed.barrier()
             assert FullCudaGraphWrapper.cuda_graph[training_str] is None
+            if use_v2_fsdp:
+                FullCudaGraphWrapper.result[training_str] = None
+                gc.collect()
+                torch.cuda.empty_cache()
             FullCudaGraphWrapper.cuda_graph[training_str] = torch.cuda.CUDAGraph()
             for _, state in get_all_rng_states().items():
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = get_shared_capture_stream()
-            with torch.cuda.graph(
-                FullCudaGraphWrapper.cuda_graph[training_str],
-                stream=capture_stream,
-                pool=get_graph_pool(self.use_single_mempool),
-                capture_error_mode="thread_local",
-            ):
-                FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
-                    *args, **kwargs
-                )
+            captured_result = None
+            autograd_context = (
+                torch.autograd.set_multithreading_enabled(False) if use_v2_fsdp else nullcontext()
+            )
+            capture_error_mode = "relaxed" if use_v2_fsdp else "thread_local"
+            with autograd_context:
+                with torch.cuda.graph(
+                    FullCudaGraphWrapper.cuda_graph[training_str],
+                    stream=capture_stream,
+                    pool=get_graph_pool(self.use_single_mempool),
+                    capture_error_mode=capture_error_mode,
+                ):
+                    captured_result = self.forward_backward_func(*args, **kwargs)
+                    if use_v2_fsdp:
+                        _stop_v2_fsdp_communication(model)
+            FullCudaGraphWrapper.result[training_str] = captured_result
+            if use_v2_fsdp:
+                torch.cuda.synchronize()
+                _reset_fsdp_full_iteration_grad_buffers(model)
             torch.cuda.synchronize()
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
-            FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
+            if use_v2_fsdp:
+                result = self._forward_backward_on_capture_stream(*args, **kwargs)
+            else:
+                FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                    *args, **kwargs
+                )
+                result = FullCudaGraphWrapper.result[training_str]
         else:
             FullCudaGraphWrapper.cuda_graph[training_str].replay()
+            if use_v2_fsdp:
+                torch.cuda.current_stream().wait_stream(get_shared_capture_stream())
+            result = FullCudaGraphWrapper.result[training_str]
         self.next_iter(training_str)
-        return FullCudaGraphWrapper.result[training_str]
+        return result
 
     def curr_iter(self, stage):
         """Return current training/validation iteration."""
