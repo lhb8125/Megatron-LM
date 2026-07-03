@@ -164,8 +164,9 @@ class DistributedDataParallelConfig:
     """
     If True, use all-gather during the initial Megatron-FSDP parameter
     synchronization step. This can increase overlap between the first
-    parameter all-gather and computation, helping to better hide the
-    initial communication cost.
+    parameter all-gather and computation, helping to better hide the initial
+    communication cost. Full-iteration CUDA graphs disable this because the
+    optimizer step would otherwise wait on work launched outside capture.
     """
 
     outer_dp_sharding_strategy: str = 'no_shard'
@@ -224,8 +225,9 @@ class DistributedDataParallelConfig:
       main gradients to parameter dtype for `.grad`.
     """
 
-    use_megatron_fsdp_v2: bool = False
-    """If true, use the `fully_shard` API for FSDP sharding the model.
+    megatron_fsdp_cuda_graph_mode: bool = False
+    """If true, Megatron-FSDP preserves graph-visible gradient references and
+    non-FSDP-unit parameter bucket storage for CUDA graph replay.
     """
 
     def __post_init__(self):
