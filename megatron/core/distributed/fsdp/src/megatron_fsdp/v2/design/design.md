@@ -199,6 +199,15 @@ the NCCL collective, causing convergence divergence.
 `torch.cuda.nvtx` range (`"MFSDP unshard"`, `"MFSDP reshard"`, `"MFSDP reduce_grad"`)
 for profiling visibility in tools like Nsight Systems.
 
+**All-gather coalescing.** `FSDPModule.unshard()` coalesces consecutive weight-buffer
+all-gathers that use the same process group before calling the mixed-precision
+`post_unshard()` hook. Each `ParameterGroup` still owns its buffers and post-processing,
+while the module-level loop submits multiple buffer all-gathers through one grouped
+launch. With `async_ops=True`, the coalescing manager owns the resulting `Work`; the
+async path calls `manager.wait()` while `ag_stream` is current before recording the
+module readiness event, so the event cannot run before the backend finishes writing
+the gathered buffers.
+
 Prefetched modules' data also becomes valid when their own pre-hook later calls `event.wait()`
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
