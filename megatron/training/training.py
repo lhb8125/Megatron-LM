@@ -724,9 +724,7 @@ def num_floating_point_operations(args, batch_size):
             num_standard_attention_layers = num_layers
 
             compress_ratios = args.csa_compress_ratios
-            assert compress_ratios is not None, (
-                "csa_compress_ratios must be set for dsv4_hybrid"
-            )
+            assert compress_ratios is not None, "csa_compress_ratios must be set for dsv4_hybrid"
             assert len(compress_ratios) == num_layers, (
                 f"Invalid length of csa_compress_ratios: {len(compress_ratios)}, "
                 f"expected num_layers + mtp_num_layers ({num_layers})."
@@ -762,15 +760,15 @@ def num_floating_point_operations(args, batch_size):
             # ---- r=4 layers: sparse attention + indexer ----
             # Indexer parameters are only required when at least one ratio==4 layer exists.
             if n_layers_r4 > 0:
-                assert args.dsa_indexer_n_heads is not None, (
-                    "dsa_indexer_n_heads must be set for dsv4_hybrid with ratio==4 layers."
-                )
-                assert args.dsa_indexer_head_dim is not None, (
-                    "dsa_indexer_head_dim must be set for dsv4_hybrid with ratio==4 layers."
-                )
-                assert args.dsa_indexer_topk is not None, (
-                    "dsa_indexer_topk must be set for dsv4_hybrid with ratio==4 layers."
-                )
+                assert (
+                    args.dsa_indexer_n_heads is not None
+                ), "dsa_indexer_n_heads must be set for dsv4_hybrid with ratio==4 layers."
+                assert (
+                    args.dsa_indexer_head_dim is not None
+                ), "dsa_indexer_head_dim must be set for dsv4_hybrid with ratio==4 layers."
+                assert (
+                    args.dsa_indexer_topk is not None
+                ), "dsa_indexer_topk must be set for dsv4_hybrid with ratio==4 layers."
                 idx_n_heads = args.dsa_indexer_n_heads
                 idx_head_dim = args.dsa_indexer_head_dim
                 idx_topk = args.dsa_indexer_topk
