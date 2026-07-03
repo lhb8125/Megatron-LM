@@ -305,6 +305,8 @@ class FullCudaGraphWrapper:
         training = not kwargs['forward_only']
         training_str = 'training' if training else 'validation'
         use_v2_fsdp = _has_v2_fsdp_modules(model)
+        if not training and use_v2_fsdp:
+            return self.forward_backward_func(*args, **kwargs)
         curr_iteration = self.curr_iter(training_str)
         capture_iteration = curr_iteration == self.cuda_graph_warmup_steps
         data_iterator = kwargs['data_iterator']

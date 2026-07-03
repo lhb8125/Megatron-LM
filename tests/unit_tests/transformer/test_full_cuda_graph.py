@@ -61,6 +61,24 @@ def test_has_v2_fsdp_modules_walks_nested_model_list():
     assert _has_v2_fsdp_modules([root, v2_child])
 
 
+def test_v2_fsdp_forward_only_stays_eager(mocker):
+    eager_result = object()
+    forward_backward_func = mocker.Mock(return_value=eager_result)
+    wrapper = FullCudaGraphWrapper(forward_backward_func)
+    model = [_FSDPStopModule()]
+
+    result = wrapper(
+        model=model,
+        data_iterator=[iter(())],
+        num_microbatches=1,
+        seq_length=None,
+        forward_only=True,
+    )
+
+    assert result is eager_result
+    forward_backward_func.assert_called_once()
+
+
 def test_stop_v2_fsdp_communication_skips_v1_modules():
     root = torch.nn.Module()
     v2_child = _FSDPStopModule()
