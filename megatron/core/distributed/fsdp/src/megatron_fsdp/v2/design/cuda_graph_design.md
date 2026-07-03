@@ -248,3 +248,19 @@ See `te_graph_runtime/README.md` for details and upstream attribution.
 | Graph replay | Automatic (MB2+, via `Graphed.apply`) |
 | RNG state | Handled by `make_graphed_callables` internally |
 | Slot state | Automatic (snapshot/restore) |
+
+## 12. Full-iteration optimizer-gradient storage
+
+The default-off `enable_full_iteration_cuda_graph` mode preserves only the
+optimizer-facing gradient objects that cross the full-iteration graph boundary.
+Transient full weight and gradient buffers allocate and reshard inside capture;
+the CUDA graph private pool provides stable replay addresses and lifetime reuse.
+
+- `_pre_backward_setup()` pre-allocates local dist grads before capture.
+- `_maybe_free_grad_data()` keeps optimizer-facing local gradient storage resident.
+- FSDP and optimizer zero-grad preserve `dist_grad`/`decoupled_grad` identities
+  and clear their local storage in place.
+- Full-iteration mode uses `StorageFreeingBucketAllocator`; `TracePoolAllocator`
+  remains available for explicit and per-module CUDA graph modes.
+
+All behavior is gated by `enable_full_iteration_cuda_graph=False` by default.
