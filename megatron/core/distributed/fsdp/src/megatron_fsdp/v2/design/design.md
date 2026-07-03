@@ -193,7 +193,10 @@ the time the forward kernel uses them.
 all-gather. This ensures that writes performed on the main stream (e.g., reshard after a
 previous forward, or tensor-parallel slice updates) are fully visible to the all-gather
 kernel. Without this barrier, stale or partially-written parameter shards may be read by
-the NCCL collective, causing convergence divergence.
+the NCCL collective, causing convergence divergence. The edge also makes `ag_stream`
+join a full-iteration CUDA graph capture before the capture stream waits on the recorded
+unshard event; otherwise CUDA reports `cudaErrorStreamCaptureIsolation` at the first
+captured async unshard.
 
 **NVTX profiling.** `unshard()`, `reshard()`, and `reduce_grad()` each push/pop a
 `torch.cuda.nvtx` range (`"MFSDP unshard"`, `"MFSDP reshard"`, `"MFSDP reduce_grad"`)

@@ -48,6 +48,15 @@ def _unshard_weight_buffers(dp_group, weight_buffers, *, async_op: bool) -> None
         coalescing_event.wait()
 
 
+def _select_unshard_stream(ctx, *, async_op: bool):
+    """Select the unshard stream and preserve caller-to-AG ordering."""
+    caller_stream = torch.cuda.current_stream()
+    if not async_op:
+        return caller_stream
+    ctx.ag_stream.wait_stream(caller_stream)
+    return ctx.ag_stream
+
+
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -671,7 +680,7 @@ class FSDPModule:
         """
         torch.cuda.nvtx.range_push("MFSDP unshard")
         ctx = self._fsdp_root_context
-        stream = ctx.ag_stream if async_op else torch.cuda.current_stream()
+        stream = _select_unshard_stream(ctx, async_op=async_op)
 
         # Unshard this module and optionally prefetch next modules in the forward/backward pass
         if async_op:
