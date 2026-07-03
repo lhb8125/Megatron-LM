@@ -289,3 +289,7 @@ then coordinates capture with the normal FSDP hook lifecycle:
 For combined 1F1B, TracePool finalization is deferred until the complete
 forward-only, overlap, and backward-only schedule has executed once. Non-v2
 models keep the existing full-iteration capture behavior.
+
+Forward-only validation and test passes remain eager when v2 FSDP is active.
+This keeps training capture independent from validation warmup side-stream
+state; non-v2 models retain their existing validation graph behavior.
