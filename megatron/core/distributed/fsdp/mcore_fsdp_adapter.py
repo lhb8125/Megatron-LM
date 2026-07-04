@@ -1,16 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import logging
 import random
@@ -41,10 +29,10 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.distributed.data_parallel_base import _BaseDataParallel
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.ssm.mamba_layer import MambaLayer
-from megatron.core.transformer.moe.router import Router as MoERouter
 from megatron.core.transformer.attention import Attention
+from megatron.core.transformer.moe.router import Router as MoERouter
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
 
@@ -249,12 +237,14 @@ class FullyShardedDataParallel(_BaseDataParallel):
         device: Optional[torch.device] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        # The legacy fallback intentionally imports a different fully_shard implementation.
+        # pylint: disable=possibly-used-before-assignment
         if ddp_config.use_megatron_fsdp:
             from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fully_shard
             from megatron.core.distributed.fsdp.src.megatron_fsdp.v2.mixed_precision import (
                 FullyShardFP8Policy,
-                MixedPrecisionPolicy,
                 FullyShardNVFP4Policy,
+                MixedPrecisionPolicy,
             )
         else:
             from torch.distributed.fsdp import fully_shard
@@ -293,6 +283,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
                 enabled=ddp_config.fp4_param_gather, recipe=config.fp4_recipe
             ),
         )
+        # pylint: enable=possibly-used-before-assignment
         kwargs = {
             "mp_policy": fully_shard_mp_policy,
             "enable_unshard_prefetch": ddp_config.overlap_param_gather,
@@ -328,17 +319,19 @@ class FullyShardedDataParallel(_BaseDataParallel):
                     grad_sf = gradient_scaling_factor
                     mesh = dp_mesh
 
-                if any([
-                    isinstance(m, MambaLayer) and "mamba" in cuda_graph_on,
-                    isinstance(m, Attention) and "attn" in cuda_graph_on,
-                    isinstance(m, MoERouter) and "moe_router" in cuda_graph_on,
-                ]):
+                if any(
+                    [
+                        isinstance(m, MambaLayer) and "mamba" in cuda_graph_on,
+                        isinstance(m, Attention) and "attn" in cuda_graph_on,
+                        isinstance(m, MoERouter) and "moe_router" in cuda_graph_on,
+                    ]
+                ):
                     fully_shard(
                         m,
                         enable_cuda_graph=True,
                         mesh=mesh,
                         gradient_scaling_factor=grad_sf,
-                        **kwargs
+                        **kwargs,
                     )
                 elif isinstance(m, tuple(fsdp_unit_modules)):
                     fully_shard(
@@ -346,7 +339,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
                         mesh=mesh,
                         gradient_scaling_factor=grad_sf,
                         enable_cuda_graph=False,
-                        **kwargs
+                        **kwargs,
                     )
         fully_shard(module, mesh=dp_mesh, gradient_scaling_factor=gradient_scaling_factor, **kwargs)
 
