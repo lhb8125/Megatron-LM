@@ -247,31 +247,25 @@ See `te_graph_runtime/README.md` for details and upstream attribution.
 | RNG state | Handled by `make_graphed_callables` internally |
 | Slot state | Automatic (snapshot/restore) |
 
-## 12. Full-iteration stable-storage core
+## 12. Full-iteration optimizer-gradient storage
 
-The default-off `enable_full_iteration_cuda_graph` mode exposes the stable
-storage contract needed by an external full-iteration CUDA graph wrapper. This
-change provides the FSDP-side storage lifecycle only; adapter and global wrapper
-integration are separate concerns.
+The default-off `enable_full_iteration_cuda_graph` mode preserves only the
+optimizer-facing gradient objects that cross the full-iteration graph boundary.
+Transient full weight and gradient buffers allocate and reshard inside capture;
+the CUDA graph private pool provides stable replay addresses and lifetime reuse.
 
-- `fully_shard()` selects `TracePoolAllocator` when the mode is enabled.
-- `_pre_backward_setup()` pre-allocates dist grads and fetches the full
-  `main_grad_buffer` before capture.
-- `ParameterGroup.release_grad_buffer()` records logical allocator free events
-  while retaining the graph-visible tensor object.
-- `mfsdp_finalize_trace_pool()` plans slots, rebinds cached full grad buffers
-  from trace storage to optimized slots, and zeroes them before capture.
-- Hook-managed execution finalizes after a complete backward. Externally
-  managed schedules may defer finalization until their complete allocation
-  trace has run.
-- `_maybe_free_grad_data()` keeps optimizer-facing gradient storage resident,
-  while FSDP and optimizer zero-grad clear captured storage in place.
+- `_pre_backward_setup()` pre-allocates local dist grads before capture.
+- `_maybe_free_grad_data()` keeps optimizer-facing local gradient storage resident.
+- FSDP and optimizer zero-grad preserve `dist_grad`/`decoupled_grad` identities
+  and clear their local storage in place.
+- Full-iteration mode uses `StorageFreeingBucketAllocator`; `TracePoolAllocator`
+  remains available for explicit and per-module CUDA graph modes.
 
 All behavior is gated by `enable_full_iteration_cuda_graph=False` by default.
 
 ## 13. MCore full-iteration integration
 
-The MCore adapter enables the stable-storage mode when
+The MCore adapter enables the optimizer-gradient persistence mode when
 `TransformerConfig.cuda_graph_impl == "full_iteration"`. The global wrapper
 then coordinates capture with the normal FSDP hook lifecycle:
 

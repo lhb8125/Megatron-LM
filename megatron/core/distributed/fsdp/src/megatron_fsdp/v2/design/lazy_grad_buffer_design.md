@@ -190,25 +190,21 @@ across micro-batches.
 ### Full-iteration CUDA graph
 
 `enable_full_iteration_cuda_graph=True` is an explicit exception to the normal
-lazy-freeing policy. CUDA graph replay requires the gradient shard, fetched full
-grad buffer, and optimizer-facing `decoupled_grad` objects to keep stable device
-addresses.
+lazy-freeing policy for optimizer-facing gradients. The full-iteration wrapper
+captures forward/backward but runs the optimizer outside the graph, so the local
+gradient shard and `decoupled_grad` object must keep stable identities.
 
-- `_pre_backward_setup()` allocates dist grads and fetches the full grad buffer
-  before capture.
-- `release_grad_buffer()` records allocator free events while retaining the
-  tensor/view object. After planning, the cached full grad buffer is rebound to
-  its optimized `TracePoolAllocator` slot and zeroed.
+- `_pre_backward_setup()` allocates dist grads before capture.
 - `_maybe_free_grad_data()` keeps optimizer-facing gradient storage alive.
-- `zero_grad()` clears existing storage in place instead of dropping tensor
-  objects.
+- `zero_grad()` keeps optimizer-facing objects and clears local storage in place.
 - Optimizer zero-grad keeps marked `decoupled_grad` DTensors and zeroes their
   local storage.
+- Full unsharded weight and gradient buffers remain transient. They allocate and
+  reshard inside capture, so the CUDA graph private pool owns their stable replay
+  addresses and reuses non-overlapping lifetimes.
 
-Hook-managed execution plans after the first complete backward. An external
-scheduler may request deferred planning and call `mfsdp_finalize_trace_pool()`
-after its complete allocation trace. The flag defaults to `False`, so eager and
-per-module CUDA graph paths retain the normal lazy allocation/free behavior.
+The flag defaults to `False`, so eager and per-module CUDA graph paths retain
+their normal lazy allocation/free behavior.
 
 ### Activation recomputation
 

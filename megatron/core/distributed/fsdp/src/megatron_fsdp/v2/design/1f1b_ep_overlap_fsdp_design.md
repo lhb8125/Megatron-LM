@@ -402,12 +402,10 @@ Their schedule-side wiring is in `combined_1f1b.py` (see §3.1).
      calls `module.reduce_grad()` — copy grads → reduce-scatter → install DTensor grads.
    5. Sets `module.post_backward_issued = True`.
 
-For full-iteration CUDA graphs, releasing a reduced full-gradient buffer records
-the allocator `free` event but retains the tensor/view object. The allocation
-trace spans forward-only, steady-state overlap, and backward-only phases. After
-the final backward-only phase, `combined_1f1b.py` calls
-`mfsdp_finalize_trace_pool()` so retained views are rebound to planned addresses
-only after the complete schedule has been observed.
+For full-iteration CUDA graphs, full-gradient communication buffers are released
+normally inside capture. The CUDA graph private pool keeps their replay addresses
+stable and reuses storage across non-overlapping schedule phases. Only the local
+optimizer-facing gradient object persists outside the graph.
 
 ### 4.5 Gradient sync suppression — `no_sync()`
 

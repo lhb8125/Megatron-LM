@@ -339,25 +339,18 @@ The capture is triggered inside the unified per-module forward pre-hook
    is pre-allocated via `allocate(pg_id, "main_grad")` to ensure both forward
    and backward passes see fixed addresses.
 
-3. **Trace buckets are rebound after planning**: In full-iteration CUDA graph
-   mode, the first trace may leave `main_grad_buffer._unsharded_buffer`
-   pointing at a trace bucket. Immediately after `plan()`, FSDP rebinds that
-   cached full grad buffer to the optimized key-to-slot view and zeroes it.
-   Capture therefore records the planned slot address instead of retaining a
-   duplicate trace allocation.
-
-4. **Hooks popped recursively**: `_pop_hooks_recursive` removes all FSDP
+3. **Hooks popped recursively**: `_pop_hooks_recursive` removes all FSDP
    hooks on the target module and every submodule. ``cuda_graph_active`` is
    set to ``True`` so any stray hook that fires during this window asserts.
 
-5. **Warmup + capture**: `make_graphed_callables` runs 3 warmup iterations
+4. **Warmup + capture**: `make_graphed_callables` runs 3 warmup iterations
    (no hooks → raw forward only) + the actual graph capture. The graph
    records GPU kernels reading/writing the pool views at their fixed addresses.
 
-6. **Cleanup**: ``cuda_graph_active`` is cleared, hooks are restored
+5. **Cleanup**: ``cuda_graph_active`` is cleared, hooks are restored
    recursively, the patched forward is installed.
 
-7. **Replay**: The patched forward calls `graphed(*flat)`. Since the graph
+6. **Replay**: The patched forward calls `graphed(*flat)`. Since the graph
    captured the fixed pool addresses, replay reads/writes the **same**
    addresses every time — no re-allocation, no address change.
 
