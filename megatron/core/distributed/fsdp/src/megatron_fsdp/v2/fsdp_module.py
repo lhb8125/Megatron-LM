@@ -806,7 +806,7 @@ class FSDPModule:
                             param.grad
                         ).any(), f"NaN in parameter grad for {name}"
 
-            # Copy .grad -> main grad buffer on main stream (fast memcpy).
+            # Stage .grad into the main grad buffer before reduce-scatter.
             # When gradient_accumulation_fusion is active for FSDP params, the backward
             # kernel writes directly into main_grad (weight.main_grad = get_main_grad() in
             # layers.py) and sets grad_added_to_main_grad=True. In that case we must NOT
@@ -861,13 +861,29 @@ class FSDPModule:
                             copy_dsts.append(main_grad.view(-1))
                         del param.grad
 
-            # At most three launches total (instead of one per parameter).
-            if zero_targets:
-                torch._foreach_zero_(zero_targets)
-            if copy_dsts:
-                torch._foreach_copy_(copy_dsts, copy_srcs)
-            if add_dsts:
-                torch._foreach_add_(add_dsts, add_srcs)
+            # For ordinary async groups, stage gradients on the RS stream so the
+            # copies can overlap with the next module's backward compute. Deferred
+            # groups keep staging on the caller stream because their reduction runs
+            # only at the iteration boundary.
+            stage_on_rs_stream = async_op and not defer_sync
+            if stage_on_rs_stream:
+                stream.wait_stream(torch.cuda.current_stream())
+                for source in copy_srcs + add_srcs:
+                    source.record_stream(stream)
+                with torch.cuda.stream(stream):
+                    if zero_targets:
+                        torch._foreach_zero_(zero_targets)
+                    if copy_dsts:
+                        torch._foreach_copy_(copy_dsts, copy_srcs)
+                    if add_dsts:
+                        torch._foreach_add_(add_dsts, add_srcs)
+            else:
+                if zero_targets:
+                    torch._foreach_zero_(zero_targets)
+                if copy_dsts:
+                    torch._foreach_copy_(copy_dsts, copy_srcs)
+                if add_dsts:
+                    torch._foreach_add_(add_dsts, add_srcs)
 
             if defer_sync and not finish_grad_sync_only:
                 param_group._deferred_grad_accumulated = True

@@ -271,7 +271,7 @@ def reduce_grad(self, async_op: bool = False):
                     #   → DataParallelBuffer.reshard() (frees unsharded grad bucket)
             if module is self: break
 
-    # --- Step 2: Copy .grad → main_grad_buffer (on main stream, fast memcpy) ---
+    # --- Step 2: Stage .grad → main_grad_buffer ---
     for param_names, param_group in self._named_param_groups:
         if not param_group.requires_grad: continue
 
@@ -281,18 +281,29 @@ def reduce_grad(self, async_op: bool = False):
                 if not getattr(param, 'grad_added_to_main_grad', False):
                     main_grad.zero_()       # no TE fusion: zero the slot
             else:
-                main_grad.copy_(param.grad.detach())   # normal backward: copy .grad
+                copy_srcs.append(param.grad.detach())
+                copy_dsts.append(main_grad)
                 del param.grad
+
+        # Ordinary async groups stage on rs_stream. Deferred groups stage on
+        # the caller stream because they reduce only at the iteration boundary.
+        stage_on_rs_stream = async_op and not param_group.defer_full_param_and_grad_sync
+        if stage_on_rs_stream:
+            stream.wait_stream(torch.cuda.current_stream())
+            for src in copy_srcs:
+                src.record_stream(stream)
+            with torch.cuda.stream(stream):
+                torch._foreach_copy_(copy_dsts, copy_srcs)
+        else:
+            torch._foreach_copy_(copy_dsts, copy_srcs)
 
         # --- Step 3: Reduce-scatter on rs_stream ---
         if async_op:
-            stream.wait_stream(torch.cuda.current_stream())    # ensure .grad copy is visible to rs_stream
-            with torch.cuda.stream(stream):
-                param_group.reduce_grad()
-                #   → DataParallelBuffer.reduce_grad() (synchronous within this stream):
-                #       fetch_unsharded_buffer() allocates full grad buffer
-                #       reduce_scatter_tensor(output=grad_shard, input=full_grad)
-                #       self.data[local_idx:...] += grad_shard
+            param_group.reduce_grad(stream=stream)
+            # → DataParallelBuffer.reduce_grad() (synchronous within this stream):
+            #     fetch_unsharded_buffer() allocates full grad buffer
+            #     reduce_scatter_tensor(output=grad_shard, input=full_grad)
+            #     self.data[local_idx:...] += grad_shard
             event = stream.record_event()
             ctx.reduce_grad_buckets[id(self)].append((event, param_group))
             # param_group.release_grad_buffer() is NOT called here; deferred until drain/final CB
@@ -314,6 +325,14 @@ def reduce_grad(self, async_op: bool = False):
 The operation is inherently synchronous *within whatever stream is current* when called. The
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
+
+For ordinary async ZeRO-2/3 groups, the batched zero/copy staging kernels run on the same
+`rs_stream` immediately before reduce-scatter. The stream first waits for the caller stream,
+and every detached `.grad` source records `rs_stream` before its Python reference is released.
+This preserves caching-allocator lifetime safety while allowing staging and communication to
+overlap with the next module's backward compute. Full-iteration bounded support groups retain
+caller-stream staging because they accumulate across microbatches and reduce only at the
+iteration boundary.
 
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
@@ -647,12 +666,12 @@ pre-hook L[2]: event[L[2]].wait() → main stream unblocks
 
 BACKWARD PASS (enable_async_reduce_grad=True)
 ---------------------------------------------------------
-main stream:  |bwd L[2]|copy grad[2]|bwd L[1]|copy grad[1]|bwd L[0]|copy grad[0]|
+main stream:  |bwd L[2]|bwd L[1]      |bwd L[0]      |                         |
 ag_stream:    |AG(L[1]) prefetch    |AG(L[0]) prefetch     |                      |
-rs_stream:    |                RS(L[2]) ------|     RS(L[1]) ------|   RS(L[0])---|
+rs_stream:    |copy+RS(L[2]) --------|copy+RS(L[1]) --------|copy+RS(L[0]) -------|
 
-post-bwd L[2]: reshard, copy grad[2]→main_grad, rs_stream.wait(main), RS(L[2]), event[2]
-post-bwd L[1]: drain event[2-2]? (i=1, no drain), copy grad[1], RS(L[1]), event[1]
+post-bwd L[2]: reshard, rs_stream.wait(main), copy grad[2]→main_grad, RS(L[2]), event[2]
+post-bwd L[1]: drain event[2-2]? (i=1, no drain), copy+RS(L[1]), event[1]
 post-bwd L[0]: drain event[L[2]] (i=2, drain backward_order[0]=L[2]), RS(L[0]), event[0]
 
 final_callback:
