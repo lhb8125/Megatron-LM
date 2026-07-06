@@ -459,6 +459,18 @@ per micro-batch. The rowwise/model buffer remains sharded, so forward unshard
 and the optimizer state keep their normal ZeRO-3 layout. When the option is
 disabled, both compute-weight buffers remain sharded.
 
+### Bounded FP8 Weight Refresh
+
+The root FSDP module defers FP8 main-to-model weight updates and groups requests
+that share the same data-parallel process group. It flushes each group after
+eight `ParameterGroup` requests and flushes any remainder after walking the
+module tree. This preserves process-group semantics while combining scale/amax
+communication into fewer quantization calls.
+
+The bound limits the lifetime of temporary quantization inputs. Non-FP8 groups
+still update immediately through the same policy entry point, and callers that
+do not provide a deferred-update list retain the original eager behavior.
+
 ---
 
 ## Feature 3: Activation Recomputation (Gradient Checkpointing)
