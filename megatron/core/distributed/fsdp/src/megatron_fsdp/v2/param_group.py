@@ -166,7 +166,8 @@ class ParameterGroup:
         self.model_weight_buffer = wbuf
 
         if self.mp_policy.needs_transpose_weight_buffer(self.params[0]):
-            tbuf = self._create_buffer(torch.uint8, shard_weights, "transpose_weight")
+            shard_transpose_weights = shard_weights and not self.mp_policy.fp8.keep_transpose_cache
+            tbuf = self._create_buffer(torch.uint8, shard_transpose_weights, "transpose_weight")
             tbuf.init_data(torch.empty(tbuf.data_size, dtype=tbuf.dtype, device=self.device))
             for i, p in enumerate(self.params):
                 tbuf.set_item(i, self.mp_policy.get_param_data(p, transpose=True))

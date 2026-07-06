@@ -445,6 +445,20 @@ The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where
 `weight_buffers_for_unshard(..., bwd_pass=True)` selects it.
 
+### Persistent MXFP8 Transpose Cache
+
+When `keep_fp8_transpose_cache` is enabled, the MXFP8 transpose/columnwise
+buffer is replicated even under `optim_grads_params`. The optimizer still owns
+only its sharded main-weight slice. After the local slice is quantized,
+`copy_main_weights_to_model_weights()` marks the replicated transpose buffer
+dirty; the next backward unshard all-gathers the updated slices directly into
+that persistent buffer.
+
+Keeping the columnwise buffer resident avoids allocating and gathering it once
+per micro-batch. The rowwise/model buffer remains sharded, so forward unshard
+and the optimizer state keep their normal ZeRO-3 layout. When the option is
+disabled, both compute-weight buffers remain sharded.
+
 ---
 
 ## Feature 3: Activation Recomputation (Gradient Checkpointing)
