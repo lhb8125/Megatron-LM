@@ -810,6 +810,14 @@ are freed via `_free_storage(p.data)`. The module holds DTensor shard views and 
 rebinds `.data` to the all-gathered buffer, so the original storage is dead and freeing it
 reduces peak memory during model construction.
 
+For full-iteration ZeRO-3, the MCore adapter runs one `gc.collect()` and
+`torch.cuda.empty_cache()` after every child and the root have completed `fully_shard()`. At
+that boundary the FSDP-owned buffers contain the parameter data and the original parameter
+storages are dead, but their inactive caching-allocator segments can otherwise remain reserved
+through the eager warmup and raise the process peak. The cleanup is gated to
+`cuda_graph_impl="full_iteration"` with `optim_grads_params`, runs once per wrapped model, and
+does not execute during warmup, capture, or replay.
+
 ### Untied embedding/output units in full-iteration graphs
 
 With `optim_grads_params`, parameters not owned by a configured child FSDP unit fall into the

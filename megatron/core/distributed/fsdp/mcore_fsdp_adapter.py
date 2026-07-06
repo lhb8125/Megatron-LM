@@ -1,5 +1,6 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import gc
 import logging
 import random
 from contextlib import nullcontext
@@ -384,6 +385,15 @@ class FullyShardedDataParallel(_BaseDataParallel):
                         **kwargs,
                     )
         fully_shard(module, mesh=dp_mesh, gradient_scaling_factor=gradient_scaling_factor, **kwargs)
+
+        if (
+            config.cuda_graph_impl == "full_iteration"
+            and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
+        ):
+            # FSDP buffers now own the parameter data. Release allocator segments
+            # left behind by the original parameter storages before warmup.
+            gc.collect()
+            torch.cuda.empty_cache()
 
         # Propagate relevant attributes from original parameters to the new
         # distributed parameters created by FSDP.  This is REQUIRED for
