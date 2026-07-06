@@ -390,6 +390,15 @@ class FullyShardedDataParallel(_BaseDataParallel):
             config.cuda_graph_impl == "full_iteration"
             and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
         ):
+            # Full-iteration replay keeps optimizer-facing local gradients alive.
+            # Allocate them with the other persistent FSDP buffers before eager
+            # warmup starts growing the caller-stream allocator segment.
+            for child in module.modules():
+                if not isinstance(child, FSDPModule):
+                    continue
+                for param_group in child._fsdp_param_groups:
+                    param_group._init_dist_grads()
+
             # FSDP buffers now own the parameter data. Release allocator segments
             # left behind by the original parameter storages before warmup.
             gc.collect()

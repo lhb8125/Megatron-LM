@@ -257,6 +257,9 @@ Transient full weight and gradient buffers allocate and reshard inside capture;
 the CUDA graph private pool provides stable replay addresses and lifetime reuse.
 
 - `_pre_backward_setup()` pre-allocates local dist grads before capture.
+- The MCore full-iteration adapter initializes those persistent local dist
+  grads during FSDP setup, before eager warmup grows the caller-stream allocator
+  segment. The backward setup remains idempotent.
 - `_maybe_free_grad_data()` keeps optimizer-facing local gradient storage resident.
 - FSDP and optimizer zero-grad preserve `dist_grad`/`decoupled_grad` identities
   and clear their local storage in place.
