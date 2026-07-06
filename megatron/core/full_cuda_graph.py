@@ -242,16 +242,6 @@ class FullCudaGraphWrapper:
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
         self.use_single_mempool = use_single_mempool
 
-    def _forward_backward_on_capture_stream(self, *args, **kwargs):
-        """Run eager warmup on the stream that will later be captured."""
-        capture_stream = get_shared_capture_stream()
-        current_stream = torch.cuda.current_stream()
-        capture_stream.wait_stream(current_stream)
-        with torch.cuda.stream(capture_stream):
-            result = self.forward_backward_func(*args, **kwargs)
-        current_stream.wait_stream(capture_stream)
-        return result
-
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
         if not isinstance(model, list) or len(model) == 1:
@@ -354,7 +344,7 @@ class FullCudaGraphWrapper:
             logger.info(f'CUDA graph capture done for {training_str}!!!')
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             if use_v2_fsdp:
-                result = self._forward_backward_on_capture_stream(*args, **kwargs)
+                result = self.forward_backward_func(*args, **kwargs)
             else:
                 FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
                     *args, **kwargs
