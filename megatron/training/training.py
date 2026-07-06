@@ -2570,8 +2570,14 @@ def training_log(
 
     # Dump memory snapshot and print metrics to stdout.
     if iteration % args.log_interval == 0 or is_first_iteration:
+        snapshot_rank = os.getenv('MCORE_MEMORY_SNAPSHOT_RANK')
+        should_dump_snapshot = (
+            is_last_rank()
+            if snapshot_rank is None
+            else torch.distributed.get_rank() == int(snapshot_rank)
+        )
         if args.record_memory_history and (
-            is_last_rank() or torch.distributed.get_backend() == 'fake'
+            should_dump_snapshot or torch.distributed.get_backend() == 'fake'
         ):
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
