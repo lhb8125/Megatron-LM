@@ -765,6 +765,27 @@ are freed via `_free_storage(p.data)`. The module holds DTensor shard views and 
 rebinds `.data` to the all-gathered buffer, so the original storage is dead and freeing it
 reduces peak memory during model construction.
 
+### Untied embedding/output units in full-iteration graphs
+
+With `optim_grads_params`, parameters not owned by a configured child FSDP unit fall into the
+root unit. An untied embedding and output projection can therefore share one root parameter
+group even though they execute at opposite ends of the iteration. Unsharding either endpoint
+then materializes both large weights in one communication buffer and extends their combined
+lifetime through the captured iteration.
+
+For `cuda_graph_impl="full_iteration"`, `mcore_fsdp_adapter.py` finds multiple disjoint modules
+that directly own parameters marked `is_embedding_or_output_parameter` and calls `fully_shard()`
+on those owners before sharding the normal units and root. This gives each endpoint an independent
+communication-buffer lifetime, allowing the CUDA graph private pool to recycle storage between
+the non-overlapping embedding and output phases. The split does not require `TracePoolAllocator`
+and does not retain any buffer across iterations.
+
+The split is disabled when only one direct owner is found. This preserves tied embeddings and
+pipeline stages containing only one endpoint, where splitting cannot shorten a combined root
+buffer lifetime. It is also disabled outside full-iteration graphs and outside ZeRO-3
+(`optim_grads_params`). The endpoint units use normal post-backward callbacks because their native
+weight gradients are not part of the delayed Transformer Engine wgrad path.
+
 ---
 
 ## Configuration
