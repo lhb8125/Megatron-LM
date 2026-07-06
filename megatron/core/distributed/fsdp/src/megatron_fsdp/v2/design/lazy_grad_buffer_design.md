@@ -189,6 +189,12 @@ After the first call, `_init_dist_grads()` is a no-op. Subsequent calls just
 do the reduce as before. `overwrite_grad=False` ensures proper accumulation
 across micro-batches.
 
+Full-iteration FP8 support groups are a bounded exception: they retain the
+temporary full gradient across microbatches, copy the first ordinary `.grad`,
+add subsequent `.grad` tensors, and reduce-scatter once in
+`finish_grad_sync()`. The persistent local shard remains governed by the
+full-iteration identity rules below.
+
 ### Full-iteration CUDA graph
 
 `enable_full_iteration_cuda_graph=True` is an explicit exception to the normal

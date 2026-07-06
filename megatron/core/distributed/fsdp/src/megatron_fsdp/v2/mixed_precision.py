@@ -136,9 +136,11 @@ if not HAVE_TE_CAST_MASTER_WEIGHTS_TO_FP8:
         except ImportError:
 
             def local_multi_tensor_applier(op, noop_flag_buffer, tensor_lists, *args):
+                """Apply the local fallback multi-tensor operation."""
                 return op(2048 * 32, noop_flag_buffer, tensor_lists, *args)
 
             def local_multi_tensor_scale(chunk_size, noop_flag, tensor_lists, scale):
+                """Scale tensor lists when fused multi-tensor kernels are unavailable."""
                 for src, dst in zip(tensor_lists[0], tensor_lists[1]):
                     dst.copy_(src * scale)
 

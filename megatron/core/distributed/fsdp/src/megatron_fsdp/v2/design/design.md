@@ -445,6 +445,29 @@ The rowwise/model buffer is refreshed on forward unshard. For MXFP8, the
 transpose buffer is refreshed on backward unshard, where
 `weight_buffers_for_unshard(..., bwd_pass=True)` selects it.
 
+### Full-iteration FP8 support groups
+
+With FP8 parameter gather, LayerNorm/RMSNorm parameters and the MoE router
+remain in BF16 while the large matrix weights use quantized storage. In
+full-iteration CUDA graph mode only, a narrowly selected BF16 group containing
+hidden-size-bounded norm parameters and an optional bounded
+`[num_moe_experts, hidden_size]` router matrix uses an iteration lifetime:
+
+1. The small compute-weight buffer is replicated, while FP32 main weights,
+   optimizer-facing gradients, parameters, and optimizer state remain sharded.
+   The first microbatch refreshes a dirty buffer from optimizer-updated shards;
+   later microbatches reuse it.
+2. Backward accumulates the full temporary gradient across microbatches.
+   Ordinary `.grad` tensors copy on the first microbatch and add thereafter.
+3. `finish_grad_sync()` performs one reduce-scatter into the persistent local
+   grad shard, releases the temporary full grad, and completes the common
+   reshard lifecycle.
+
+The selector requires `enable_full_iteration_cuda_graph=True`, FP8 policy,
+`optim_grads_params`, at least one exact norm parameter, and no other matrix
+except the shape- and name-bounded router. Eager v2, BF16 training, v1, and
+ordinary matrix groups retain their existing per-microbatch lifecycle.
+
 ### Persistent MXFP8 Transpose Cache
 
 When `keep_fp8_transpose_cache` is enabled, the MXFP8 transpose/columnwise

@@ -112,6 +112,7 @@ def fully_shard(
         mp_policy=mp_policy,
         gradient_scaling_factor=gradient_scaling_factor,
         sharding_strategy=sharding_strategy,
+        enable_full_iteration_cuda_graph=enable_full_iteration_cuda_graph,
     )
     module._init_fsdp_state(
         enable_unshard_prefetch=enable_unshard_prefetch,

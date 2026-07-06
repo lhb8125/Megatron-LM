@@ -57,6 +57,7 @@ class ParameterGroup:
         sharding_strategy: str = "optim_grads_params",
         gradient_scaling_factor: Optional[float] = None,
         allocator: Optional[BucketAllocator] = None,
+        defer_full_param_and_grad_sync: bool = False,
     ):
         self.params = params
         self.param_idx: Dict[torch.nn.Parameter, int] = {p: i for i, p in enumerate(params)}
@@ -96,6 +97,8 @@ class ParameterGroup:
         self.gradient_scaling_factor = gradient_scaling_factor
         self.allocator = allocator if allocator is not None else TemporaryBucketAllocator()
         self.enable_full_iteration_cuda_graph = False
+        self.defer_full_param_and_grad_sync = defer_full_param_and_grad_sync
+        self._deferred_grad_accumulated = False
 
         # Buffer references (initialized in _init_buffers)
         self.model_weight_buffer: Optional[DataParallelBuffer] = None
@@ -152,7 +155,7 @@ class ParameterGroup:
         - main_grad_buffer: created if requires_grad
         """
         s = self.sharding_strategy
-        shard_weights = s == "optim_grads_params"
+        shard_weights = s == "optim_grads_params" and not self.defer_full_param_and_grad_sync
         shard_main_weights = s != "no_shard"
         shard_grads = s in ("optim_grads", "optim_grads_params")
 
@@ -260,8 +263,15 @@ class ParameterGroup:
                 return False
         return True
 
-    def reshard(self):
-        """Reshard model weights by releasing unsharded buffer."""
+    def reshard(self, *, force: bool = False):
+        """Reshard model weights by releasing unsharded buffer.
+
+        Full-iteration FP8 support groups keep their bounded compute-weight
+        buffer across microbatches. The iteration boundary still calls with
+        ``force=True`` to complete the common lifecycle.
+        """
+        if self.defer_full_param_and_grad_sync and not force:
+            return
         self.model_weight_buffer.reshard()
         if self.transpose_weight_buffer is not None:
             self.transpose_weight_buffer.reshard()
@@ -468,6 +478,7 @@ class ParameterGroup:
 
     def zero_grad(self, set_to_none: bool = True):
         """Zero the main gradient buffer and mark grads as zeroed."""
+        self._deferred_grad_accumulated = False
         if self.enable_full_iteration_cuda_graph:
             if self.main_grad_buffer is not None:
                 if self.main_grad_buffer.data is not None:
