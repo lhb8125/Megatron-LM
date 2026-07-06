@@ -865,7 +865,9 @@ class FSDPModule:
             # copies can overlap with the next module's backward compute. Deferred
             # groups keep staging on the caller stream because their reduction runs
             # only at the iteration boundary.
-            stage_on_rs_stream = async_op and not defer_sync
+            stage_on_rs_stream = (
+                async_op and not defer_sync and self._fsdp_state.enable_full_iteration_cuda_graph
+            )
             if stage_on_rs_stream:
                 stream.wait_stream(torch.cuda.current_stream())
                 for source in copy_srcs + add_srcs:

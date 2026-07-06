@@ -285,9 +285,13 @@ def reduce_grad(self, async_op: bool = False):
                 copy_dsts.append(main_grad)
                 del param.grad
 
-        # Ordinary async groups stage on rs_stream. Deferred groups stage on
-        # the caller stream because they reduce only at the iteration boundary.
-        stage_on_rs_stream = async_op and not param_group.defer_full_param_and_grad_sync
+        # Full-iteration ordinary async groups stage on rs_stream. Deferred
+        # groups and non-full-iteration modes retain caller-stream staging.
+        stage_on_rs_stream = (
+            async_op
+            and enable_full_iteration_cuda_graph
+            and not param_group.defer_full_param_and_grad_sync
+        )
         if stage_on_rs_stream:
             stream.wait_stream(torch.cuda.current_stream())
             for src in copy_srcs:
@@ -326,13 +330,14 @@ The operation is inherently synchronous *within whatever stream is current* when
 "async" behavior is achieved entirely by the caller dispatching into `rs_stream` via
 `with torch.cuda.stream(stream)`. This avoids any API changes to `DataParallelBuffer`.
 
-For ordinary async ZeRO-2/3 groups, the batched zero/copy staging kernels run on the same
-`rs_stream` immediately before reduce-scatter. The stream first waits for the caller stream,
-and every detached `.grad` source records `rs_stream` before its Python reference is released.
-This preserves caching-allocator lifetime safety while allowing staging and communication to
-overlap with the next module's backward compute. Full-iteration bounded support groups retain
-caller-stream staging because they accumulate across microbatches and reduce only at the
-iteration boundary.
+In full-iteration mode, ordinary async ZeRO-2/3 groups run the batched zero/copy staging kernels
+on the same `rs_stream` immediately before reduce-scatter. The stream first waits for the caller
+stream, and every detached `.grad` source records `rs_stream` before its Python reference is
+released. This preserves caching-allocator lifetime safety while allowing staging and
+communication to overlap with the next module's backward compute. Full-iteration bounded
+support groups retain caller-stream staging because they accumulate across microbatches and
+reduce only at the iteration boundary. Eager and per-module CUDA graph modes retain the prior
+caller-stream staging behavior.
 
 **`grad_added_to_main_grad` and `overwrite_main_grad` flags:**
 When TransformerEngine's `gradient_accumulation_fusion` is active, the backward kernel writes
