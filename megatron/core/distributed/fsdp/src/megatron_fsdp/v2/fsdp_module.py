@@ -45,6 +45,21 @@ def _select_unshard_stream(ctx, *, async_op: bool):
     return ctx.ag_stream
 
 
+def _stage_grad_copies(copy_dsts: List[torch.Tensor], copy_srcs: List[torch.Tensor]) -> None:
+    """Stage gradients, using D2D memcpy when no conversion is required."""
+    if not copy_dsts:
+        return
+    use_d2d_copy = all(
+        dst.dtype == src.dtype and dst.is_contiguous() and src.is_contiguous()
+        for dst, src in zip(copy_dsts, copy_srcs)
+    )
+    if use_d2d_copy:
+        for dst, src in zip(copy_dsts, copy_srcs):
+            dst.copy_(src)
+    else:
+        torch._foreach_copy_(copy_dsts, copy_srcs)
+
+
 class _FSDPState:
     """
     Internal state for FSDP module tracking.
@@ -845,13 +860,11 @@ class FSDPModule:
                 with torch.cuda.stream(stream):
                     if zero_targets:
                         torch._foreach_zero_(zero_targets)
-                    if copy_dsts:
-                        torch._foreach_copy_(copy_dsts, copy_srcs)
+                    _stage_grad_copies(copy_dsts, copy_srcs)
             else:
                 if zero_targets:
                     torch._foreach_zero_(zero_targets)
-                if copy_dsts:
-                    torch._foreach_copy_(copy_dsts, copy_srcs)
+                _stage_grad_copies(copy_dsts, copy_srcs)
 
             if async_op:
                 # ---- Overlapped path ----

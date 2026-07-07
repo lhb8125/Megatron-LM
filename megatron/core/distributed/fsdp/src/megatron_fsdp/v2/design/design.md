@@ -298,13 +298,11 @@ def reduce_grad(self, async_op: bool = False):
             with torch.cuda.stream(stream):
                 if zero_targets:
                     torch._foreach_zero_(zero_targets)
-                if copy_dsts:
-                    torch._foreach_copy_(copy_dsts, copy_srcs)
+                _stage_grad_copies(copy_dsts, copy_srcs)
         else:
             if zero_targets:
                 torch._foreach_zero_(zero_targets)
-            if copy_dsts:
-                torch._foreach_copy_(copy_dsts, copy_srcs)
+            _stage_grad_copies(copy_dsts, copy_srcs)
 
         # --- Step 3: Reduce-scatter on rs_stream ---
         if async_op:
@@ -329,6 +327,13 @@ def reduce_grad(self, async_op: bool = False):
                     dist_grad = dist_grad.to(dist_param.dtype)  # dtype cast on rs_stream
                 setattr(dist_param, "grad", dist_grad)          # Python ref, no GPU dependency
 ```
+
+`_stage_grad_copies()` uses per-tensor `copy_()` only when every source and
+destination is contiguous and has the same dtype.  That form maps ordinary
+device-to-device staging to CUDA memcpy operations.  A group containing any
+dtype conversion or non-contiguous tensor falls back as a whole to
+`torch._foreach_copy_()`, preserving the fused conversion path used by FP32
+main gradients.
 
 **Key design point — `DataParallelBuffer.reduce_grad()` has no `async_op` parameter.**
 The operation is inherently synchronous *within its selected stream*. The caller passes
