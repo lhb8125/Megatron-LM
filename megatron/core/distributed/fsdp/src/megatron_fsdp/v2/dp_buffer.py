@@ -3,7 +3,8 @@
 import logging
 import math
 from collections import namedtuple
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -12,6 +13,37 @@ from .mixed_precision import MixedPrecisionPolicy
 from .utils import ParamGroupIdx
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _GradReduction:
+    """Prepared gradient collective and its post-collective local update."""
+
+    dp_group: Any
+    collective: str
+    op: Any
+    prescale: bool
+    gradient_scaling_factor: Optional[float]
+    grad_comm_dtype: torch.dtype
+    sharding_strategy: str
+    stream: torch.cuda.Stream
+    comm_input: torch.Tensor
+    local_grad_shard: torch.Tensor
+    reduced_grad_shard: Optional[torch.Tensor]
+    overwrite_grad: bool
+    buffer_dtype: torch.dtype
+
+    def can_coalesce(self, other: "_GradReduction") -> bool:
+        """Return whether two consecutive collectives can share one NCCL group."""
+        return (
+            self.dp_group is other.dp_group
+            and self.collective == other.collective
+            and self.prescale == other.prescale
+            and self.gradient_scaling_factor == other.gradient_scaling_factor
+            and self.grad_comm_dtype == other.grad_comm_dtype
+            and self.sharding_strategy == other.sharding_strategy
+            and self.stream == other.stream
+        )
 
 
 class BufferIndex:
@@ -656,23 +688,14 @@ class DataParallelBuffer:
         return full
 
     @torch.no_grad()
-    def reduce_grad(
+    def prepare_grad_reduction(
         self,
         *,
         overwrite_grad: bool = False,
         grad_comm_dtype: Optional[torch.dtype] = None,
         stream: Optional[torch.cuda.Stream] = None,
-    ):
-        """Reduce gradients into the optimizer-facing local shard.
-
-        For distributed buffers, this reduce-scatters a temporary full gradient
-        and accumulates the result into the persistent local shard. For
-        replicated buffers, this reduce-scatters the full accumulation buffer
-        once into this rank's virtual shard for ZeRO-1 optimizer consumption.
-        For no-shard buffers, this all-reduces the full gradient buffer.
-        If grad_comm_dtype differs from self.dtype, communicate with a temporary
-        casted tensor and cast the reduced result back before accumulation.
-        """
+    ) -> _GradReduction:
+        """Prepare communication input and metadata without submitting a collective."""
         if self.sharding_strategy in ("no_shard", "optim"):
             overwrite_grad = True
 
@@ -690,20 +713,32 @@ class DataParallelBuffer:
 
         sm = self.buffer_index.shard_meta
         local_grad_shard = self.data[sm.local_data_index : sm.local_data_index + sm.size]
+        caller_stream = torch.cuda.current_stream()
+        stream = stream or caller_stream
+        stream.wait_stream(caller_stream)
 
         if not self.is_distributed and self.sharding_strategy == "no_shard":
-            stream = stream or torch.cuda.current_stream()
-            stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 comm_input = (
                     self.data if grad_comm_dtype == self.dtype else self.data.to(grad_comm_dtype)
                 )
                 if prescale:
                     comm_input.mul_(self.gradient_scaling_factor)
-                torch.distributed.all_reduce(comm_input, group=self.dp_group, op=op)
-                if grad_comm_dtype != self.dtype:
-                    self.data.copy_(comm_input.to(self.dtype))
-                return
+            return _GradReduction(
+                dp_group=self.dp_group,
+                collective="all_reduce",
+                op=op,
+                prescale=prescale,
+                gradient_scaling_factor=self.gradient_scaling_factor,
+                grad_comm_dtype=grad_comm_dtype,
+                sharding_strategy=self.sharding_strategy,
+                stream=stream,
+                comm_input=comm_input,
+                local_grad_shard=self.data,
+                reduced_grad_shard=None,
+                overwrite_grad=overwrite_grad,
+                buffer_dtype=self.dtype,
+            )
 
         if self.is_distributed:
             # ZeRO-2/3 (optim_grads/optim_grads_params): ``self.data`` is the
@@ -720,26 +755,82 @@ class DataParallelBuffer:
             input_buffer = self.fetch_buffer()
             output_offset = sm.local_data_index
 
-        stream = stream or torch.cuda.current_stream()
-        stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             comm_input = input_buffer.to(grad_comm_dtype)
             if prescale:
                 comm_input.mul_(self.gradient_scaling_factor)
             reduced_grad_shard = comm_input[output_offset : output_offset + sm.size]
 
-            torch.distributed.reduce_scatter_tensor(
-                output=reduced_grad_shard, input=comm_input, group=self.dp_group, op=op
-            )
+        return _GradReduction(
+            dp_group=self.dp_group,
+            collective="reduce_scatter",
+            op=op,
+            prescale=prescale,
+            gradient_scaling_factor=self.gradient_scaling_factor,
+            grad_comm_dtype=grad_comm_dtype,
+            sharding_strategy=self.sharding_strategy,
+            stream=stream,
+            comm_input=comm_input,
+            local_grad_shard=local_grad_shard,
+            reduced_grad_shard=reduced_grad_shard,
+            overwrite_grad=overwrite_grad,
+            buffer_dtype=self.dtype,
+        )
 
-            # If the reduced shard is already in the local grad buffer, skip copy/accumulation.
-            if local_grad_shard.data_ptr() == reduced_grad_shard.data_ptr():
+    @staticmethod
+    @torch.no_grad()
+    def submit_grad_reduction(reduction: _GradReduction) -> None:
+        """Submit only the prepared collective."""
+        with torch.cuda.stream(reduction.stream):
+            if reduction.collective == "all_reduce":
+                torch.distributed.all_reduce(
+                    reduction.comm_input, group=reduction.dp_group, op=reduction.op
+                )
+            else:
+                torch.distributed.reduce_scatter_tensor(
+                    output=reduction.reduced_grad_shard,
+                    input=reduction.comm_input,
+                    group=reduction.dp_group,
+                    op=reduction.op,
+                )
+
+    @staticmethod
+    @torch.no_grad()
+    def finalize_grad_reduction(reduction: _GradReduction) -> None:
+        """Queue the local copy or accumulation after collective submission."""
+        with torch.cuda.stream(reduction.stream):
+            if reduction.collective == "all_reduce":
+                if reduction.grad_comm_dtype != reduction.buffer_dtype:
+                    reduction.local_grad_shard.copy_(
+                        reduction.comm_input.to(reduction.buffer_dtype)
+                    )
                 return
 
-            if overwrite_grad:
-                local_grad_shard.copy_(reduced_grad_shard)
+            # If the reduced shard is already in the local grad buffer, skip copy/accumulation.
+            if reduction.local_grad_shard.data_ptr() == reduction.reduced_grad_shard.data_ptr():
+                return
+
+            if reduction.overwrite_grad:
+                reduction.local_grad_shard.copy_(reduction.reduced_grad_shard)
             else:
-                local_grad_shard += reduced_grad_shard
+                reduction.local_grad_shard.add_(reduction.reduced_grad_shard)
+
+    @torch.no_grad()
+    def reduce_grad(
+        self,
+        *,
+        overwrite_grad: bool = False,
+        grad_comm_dtype: Optional[torch.dtype] = None,
+        stream: Optional[torch.cuda.Stream] = None,
+    ):
+        """Reduce gradients into the optimizer-facing local shard."""
+        reduction = self.prepare_grad_reduction(
+            overwrite_grad=overwrite_grad,
+            grad_comm_dtype=grad_comm_dtype,
+            stream=stream,
+        )
+        self.submit_grad_reduction(reduction)
+        self.finalize_grad_reduction(reduction)
 
 
 def check_all_fsdp_buffers(module) -> bool:

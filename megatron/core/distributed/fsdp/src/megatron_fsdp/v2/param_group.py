@@ -294,6 +294,18 @@ class ParameterGroup:
         self.main_grad_buffer.reduce_grad(overwrite_grad=self._grad_buffer_is_fresh, stream=stream)
         self._grad_buffer_is_fresh = False
 
+    def prepare_grad_reduction(self, stream: Optional[torch.cuda.Stream] = None):
+        """Prepare this group's gradient collective without submitting it."""
+        self._ensure_buffers_on_gpu()
+        return self.main_grad_buffer.prepare_grad_reduction(
+            overwrite_grad=self._grad_buffer_is_fresh, stream=stream
+        )
+
+    def finalize_grad_reduction(self, reduction) -> None:
+        """Finish a previously submitted gradient collective."""
+        self.main_grad_buffer.finalize_grad_reduction(reduction)
+        self._grad_buffer_is_fresh = False
+
     def release_grad_buffer(self):
         """Release the main gradient buffer to free memory."""
         if self.main_grad_buffer is not None:

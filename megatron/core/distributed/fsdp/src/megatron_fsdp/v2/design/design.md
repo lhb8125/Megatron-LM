@@ -330,11 +330,15 @@ def reduce_grad(self, async_op: bool = False):
                 setattr(dist_param, "grad", dist_grad)          # Python ref, no GPU dependency
 ```
 
-**Key design point — `DataParallelBuffer.reduce_grad()` has no `async_op` parameter.**
-The operation is inherently synchronous *within its selected stream*. The caller passes
-`rs_stream` through `ParameterGroup.reduce_grad(stream=...)`, and the buffer implementation
-uses that stream for the collective. This avoids exposing asynchronous work handles through
-the buffer API.
+**Key design point — gradient reduction has explicit prepare / submit / finalize phases.**
+`DataParallelBuffer.prepare_grad_reduction()` casts and prescales the communication input,
+`submit_grad_reduction()` contains only the collective, and
+`finalize_grad_reduction()` copies or accumulates the reduced shard into optimizer storage.
+`FSDPModule.reduce_grad()` groups consecutive reductions only when their process group,
+collective kind, reduction op, communication dtype, sharding strategy, and stream match.
+Only the submit calls run inside `_coalescing_manager`; finalize operations are queued after
+the NCCL group closes.  One completion event is then associated with every ParameterGroup in
+the run so the existing sliding drain preserves each group's independent buffer lifetime.
 
 For full-iteration CUDA graphs, the batched zero/copy staging is also dispatched to
 `rs_stream` immediately before reduce-scatter. `rs_stream.wait_stream(current_stream())`
@@ -673,9 +677,10 @@ def reduce_grad(self, grad_comm_dtype=None):
         local_grad_shard += grad_shard
 ```
 
-The caller (`FSDPModule.reduce_grad`) provides the stream context; `DataParallelBuffer`
-just does the collective. This clean separation means `DataParallelBuffer` requires no
-modifications for the overlap feature.
+The non-coalesced `DataParallelBuffer.reduce_grad()` API composes the same three phases for
+standalone callers.  The FSDP-module path invokes them separately so compatible
+ParameterGroups can share one NCCL launch group without placing local accumulation between
+collective submissions.
 
 ---
 
