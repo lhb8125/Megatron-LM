@@ -825,9 +825,7 @@ class DataParallelBuffer:
     ):
         """Reduce gradients into the optimizer-facing local shard."""
         reduction = self.prepare_grad_reduction(
-            overwrite_grad=overwrite_grad,
-            grad_comm_dtype=grad_comm_dtype,
-            stream=stream,
+            overwrite_grad=overwrite_grad, grad_comm_dtype=grad_comm_dtype, stream=stream
         )
         self.submit_grad_reduction(reduction)
         self.finalize_grad_reduction(reduction)
