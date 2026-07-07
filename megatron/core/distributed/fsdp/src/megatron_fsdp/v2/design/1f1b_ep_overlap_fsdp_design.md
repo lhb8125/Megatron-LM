@@ -241,6 +241,10 @@ of `fully_shard()` (wired to `config.overlap_moe_expert_parallel_comm` in
 - Registers `mfsdp_forward_pre_hook` on **every sub-module** of each FSDP unit.
 - When the schedule calls `f_layer.attn.forward()`, the hook on the `attn`
   sub-module fires → resolves parent FSDPModule → `unshard()`.
+- A checkpoint recompute forward gathers only missing forward buffers directly owned by
+  the child module. The decision uses checkpoint execution state, not `backward_phase`,
+  because combined 1F1B runs normal forward work while the paired backward phase is active.
+- Normal forward work always retains the full unit forward unshard.
 
 **Pre-backward** (`_register_backward_pre_hook(fine_grained=True)` in `fully_shard.py:131`):
 - Registers `mfsdp_pre_backward_setup` via `register_multi_grad_hook` on
