@@ -217,6 +217,21 @@ Prefetched modules' data also becomes valid when their own pre-hook later calls 
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
 
+### Fine-grained unshard for activation recompute
+
+Activation checkpointing exposes an `is_recomputing()` dynamic state that is true only
+while a checkpointed forward is being rerun. This is intentionally different from the
+FSDP root's `backward_phase`: combined 1F1B can execute a normal forward while that shared
+phase is set for the paired backward.
+
+When a fine-grained child forward hook fires during actual recompute, the parent FSDP unit
+first performs its backward unshard and then calls `unshard_for_submodule()`. FSDP init maps
+each child module's direct parameters (`parameters(recurse=False)`) to their parameter-group
+indices, so the helper gathers only missing forward buffers from those groups. It does not
+prefetch a neighboring unit or set the module-wide readiness event. Normal forwards retain
+the full forward unshard path, including normal forwards paired with backward by combined
+1F1B.
+
 ### `_get_prefetch_next_modules(bwd_pass)`
 
 ```python

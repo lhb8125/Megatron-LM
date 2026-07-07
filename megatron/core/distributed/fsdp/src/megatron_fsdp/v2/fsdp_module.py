@@ -627,12 +627,24 @@ class FSDPModule:
         # child FSDPModules claim their sub-modules before the root reaches
         # them.
         for module in reversed(forward_order):
+            param_to_group_idx = {
+                param: group_idx
+                for group_idx, param_group in enumerate(module._fsdp_param_groups)
+                for param in param_group.params
+            }
             for submodule in module.modules():
                 if isinstance(submodule, FSDPModule):
                     continue
                 if hasattr(submodule, '_fsdp_parent_module'):
                     continue
                 submodule._fsdp_parent_module = weakref.ref(module)
+                submodule._mfsdp_direct_param_group_indices = tuple(
+                    dict.fromkeys(
+                        param_to_group_idx[param]
+                        for param in submodule.parameters(recurse=False)
+                        if param in param_to_group_idx
+                    )
+                )
 
         if enable_cuda_graph:
             if len(forward_order) > 1:
@@ -648,6 +660,47 @@ class FSDPModule:
 
         if any(module._fsdp_state.enable_cuda_graph for module in forward_order):
             root_context.enable_cuda_graph = True
+
+    def unshard_for_submodule(self, submodule: nn.Module, async_op: bool = False) -> None:
+        """Unshard forward buffers owned directly by a fine-grained submodule."""
+        if submodule is self:
+            self.unshard(async_op=async_op, bwd_pass=False)
+            return
+
+        group_indices = getattr(submodule, "_mfsdp_direct_param_group_indices", ())
+        if not group_indices:
+            return
+
+        ctx = self._fsdp_root_context
+        stream = _select_unshard_stream(ctx, async_op=async_op)
+        pending_post_unshard = []
+        buffer_runs = []
+
+        with torch.cuda.stream(stream):
+            for group_idx in group_indices:
+                param_group = self._fsdp_param_groups[group_idx]
+                missing_buffers = [
+                    weight_buffer
+                    for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=False)
+                    if not weight_buffer.is_unsharded()
+                ]
+                if not missing_buffers:
+                    continue
+                pending_post_unshard.append(param_group)
+                for weight_buffer in missing_buffers:
+                    if buffer_runs and buffer_runs[-1][0] is weight_buffer.dp_group:
+                        buffer_runs[-1][1].append(weight_buffer)
+                    else:
+                        buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
+
+            for dp_group, weight_buffers in buffer_runs:
+                _unshard_weight_buffers(dp_group, weight_buffers, async_op=async_op)
+
+            for param_group in pending_post_unshard:
+                param_group.post_unshard(bwd_pass=False)
+
+        if async_op and pending_post_unshard:
+            stream.record_event().wait()
 
     def unshard(self, async_op: bool = False, bwd_pass: bool = False):
         """

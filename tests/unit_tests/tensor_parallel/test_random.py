@@ -9,6 +9,7 @@ from megatron.core.tensor_parallel.random import (
     checkpoint,
     convert_cuda_rng_state,
     get_cuda_rng_tracker,
+    is_recomputing,
     model_parallel_cuda_manual_seed,
 )
 from tests.unit_tests.test_utilities import Utils
@@ -236,6 +237,33 @@ def test_checkpoint_without_output():
     output1.backward(torch.ones((4, 4)), retain_graph=True)
     output2.backward(torch.ones((4, 4)), retain_graph=True)
     assert torch.equal(input1.grad, input2.grad)
+
+
+def test_recompute_state_excludes_original_checkpoint_forward():
+    checkpoint_states = []
+    without_output_states = []
+
+    def checkpoint_forward(input_):
+        checkpoint_states.append(is_recomputing())
+        return input_ * input_
+
+    def without_output_forward(input_):
+        without_output_states.append(is_recomputing())
+        return torch.nn.functional.gelu(input_)
+
+    checkpoint_input = torch.ones((4, 4), device="cuda", requires_grad=True)
+    checkpoint(checkpoint_forward, False, checkpoint_input).sum().backward()
+
+    without_output_input = torch.ones((4, 4), device="cuda", requires_grad=True)
+    checkpoint_without_output = CheckpointWithoutOutput()
+    output = checkpoint_without_output.checkpoint(without_output_forward, without_output_input)
+    loss = output.square().sum()
+    checkpoint_without_output.discard_output_and_register_recompute(loss)
+    loss.backward()
+
+    assert checkpoint_states == [False, True]
+    assert without_output_states == [False, True]
+    assert not is_recomputing()
 
 
 class _ViewSavingLinear(torch.autograd.Function):

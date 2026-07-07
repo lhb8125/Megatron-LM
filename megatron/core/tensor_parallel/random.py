@@ -530,6 +530,10 @@ def _fork_rng():
 # Global flag that's toggled whenever inside a checkpointing context
 IS_CHECKPOINTING = False
 
+# Nesting depth for activation recompute forwards. Unlike IS_CHECKPOINTING,
+# this excludes the original checkpoint forward.
+_RECOMPUTE_DEPTH = 0
+
 
 def _set_checkpointing():
     """Set state to checkpointing enabled."""
@@ -546,6 +550,22 @@ def _unset_checkpointing():
 def is_checkpointing():
     """Check if currently in a checkpoint context."""
     return IS_CHECKPOINTING
+
+
+def is_recomputing():
+    """Return whether an activation-checkpoint recompute forward is running."""
+    return _RECOMPUTE_DEPTH > 0
+
+
+@contextlib.contextmanager
+def _recompute_context():
+    """Mark the dynamic scope that reruns a checkpointed forward."""
+    global _RECOMPUTE_DEPTH
+    _RECOMPUTE_DEPTH += 1
+    try:
+        yield
+    finally:
+        _RECOMPUTE_DEPTH -= 1
 
 
 _R = TypeVar('_R')
@@ -619,7 +639,7 @@ class CheckpointFunction(torch.autograd.Function):
 
             # Compute the forward pass.
             detached_inputs = detach_variable(inputs)
-            with torch.enable_grad():
+            with torch.enable_grad(), _recompute_context():
                 outputs = ctx.run_function(*detached_inputs)
 
         if isinstance(outputs, torch.Tensor):
@@ -898,7 +918,7 @@ class CheckpointWithoutOutput(object):
 
             # Reconstruct full args list from saved ctx
             inputs = _load_args_from_ctx(self.ctx)
-            with torch.enable_grad(), fp8_ctx, recompute_ctx:
+            with torch.enable_grad(), fp8_ctx, recompute_ctx, _recompute_context():
                 outputs = self.run_function(*inputs)
 
         self.run_function = None
