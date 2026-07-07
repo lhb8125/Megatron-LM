@@ -871,9 +871,7 @@ class FSDPModule:
             else:
                 if zero_targets:
                     torch._foreach_zero_(zero_targets)
-                _stage_grad_copies(
-                    copy_dsts, copy_srcs, enable_d2d_fast_path=enable_d2d_fast_path
-                )
+                _stage_grad_copies(copy_dsts, copy_srcs, enable_d2d_fast_path=enable_d2d_fast_path)
 
             if async_op:
                 # ---- Overlapped path ----
