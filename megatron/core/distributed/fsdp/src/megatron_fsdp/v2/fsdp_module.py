@@ -45,11 +45,13 @@ def _select_unshard_stream(ctx, *, async_op: bool):
     return ctx.ag_stream
 
 
-def _stage_grad_copies(copy_dsts: List[torch.Tensor], copy_srcs: List[torch.Tensor]) -> None:
+def _stage_grad_copies(
+    copy_dsts: List[torch.Tensor], copy_srcs: List[torch.Tensor], *, enable_d2d_fast_path: bool
+) -> None:
     """Stage gradients, using D2D memcpy when no conversion is required."""
     if not copy_dsts:
         return
-    use_d2d_copy = all(
+    use_d2d_copy = enable_d2d_fast_path and all(
         dst.dtype == src.dtype and dst.is_contiguous() and src.is_contiguous()
         for dst, src in zip(copy_dsts, copy_srcs)
     )
@@ -853,6 +855,9 @@ class FSDPModule:
             stage_on_rs_stream = async_op and getattr(
                 self._fsdp_state, "enable_full_iteration_cuda_graph", False
             )
+            enable_d2d_fast_path = getattr(
+                self._fsdp_state, "enable_full_iteration_cuda_graph", False
+            )
             if stage_on_rs_stream:
                 stream.wait_stream(torch.cuda.current_stream())
                 for source in copy_srcs:
@@ -860,11 +865,15 @@ class FSDPModule:
                 with torch.cuda.stream(stream):
                     if zero_targets:
                         torch._foreach_zero_(zero_targets)
-                    _stage_grad_copies(copy_dsts, copy_srcs)
+                    _stage_grad_copies(
+                        copy_dsts, copy_srcs, enable_d2d_fast_path=enable_d2d_fast_path
+                    )
             else:
                 if zero_targets:
                     torch._foreach_zero_(zero_targets)
-                _stage_grad_copies(copy_dsts, copy_srcs)
+                _stage_grad_copies(
+                    copy_dsts, copy_srcs, enable_d2d_fast_path=enable_d2d_fast_path
+                )
 
             if async_op:
                 # ---- Overlapped path ----
