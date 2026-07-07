@@ -81,7 +81,9 @@ def mfsdp_forward_pre_hook(hook_module: nn.Module, args: Any, kwargs: Any):
     # ---- unshard parameters for this module -------------------------------
     if ctx.backward_phase:
         target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=True)
-    target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
+        target.unshard_for_submodule(hook_module, async_op=ctx.enable_unshard_prefetch)
+    else:
+        target.unshard(async_op=ctx.enable_unshard_prefetch, bwd_pass=False)
 
     # ---- free stale grad data (safe to repeat, idempotent) ----------------
     for param_group in target._fsdp_param_groups:

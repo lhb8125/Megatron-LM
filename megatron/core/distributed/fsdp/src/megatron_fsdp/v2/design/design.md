@@ -217,6 +217,23 @@ Prefetched modules' data also becomes valid when their own pre-hook later calls 
 for them. If a module's pre-hook arrives and its event is already set (prefetch was launched
 by the previous module), it just waits on the event and skips re-launching the AG.
 
+### Fine-grained forward unshard during backward recompute
+
+Fine-grained hooks can enter a child module's forward while the root context is in the
+backward phase, for example when activation checkpointing recomputes a LayerNorm before
+its enclosing linear operation.  The hook first performs the normal module-wide backward
+unshard.  It then calls `unshard_for_submodule()` instead of requesting a second
+module-wide forward unshard.
+
+During FSDP initialization every non-FSDP child records the indices of ParameterGroups
+that contain parameters owned directly by that child (`parameters(recurse=False)`).  The
+targeted helper gathers only missing forward buffers from those groups.  It deliberately
+does not prefetch a neighboring FSDP module and uses a local completion event rather than
+setting `unshard_done_events[id(module)]`, whose event denotes module-wide readiness.
+Groups whose forward buffers are already unsharded are skipped without rerunning mixed
+precision post-processing.  Direct calls on the FSDP unit retain the full module-wide
+forward unshard path.
+
 ### `_get_prefetch_next_modules(bwd_pass)`
 
 ```python
