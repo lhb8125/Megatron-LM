@@ -255,7 +255,11 @@ each child module's direct parameters (`parameters(recurse=False)`) to their par
 indices, so the helper gathers only missing forward buffers from those groups. It does not
 prefetch a neighboring unit or set the module-wide readiness event. Normal forwards retain
 the full forward unshard path, including normal forwards paired with backward by combined
-1F1B.
+1F1B. The targeted helper follows the same stream-ownership contract as whole-unit
+unshard: allocation and tensor rebinding remain on the caller stream, only collectives run
+on `ag_stream`, and the caller waits for completion before running post-processing for the
+selected groups. Because the child consumes those buffers immediately, this path does not
+use the deferred module-prefetch state.
 
 ### `_get_prefetch_next_modules(bwd_pass)`
 

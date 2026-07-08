@@ -693,35 +693,52 @@ class FSDPModule:
             return
 
         ctx = self._fsdp_root_context
-        stream = _select_unshard_stream(ctx, async_op=async_op)
+        caller_stream, stream = _select_unshard_stream(ctx, async_op=async_op)
         pending_post_unshard = []
         buffer_runs = []
 
-        with torch.cuda.stream(stream):
-            for group_idx in group_indices:
-                param_group = self._fsdp_param_groups[group_idx]
-                missing_buffers = [
-                    weight_buffer
-                    for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=False)
-                    if not weight_buffer.is_unsharded()
-                ]
-                if not missing_buffers:
-                    continue
-                pending_post_unshard.append(param_group)
-                for weight_buffer in missing_buffers:
-                    if buffer_runs and buffer_runs[-1][0] is weight_buffer.dp_group:
-                        buffer_runs[-1][1].append(weight_buffer)
-                    else:
-                        buffer_runs.append((weight_buffer.dp_group, [weight_buffer]))
+        for group_idx in group_indices:
+            param_group = self._fsdp_param_groups[group_idx]
+            missing_buffers = [
+                weight_buffer
+                for weight_buffer in param_group.weight_buffers_for_unshard(bwd_pass=False)
+                if not weight_buffer.is_unsharded()
+            ]
+            if not missing_buffers:
+                continue
+            pending_post_unshard.append(param_group)
+            for weight_buffer in missing_buffers:
+                if (
+                    buffer_runs
+                    and buffer_runs[-1][0] is weight_buffer.dp_group
+                    and buffer_runs[-1][1] == weight_buffer.dtype
+                    and buffer_runs[-1][2] == weight_buffer.device
+                ):
+                    buffer_runs[-1][3].append(weight_buffer)
+                else:
+                    buffer_runs.append(
+                        (
+                            weight_buffer.dp_group,
+                            weight_buffer.dtype,
+                            weight_buffer.device,
+                            [weight_buffer],
+                        )
+                    )
 
-            for dp_group, weight_buffers in buffer_runs:
-                _unshard_weight_buffers(dp_group, weight_buffers, async_op=async_op)
-
-            for param_group in pending_post_unshard:
-                param_group.post_unshard(bwd_pass=False)
+        for dp_group, _, _, weight_buffers in buffer_runs:
+            _unshard_weight_buffers(
+                dp_group,
+                weight_buffers,
+                async_op=async_op,
+                stream=stream,
+                caller_stream=caller_stream,
+            )
 
         if async_op and pending_post_unshard:
             stream.record_event().wait()
+
+        for param_group in pending_post_unshard:
+            param_group.post_unshard(bwd_pass=False)
 
     def unshard(self, async_op: bool = False, bwd_pass: bool = False):
         """

@@ -8,7 +8,7 @@ from unittest.mock import Mock, call
 
 import torch.nn as nn
 
-from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import hooks
+from megatron.core.distributed.fsdp.src.megatron_fsdp.v2 import fsdp_module, hooks
 
 
 class _HookTarget:
@@ -54,3 +54,39 @@ def test_overlapped_normal_forward_keeps_full_unshard(monkeypatch):
         call(async_op=False, bwd_pass=False),
     ]
     target.unshard_for_submodule.assert_not_called()
+
+
+def test_targeted_unshard_preserves_caller_stream_ownership(monkeypatch):
+    caller_stream = object()
+    completion_event = Mock()
+    communication_stream = SimpleNamespace(record_event=Mock(return_value=completion_event))
+    dp_group = object()
+    weight_buffer = SimpleNamespace(
+        dp_group=dp_group, dtype="bf16", device="cuda", is_unsharded=Mock(return_value=False)
+    )
+    param_group = SimpleNamespace(
+        weight_buffers_for_unshard=Mock(return_value=[weight_buffer]), post_unshard=Mock()
+    )
+    target = SimpleNamespace(_fsdp_root_context=object(), _fsdp_param_groups=[param_group])
+    child = nn.Identity()
+    child._mfsdp_direct_param_group_indices = (0,)
+
+    monkeypatch.setattr(
+        fsdp_module,
+        "_select_unshard_stream",
+        lambda ctx, *, async_op: (caller_stream, communication_stream),
+    )
+    unshard_buffers = Mock()
+    monkeypatch.setattr(fsdp_module, "_unshard_weight_buffers", unshard_buffers)
+
+    fsdp_module.FSDPModule.unshard_for_submodule(target, child, async_op=True)
+
+    unshard_buffers.assert_called_once_with(
+        dp_group,
+        [weight_buffer],
+        async_op=True,
+        stream=communication_stream,
+        caller_stream=caller_stream,
+    )
+    completion_event.wait.assert_called_once_with()
+    param_group.post_unshard.assert_called_once_with(bwd_pass=False)
