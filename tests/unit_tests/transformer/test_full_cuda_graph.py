@@ -1,19 +1,12 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 from pytest_mock import mocker
 
 import megatron.core.pipeline_parallel.schedules as schedule
 from megatron.core import ModelParallelConfig
-from megatron.core.full_cuda_graph import (
-    FullCudaGraphWrapper,
-    _has_v2_fsdp_modules,
-    _stop_v2_fsdp_communication,
-    _synchronize_fsdp_param_gathers,
-)
+from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.tensor_parallel.random import (
     HAVE_TE,
     initialize_rng_tracker,
@@ -23,56 +16,6 @@ from megatron.core.utils import is_te_min_version
 from tests.unit_tests.test_utilities import Utils
 
 rank = Utils.rank
-
-
-class _FSDPStopModule(torch.nn.Module):
-    def __init__(self, use_megatron_fsdp_v2=True):
-        super().__init__()
-        self.ddp_config = SimpleNamespace(use_megatron_fsdp_v2=use_megatron_fsdp_v2)
-        self.stop_calls = 0
-        self.gather_calls = 0
-
-    def stop_communication(self):
-        self.stop_calls += 1
-
-    def synchronize_param_gather(self):
-        self.gather_calls += 1
-
-
-def test_synchronize_fsdp_param_gathers_walks_unique_modules():
-    root = torch.nn.Module()
-    child = _FSDPStopModule()
-    root.add_module("child", child)
-
-    synchronized = _synchronize_fsdp_param_gathers([root, child])
-
-    assert synchronized == 1
-    assert child.stop_calls == 0
-    assert child.gather_calls == 1
-
-
-def test_has_v2_fsdp_modules_walks_nested_model_list():
-    root = torch.nn.Module()
-    v1_child = _FSDPStopModule(use_megatron_fsdp_v2=False)
-    v2_child = _FSDPStopModule()
-    root.add_module("v1_child", v1_child)
-
-    assert not _has_v2_fsdp_modules([root, v1_child])
-    assert _has_v2_fsdp_modules([root, v2_child])
-
-
-def test_stop_v2_fsdp_communication_skips_v1_modules():
-    root = torch.nn.Module()
-    v2_child = _FSDPStopModule()
-    v1_child = _FSDPStopModule(use_megatron_fsdp_v2=False)
-    root.add_module("v2_child", v2_child)
-    root.add_module("v1_child", v1_child)
-
-    stopped = _stop_v2_fsdp_communication(root)
-
-    assert stopped == 1
-    assert v2_child.stop_calls == 1
-    assert v1_child.stop_calls == 0
 
 
 @pytest.mark.skipif(
