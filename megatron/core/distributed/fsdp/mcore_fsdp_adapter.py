@@ -1,6 +1,7 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import logging
+import os
 import random
 from contextlib import nullcontext
 from typing import Dict, List, Optional
@@ -291,7 +292,8 @@ class FullyShardedDataParallel(_BaseDataParallel):
             "enable_async_reduce_grad": ddp_config.overlap_grad_reduce,
             "enable_trace_pool": ddp_config.fsdp_double_buffer or ddp_config.fsdp_trace_pool,
             "sharding_strategy": ddp_config.data_parallel_sharding_strategy,
-            "enable_full_iteration_cuda_graph": config.cuda_graph_impl == "full_iteration",
+            "enable_full_iteration_cuda_graph": config.cuda_graph_impl == "full_iteration"
+            and os.getenv("MCORE_PR33_ABLATE_MODE_WIRING") != "1",
             "fine_grained_hooks": config.overlap_moe_expert_parallel_comm,
             "skip_backward_callback": config.delay_wgrad_compute,
             "skip_final_backward_callback": config.overlap_moe_expert_parallel_comm,

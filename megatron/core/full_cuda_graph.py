@@ -4,6 +4,7 @@
 
 import gc
 import logging
+import os
 from contextlib import nullcontext
 
 import torch
@@ -17,6 +18,16 @@ logger = logging.getLogger(__name__)
 # tools/debug_cuda_graph_pool_memory*.py).
 _shared_graph_pool = None
 _shared_capture_stream = None
+
+_PR33_ABLATE_PRECAPTURE_NORMALIZE = os.getenv("MCORE_PR33_ABLATE_PRECAPTURE_NORMALIZE") == "1"
+_PR33_ABLATE_RESULT_CLEANUP = os.getenv("MCORE_PR33_ABLATE_RESULT_CLEANUP") == "1"
+_PR33_ABLATE_EMPTY_CACHE = os.getenv("MCORE_PR33_ABLATE_EMPTY_CACHE") == "1"
+_PR33_ABLATE_AUTOGRAD_SINGLE_THREAD = os.getenv("MCORE_PR33_ABLATE_AUTOGRAD_SINGLE_THREAD") == "1"
+_PR33_USE_THREAD_LOCAL_CAPTURE = os.getenv("MCORE_PR33_USE_THREAD_LOCAL_CAPTURE") == "1"
+_PR33_ABLATE_STOP_COMMUNICATION = os.getenv("MCORE_PR33_ABLATE_STOP_COMMUNICATION") == "1"
+_PR33_ABLATE_POSTCAPTURE_SYNC = os.getenv("MCORE_PR33_ABLATE_POSTCAPTURE_SYNC") == "1"
+_PR33_ABLATE_GRAD_RESET = os.getenv("MCORE_PR33_ABLATE_GRAD_RESET") == "1"
+_PR33_ABLATE_REPLAY_WAIT = os.getenv("MCORE_PR33_ABLATE_REPLAY_WAIT") == "1"
 
 
 def _walk_unique_modules(model):
@@ -309,17 +320,24 @@ class FullCudaGraphWrapper:
         kwargs['data_iterator'] = data_list
 
         if capture_iteration:
-            if use_v2_fsdp:
-                _synchronize_fsdp_param_gathers(model)
+            if use_v2_fsdp and not _PR33_ABLATE_PRECAPTURE_NORMALIZE:
+                synchronized_modules = _synchronize_fsdp_param_gathers(model)
                 torch.cuda.synchronize()
-                _clear_v2_fsdp_uncaptured_unshard_events(model)
+                cleared_events = _clear_v2_fsdp_uncaptured_unshard_events(model)
+                logger.info(
+                    "PR33 capture probe: synchronized_modules=%d cleared_unshard_events=%d",
+                    synchronized_modules,
+                    cleared_events,
+                )
             logger.info(f'Capture CUDA graph for {training_str}!!!')
             torch.distributed.barrier()
             assert FullCudaGraphWrapper.cuda_graph[training_str] is None
             if use_v2_fsdp:
-                FullCudaGraphWrapper.result[training_str] = None
-                gc.collect()
-                torch.cuda.empty_cache()
+                if not _PR33_ABLATE_RESULT_CLEANUP:
+                    FullCudaGraphWrapper.result[training_str] = None
+                    gc.collect()
+                if not _PR33_ABLATE_EMPTY_CACHE:
+                    torch.cuda.empty_cache()
             FullCudaGraphWrapper.cuda_graph[training_str] = torch.cuda.CUDAGraph()
             for _, state in get_all_rng_states().items():
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
@@ -327,9 +345,13 @@ class FullCudaGraphWrapper:
             capture_stream = get_shared_capture_stream()
             captured_result = None
             autograd_context = (
-                torch.autograd.set_multithreading_enabled(False) if use_v2_fsdp else nullcontext()
+                torch.autograd.set_multithreading_enabled(False)
+                if use_v2_fsdp and not _PR33_ABLATE_AUTOGRAD_SINGLE_THREAD
+                else nullcontext()
             )
-            capture_error_mode = "relaxed" if use_v2_fsdp else "thread_local"
+            capture_error_mode = (
+                "relaxed" if use_v2_fsdp and not _PR33_USE_THREAD_LOCAL_CAPTURE else "thread_local"
+            )
             with autograd_context:
                 with torch.cuda.graph(
                     FullCudaGraphWrapper.cuda_graph[training_str],
@@ -338,12 +360,14 @@ class FullCudaGraphWrapper:
                     capture_error_mode=capture_error_mode,
                 ):
                     captured_result = self.forward_backward_func(*args, **kwargs)
-                    if use_v2_fsdp:
+                    if use_v2_fsdp and not _PR33_ABLATE_STOP_COMMUNICATION:
                         _stop_v2_fsdp_communication(model)
             FullCudaGraphWrapper.result[training_str] = captured_result
             if use_v2_fsdp:
-                torch.cuda.synchronize()
-                _reset_fsdp_full_iteration_grad_buffers(model)
+                if not _PR33_ABLATE_POSTCAPTURE_SYNC:
+                    torch.cuda.synchronize()
+                if not _PR33_ABLATE_GRAD_RESET:
+                    _reset_fsdp_full_iteration_grad_buffers(model)
             torch.cuda.synchronize()
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
@@ -357,7 +381,7 @@ class FullCudaGraphWrapper:
                 result = FullCudaGraphWrapper.result[training_str]
         else:
             FullCudaGraphWrapper.cuda_graph[training_str].replay()
-            if use_v2_fsdp:
+            if use_v2_fsdp and not _PR33_ABLATE_REPLAY_WAIT:
                 torch.cuda.current_stream().wait_stream(get_shared_capture_stream())
             result = FullCudaGraphWrapper.result[training_str]
         self.next_iter(training_str)

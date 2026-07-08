@@ -445,3 +445,26 @@ then coordinates capture with the normal FSDP hook lifecycle:
 Transient full weight and gradient buffers continue to use the CUDA graph
 private pool; no TracePool finalization or combined-schedule callback is
 required. Non-v2 models keep the existing full-iteration capture behavior.
+
+## 14. PR #33 necessity A/B instrumentation
+
+The `codex/pr33-necessity-ab` experiment branch keeps PR #33 behavior by
+default and exposes one environment variable per integration contract. Each
+variable disables exactly one behavior for a short full-scale correctness
+gate; none of these variables are intended for production or for the PR:
+
+- `MCORE_PR33_ABLATE_PRECAPTURE_NORMALIZE`
+- `MCORE_PR33_ABLATE_RESULT_CLEANUP`
+- `MCORE_PR33_ABLATE_EMPTY_CACHE`
+- `MCORE_PR33_ABLATE_AUTOGRAD_SINGLE_THREAD`
+- `MCORE_PR33_USE_THREAD_LOCAL_CAPTURE`
+- `MCORE_PR33_ABLATE_STOP_COMMUNICATION`
+- `MCORE_PR33_ABLATE_POSTCAPTURE_SYNC`
+- `MCORE_PR33_ABLATE_GRAD_RESET`
+- `MCORE_PR33_ABLATE_REPLAY_WAIT`
+- `MCORE_PR33_ABLATE_MODE_WIRING`
+- `MCORE_PR33_ABLATE_TE_WGRAD_MARKER`
+
+The control also logs the number of v2 wrapper modules synchronized before
+capture and the number of non-`None` pre-capture unshard events cleared. This
+distinguishes a real residual event from a purely defensive normalization.

@@ -3,6 +3,7 @@
 """FSDPModule implementation for Megatron-FSDP2."""
 
 import logging
+import os
 import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -864,7 +865,10 @@ class FSDPModule:
                     # the CG replay backward.
                     if grad_added and (
                         self._fsdp_state.enable_cuda_graph
-                        or self._fsdp_state.enable_full_iteration_cuda_graph
+                        or (
+                            self._fsdp_state.enable_full_iteration_cuda_graph
+                            and os.getenv("MCORE_PR33_ABLATE_TE_WGRAD_MARKER") != "1"
+                        )
                     ):
                         setattr(param, "_mfsdp_recorded_te_wgrad", True)
                 elif param.grad is None:
