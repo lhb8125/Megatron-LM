@@ -430,8 +430,8 @@ The MCore adapter enables the optimizer-gradient persistence mode when
 `TransformerConfig.cuda_graph_impl == "full_iteration"`. The global wrapper
 then coordinates capture with the normal FSDP hook lifecycle:
 
-- eager warmup stays on the caller stream so its allocator segments remain
-  reusable by optimizer and Transformer Engine persistent state;
+- eager warmup runs on the future capture stream in this A/B control so its
+  allocator high-water mark can be compared with caller-stream warmup;
 - outstanding parameter gathers are drained before capture and pre-capture
   unshard event sentinels are cleared so capture records fresh dependencies;
 - FSDP all-gather and reduce-scatter side streams are joined before the capture
