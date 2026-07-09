@@ -366,6 +366,12 @@ class ParameterGroup:
             # Mark as FSDP parameter for special handling
             setattr(param, "__fsdp_param__", True)
             setattr(dist_param, "__fsdp_param__", True)
+            if s in ("optim_grads", "optim_grads_params"):
+                # TE snapshots this flag during forward, before the FSDP
+                # pre-backward hook runs. Each full grad buffer is reduced
+                # after one microbatch, so its first fused wgrad must overwrite.
+                setattr(param, "overwrite_main_grad", True)
+                setattr(dist_param, "overwrite_main_grad", True)
             self.dist_params.append(dist_param)
             self.dist_grads.append(None)  # placeholder, will be set in _init_dist_grads
 
