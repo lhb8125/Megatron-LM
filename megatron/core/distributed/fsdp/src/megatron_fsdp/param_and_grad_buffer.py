@@ -1792,6 +1792,19 @@ def _get_parameter_groups(
     """
 
     # Step 0: Register new FSDP unit modules.
+    #
+    # PyTorch's default named_parameters() traversal hides weight-tied aliases.
+    # MegatronFSDP restores those aliases after replacing raw parameters with
+    # distributed parameters and marks the canonical parameter as _is_shared.
+    # Detect aliases before replacement so the shared parameter can be isolated
+    # from parameters whose gradients are handled by regular autograd hooks.
+    param_alias_counts: Dict[int, int] = defaultdict(int)
+    for _, param in module.named_parameters(remove_duplicate=False):
+        param_alias_counts[id(param)] += 1
+    aliased_param_ids = {
+        param_id for param_id, alias_count in param_alias_counts.items() if alias_count > 1
+    }
+
     param_to_name = {p: name for name, p in module.named_parameters()}
     # fsdp_units is a list of lists of parameter names, one list per FSDP unit module.
     fsdp_units = []
@@ -1811,16 +1824,18 @@ def _get_parameter_groups(
 
     def _does_param_require_new_bucket(param):
         """
-        Split shared embedding parameters into separate bucket if using distributed
-        optimizer that makes use of reduce-scatters instead of all-reduces.
-        This ensures that the first and last pipeline stage partition optimizer state
-        for the shared embedding parameters the same way across DP replicas, allowing
-        the DP reduce-scatter to be before the embedding all-reduce.
+        Split shared embedding or weight-tied parameters into separate buckets if
+        using a sharded data-parallel strategy.
+
+        Pipeline-shared embeddings must have matching optimizer-state partitioning
+        across the first and last pipeline stages. Weight-tied parameters are handled
+        by the FSDP root post-backward hook, while regular parameters are handled by
+        per-parameter autograd hooks; isolating the tied parameter prevents those two
+        readiness lifecycles from leaving a partially-ready communication bucket.
         """
         return (
-            getattr(param, "shared_embedding", False)
-            and policy.data_parallel_sharding_strategy != "no_shard"
-        )
+            getattr(param, "shared_embedding", False) or id(param) in aliased_param_ids
+        ) and policy.data_parallel_sharding_strategy != "no_shard"
 
     is_expert_parameter = lambda n, p: ".experts." in n
 

@@ -25,6 +25,16 @@ class _ExpertTestModule(torch.nn.Module):
         )
 
 
+class _TiedParameterTestModule(torch.nn.Module):
+    """Mock module with an MTP-style tied embedding and a regular root parameter."""
+
+    def __init__(self):
+        super().__init__()
+        self.embedding_weight = torch.nn.Parameter(torch.empty(32, 16))
+        self.mtp_embedding_weight = self.embedding_weight
+        self.final_norm_weight = torch.nn.Parameter(torch.empty(16))
+
+
 def _get_bucket_signatures(module):
     bucket_groups, _, _ = _get_parameter_groups(
         module, BucketingPolicy(suggested_bucket_size=None), meta_device_init_fp8_params={}
@@ -37,6 +47,23 @@ def _get_bucket_signatures(module):
         }
         for group in bucket_groups
     ]
+
+
+def test_weight_tied_parameter_gets_separate_bucket_when_sharded():
+    """Root-handled tied params must not share a bucket with regular-hook params."""
+    module = _TiedParameterTestModule()
+    bucket_groups, param_to_group, _ = _get_parameter_groups(
+        module,
+        BucketingPolicy(
+            suggested_bucket_size=None, data_parallel_sharding_strategy="optim_grads_params"
+        ),
+        meta_device_init_fp8_params={},
+    )
+
+    embedding_group = param_to_group[module.embedding_weight]
+    final_norm_group = param_to_group[module.final_norm_weight]
+    assert embedding_group != final_norm_group
+    assert bucket_groups[embedding_group].params == [module.embedding_weight]
 
 
 def test_grouped_expert_weights_split_when_chunk_size_factors_differ():
