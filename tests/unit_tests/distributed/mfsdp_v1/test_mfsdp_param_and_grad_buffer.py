@@ -25,13 +25,13 @@ class _ExpertTestModule(torch.nn.Module):
         )
 
 
-class _TiedParameterTestModule(torch.nn.Module):
-    """Mock module with an MTP-style tied embedding and a regular root parameter."""
+class _MultiUseEmbeddingTestModule(torch.nn.Module):
+    """Mock module with an MTP-style multi-use embedding and a regular root parameter."""
 
     def __init__(self):
         super().__init__()
         self.embedding_weight = torch.nn.Parameter(torch.empty(32, 16))
-        self.mtp_embedding_weight = self.embedding_weight
+        self.embedding_weight.zero_out_wgrad = True
         self.final_norm_weight = torch.nn.Parameter(torch.empty(16))
 
 
@@ -49,9 +49,9 @@ def _get_bucket_signatures(module):
     ]
 
 
-def test_weight_tied_parameter_gets_separate_bucket_when_sharded():
-    """Root-handled tied params must not share a bucket with regular-hook params."""
-    module = _TiedParameterTestModule()
+def test_multi_use_embedding_gets_separate_bucket_when_sharded():
+    """Root-handled multi-use embeddings must not share a bucket with regular-hook params."""
+    module = _MultiUseEmbeddingTestModule()
     bucket_groups, param_to_group, _ = _get_parameter_groups(
         module,
         BucketingPolicy(
