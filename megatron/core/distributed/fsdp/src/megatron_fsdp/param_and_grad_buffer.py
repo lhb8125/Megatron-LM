@@ -2031,10 +2031,10 @@ def _get_parameter_groups(
                 continue
             # Create an FSDP unit ID sub-classified by expert / non-expert parameters.
             # Then index this pair in bucket_group_map.
-            id = (param_group.fsdp_unit_id, param_group.is_expert_param)
-            if id not in bucket_group_map:
-                bucket_group_map[id] = []
-            bucket_group_map[id].append(bucket_id)
+            bucket_group_key = (param_group.fsdp_unit_id, param_group.is_expert_param)
+            if bucket_group_key not in bucket_group_map:
+                bucket_group_map[bucket_group_key] = []
+            bucket_group_map[bucket_group_key].append(bucket_id)
 
         # For each aggregated bucket group based on FSDP unit module and parameter type,
         # overwrite the previously initialized bucket group associated with the bucket ID.
