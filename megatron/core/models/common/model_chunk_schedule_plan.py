@@ -81,6 +81,7 @@ class TransformerLayerSchedulePlan:
         self.event = event
         self.comp_stream = comp_stream
         self.comm_stream = comm_stream
+        self._fsdp_prefetch_recompute_forward_parameters = None
 
         # get callable nodes for transformer/mtp layer
         self._build_callable_nodes(event, comp_stream, comm_stream, extra_args)
@@ -110,6 +111,7 @@ class TransformerLayerSchedulePlan:
             self.layer_state = None
         if hasattr(self, 'layer'):
             del self.layer
+        self._fsdp_prefetch_recompute_forward_parameters = None
 
     def _build_callable_nodes(self, event, comp_stream, comm_stream, extra_args):
         """
@@ -196,7 +198,9 @@ class TransformerLayerSchedulePlan:
         else:
             self.mtp_post_process = NoopScheduleNode()
 
-    def set_fsdp_reshard_hooks(self, post_forward_hook, post_backward_hook):
+    def set_fsdp_reshard_hooks(
+        self, post_forward_hook, post_backward_hook, prefetch_recompute_forward_parameters=None
+    ):
         """Wire FSDP parameter release callbacks for the fine-grained overlap schedule.
 
         The EP overlap schedule bypasses the normal FSDP forward/backward hooks
@@ -210,6 +214,9 @@ class TransformerLayerSchedulePlan:
                 (bwd=False). Typically ``fsdp_wrapper.post_forward_release_module``.
             post_backward_hook: Callable(module) that releases backward-pass params
                 (bwd=True). Typically ``fsdp_wrapper.post_backward_release_module``.
+            prefetch_recompute_forward_parameters: Optional callable that starts
+                an asynchronous rowwise all-gather for selective-recompute
+                weights in this layer.
         """
         from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
         from megatron.core.transformer.transformer_layer import TransformerLayer
@@ -226,6 +233,10 @@ class TransformerLayerSchedulePlan:
 
         # After the last backward op (attn), release backward-pass params.
         self.attn.set_post_backward_hook(lambda: post_backward_hook(hook_module))
+        if prefetch_recompute_forward_parameters is not None:
+            self._fsdp_prefetch_recompute_forward_parameters = lambda: (
+                prefetch_recompute_forward_parameters(hook_module)
+            )
 
         # Determine the last node in forward order.
         if isinstance(self.moe_combine, NoopScheduleNode):
@@ -283,6 +294,8 @@ class TransformerLayerSchedulePlan:
             if b_layer.mhc_recompute is not None:
                 b_layer.mhc_recompute.forward()
             b_grad = b_layer.moe_combine.backward(b_grad)
+            if b_layer._fsdp_prefetch_recompute_forward_parameters is not None:
+                b_layer._fsdp_prefetch_recompute_forward_parameters()
 
         if f_layer is not None:
             with f_layer.get_fp8_context():
