@@ -11,6 +11,7 @@ import inspect
 import logging
 import math
 import operator
+import os
 import traceback
 import warnings
 from collections import defaultdict, namedtuple
@@ -125,6 +126,31 @@ def _mem_pool_registration_signature(pool) -> Tuple[int, ...]:
 
     ordered_segments = sorted(enumerate(snapshot), key=registration_order)
     return tuple(int(segment["total_size"]) for _, segment in ordered_segments)
+
+
+def _tensor_mem_pool_location(pool, tensor: torch.Tensor) -> Optional[Tuple[int, int, int]]:
+    """Locate a tensor inside the ordered memory-pool registration segments.
+
+    Returns ``(segment_index, byte_offset, tensor_bytes)``.  The segment index
+    follows ProcessGroupNCCL registration order, so offsets can be compared
+    across ranks even though virtual addresses are rank-local.
+    """
+    pointer = tensor.data_ptr()
+    tensor_bytes = tensor.numel() * tensor.element_size()
+    snapshot = list(pool.snapshot())
+
+    def registration_order(item):
+        index, segment = item
+        return (segment.get("registration_counter", index), index)
+
+    for segment_index, (_, segment) in enumerate(
+        sorted(enumerate(snapshot), key=registration_order)
+    ):
+        segment_address = int(segment["address"])
+        segment_size = int(segment["total_size"])
+        if segment_address <= pointer and pointer + tensor_bytes <= segment_address + segment_size:
+            return segment_index, pointer - segment_address, tensor_bytes
+    return None
 
 
 def _p_assert(cond: Any, s: str, raise_assertion_error: bool = True) -> None:
@@ -2316,6 +2342,7 @@ class ParamAndGradBuffer:
         )
         self.ubr_groups = None
         self.already_registered = False
+        self._ubr_trace_sequence = 0
         # User buffer registration related settings
         if self.ddp_config.nccl_ub:
             assert nccl_allocator is not None, (
@@ -2700,6 +2727,49 @@ class ParamAndGradBuffer:
                 f"[MCORE][FSDP][Manual REG] Registered mem pool to group {group},"
                 f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
             )
+
+    def trace_ubr_collective(
+        self,
+        stage: str,
+        bucket_id: int,
+        group: torch.distributed.ProcessGroup,
+        tensors: Sequence[Tuple[str, torch.Tensor]],
+    ) -> None:
+        """Trace the first post-registration collectives and pool-relative pointers.
+
+        This is intentionally opt-in because it logs on every rank.  It is used
+        to distinguish collective ordering mismatches from registered/unregistered
+        tensor mixing without changing the collective schedule itself.
+        """
+        if (
+            not self.already_registered
+            or os.environ.get("MCORE_FSDP_UBR_TRACE") != "1"
+            or self._ubr_trace_sequence >= 64
+        ):
+            return
+
+        global NCCL_MEMORY_POOL
+        locations = [
+            (
+                name,
+                str(tensor.dtype),
+                tuple(tensor.shape),
+                _tensor_mem_pool_location(NCCL_MEMORY_POOL, tensor),
+            )
+            for name, tensor in tensors
+        ]
+        logger.warning(
+            "[MCORE][FSDP][UBR TRACE] rank=%s seq=%s stage=%s bucket=%s "
+            "group=%s group_size=%s locations=%s",
+            torch.distributed.get_rank(),
+            self._ubr_trace_sequence,
+            stage,
+            bucket_id,
+            getattr(group, "group_desc", "unknown"),
+            group.size(),
+            locations,
+        )
+        self._ubr_trace_sequence += 1
 
     def _log_parameter_groups(self):
         """Compact log of FSDP parameter groups and their parameters."""
@@ -4573,7 +4643,14 @@ class GradReducePipeline:
             )
             while queue_space > suggested_queue_capacity:
                 grad_reduce_event, free_up_grad_bucket, bucket_id = self.grad_reduce_queue.pop(0)
+                gbuf = self.get_fsdp_buffer(bucket_id)
+                self.buffer.trace_ubr_collective(
+                    "rs-before-wait", bucket_id, gbuf.data_parallel_group, (("buffer", gbuf.data),)
+                )
                 grad_reduce_event.wait()
+                self.buffer.trace_ubr_collective(
+                    "rs-after-wait", bucket_id, gbuf.data_parallel_group, (("buffer", gbuf.data),)
+                )
                 free_up_grad_bucket()
                 queue_space -= self.buffer.parameter_groups[
                     bucket_id
@@ -4581,8 +4658,15 @@ class GradReducePipeline:
         else:
             suggested_queue_size = max(0, min(suggested_queue_size, self.buffer.num_buckets - 1))
             while len(self.grad_reduce_queue) > suggested_queue_size:
-                grad_reduce_event, free_up_grad_bucket, _ = self.grad_reduce_queue.pop(0)
+                grad_reduce_event, free_up_grad_bucket, bucket_id = self.grad_reduce_queue.pop(0)
+                gbuf = self.get_fsdp_buffer(bucket_id)
+                self.buffer.trace_ubr_collective(
+                    "rs-before-wait", bucket_id, gbuf.data_parallel_group, (("buffer", gbuf.data),)
+                )
                 grad_reduce_event.wait()
+                self.buffer.trace_ubr_collective(
+                    "rs-after-wait", bucket_id, gbuf.data_parallel_group, (("buffer", gbuf.data),)
+                )
                 free_up_grad_bucket()
 
     def _enforce_double_buffer_limit(self, add_buckets):
@@ -4731,11 +4815,23 @@ class GradReducePipeline:
                         grad_shard = gbuf.get_shard_from_bucket(unreduced_grad_bucket)
 
                         # Execute the reduce-scatter collective.
+                        self.buffer.trace_ubr_collective(
+                            "rs-inner-before",
+                            bucket_id,
+                            gbuf.data_parallel_group,
+                            (("input", unreduced_grad), ("output", grad_shard)),
+                        )
                         torch.distributed.reduce_scatter_tensor(
                             output=grad_shard,
                             input=unreduced_grad,
                             op=reduce_op,
                             group=gbuf.data_parallel_group,
+                        )
+                        self.buffer.trace_ubr_collective(
+                            "rs-inner-after-launch",
+                            bucket_id,
+                            gbuf.data_parallel_group,
+                            (("input", unreduced_grad), ("output", grad_shard)),
                         )
 
                         # Track closure tasks to accumulate the reduced gradient shard.
@@ -4832,11 +4928,23 @@ class GradReducePipeline:
                                 output_buffer = main_grad_shard
                             # Reduce-scatter the FSDP gradient buffer shard further
                             # into the (DP-Outer, DP-Shard) gradient shard.
+                            self.buffer.trace_ubr_collective(
+                                "rs-outer-before",
+                                bucket_id,
+                                outer_fsdp_group,
+                                (("input", unreduced_grad), ("output", output_buffer)),
+                            )
                             torch.distributed.reduce_scatter_tensor(
                                 output=output_buffer,
                                 input=unreduced_grad,
                                 op=reduce_op,
                                 group=outer_fsdp_group,
+                            )
+                            self.buffer.trace_ubr_collective(
+                                "rs-outer-after-launch",
+                                bucket_id,
+                                outer_fsdp_group,
+                                (("input", unreduced_grad), ("output", output_buffer)),
                             )
                             if custom_grad_comm_dtype:
                                 # Reduce-scatter output was a temporary communication buffer.
@@ -5274,7 +5382,15 @@ class AllGatherPipeline:
 
         # Wait for asynchronous / overlapped NCCL operations to complete.
         param_gather_event, mark_bucket_ready_to_use = self.param_gather_event_map.pop(bucket_key)
+        wbuf = self.get_fsdp_buffer(bucket_id, bwd)
+        input_shard = wbuf.get_shard_from_local_buffer()
+        self.buffer.trace_ubr_collective(
+            "ag-before-wait", bucket_id, wbuf.data_parallel_group, (("input", input_shard),)
+        )
         param_gather_event.wait()
+        self.buffer.trace_ubr_collective(
+            "ag-after-wait", bucket_id, wbuf.data_parallel_group, (("input", input_shard),)
+        )
         mark_bucket_ready_to_use()
 
     @torch.no_grad()
@@ -5402,11 +5518,24 @@ class AllGatherPipeline:
 
         # All-gather the module weights in each buffer shard into the allocated bucket.
         # Now each rank will have a copy of this FSDP unit module's weights.
+        input_shard = wbuf.get_shard_from_local_buffer()
+        self.buffer.trace_ubr_collective(
+            "ag-before",
+            bucket_id,
+            wbuf.data_parallel_group,
+            (("input", input_shard), ("output", bucket.data)),
+        )
         param_gather_event = torch.distributed.all_gather_into_tensor(
             output_tensor=bucket.data,
-            input_tensor=wbuf.get_shard_from_local_buffer(),
+            input_tensor=input_shard,
             group=wbuf.data_parallel_group,
             async_op=True,
+        )
+        self.buffer.trace_ubr_collective(
+            "ag-after-launch",
+            bucket_id,
+            wbuf.data_parallel_group,
+            (("input", input_shard), ("output", bucket.data)),
         )
 
         def get_closure(bucket_id, bwd):

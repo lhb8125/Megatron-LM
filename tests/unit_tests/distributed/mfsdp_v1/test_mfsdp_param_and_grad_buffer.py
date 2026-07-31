@@ -12,6 +12,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer impo
     _get_parameter_groups,
     _max_pool_assignment_signature,
     _mem_pool_registration_signature,
+    _tensor_mem_pool_location,
 )
 
 
@@ -62,6 +63,22 @@ class _TestMemoryPool:
         return self.segments
 
 
+class _TestTensorLocation:
+    def __init__(self, pointer, numel, element_size):
+        self.pointer = pointer
+        self.tensor_numel = numel
+        self.tensor_element_size = element_size
+
+    def data_ptr(self):
+        return self.pointer
+
+    def numel(self):
+        return self.tensor_numel
+
+    def element_size(self):
+        return self.tensor_element_size
+
+
 def test_mem_pool_registration_signature_uses_registration_order():
     """Signature order must match ProcessGroupNCCL's registration order."""
     pool = _TestMemoryPool(
@@ -81,6 +98,22 @@ def test_mem_pool_registration_signature_ignores_local_addresses():
     second = _TestMemoryPool([{"total_size": 1024, "address": 0x9000}])
 
     assert _mem_pool_registration_signature(first) == _mem_pool_registration_signature(second)
+
+
+def test_tensor_mem_pool_location_uses_registration_order_and_offset():
+    """Tensor locations use NCCL segment order and reject cross-boundary views."""
+    pool = _TestMemoryPool(
+        [
+            {"total_size": 4096, "registration_counter": 7, "address": 0x10000},
+            {"total_size": 1024, "registration_counter": 3, "address": 0x20000},
+        ]
+    )
+
+    tensor = _TestTensorLocation(pointer=0x10100, numel=32, element_size=4)
+    crossing = _TestTensorLocation(pointer=0x10FF0, numel=8, element_size=4)
+
+    assert _tensor_mem_pool_location(pool, tensor) == (1, 0x100, 128)
+    assert _tensor_mem_pool_location(pool, crossing) is None
 
 
 def test_max_pool_materialize_uses_exact_largest_padded_bucket(monkeypatch):
