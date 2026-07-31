@@ -108,15 +108,19 @@ def test_max_pool_materialize_uses_exact_largest_padded_bucket(monkeypatch):
     monkeypatch.setattr(pgb_module, "get_global_memory_buffer", _TestGlobalMemoryBuffer)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
 
-    allocator.materialize({0: (16, torch.bfloat16), 1: (32, torch.bfloat16)})
+    allocator.materialize({0: (64, torch.uint8), 1: (8, torch.float32)})
 
     assert allocations == [
-        ((32,), torch.bfloat16, "test_pool_0_torch.bfloat16_0", None),
-        ((32,), torch.bfloat16, "test_pool_1_torch.bfloat16_0", None),
+        ((8,), torch.float32, "test_pool_0_torch.float32_0", None),
+        ((64,), torch.uint8, "test_pool_0_torch.uint8_0", None),
+        ((8,), torch.float32, "test_pool_1_torch.float32_0", None),
+        ((64,), torch.uint8, "test_pool_1_torch.uint8_0", None),
     ]
     assert allocator.allocation_tracker == {
-        ("test_pool_0_torch.bfloat16_0", torch.bfloat16): 32,
-        ("test_pool_1_torch.bfloat16_0", torch.bfloat16): 32,
+        ("test_pool_0_torch.float32_0", torch.float32): 8,
+        ("test_pool_0_torch.uint8_0", torch.uint8): 64,
+        ("test_pool_1_torch.float32_0", torch.float32): 8,
+        ("test_pool_1_torch.uint8_0", torch.uint8): 64,
     }
 
 

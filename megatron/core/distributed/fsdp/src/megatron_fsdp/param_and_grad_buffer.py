@@ -1145,7 +1145,12 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         total_bytes = 0
         for buf_group_id in range(self.size):
             for (dtype, bucket_offset), size in sorted(
-                required_slot_sizes.items(), key=lambda item: (str(item[0][0]), item[0][1])
+                required_slot_sizes.items(),
+                key=lambda item: (
+                    item[1] * torch.empty((), dtype=item[0][0]).element_size(),
+                    str(item[0][0]),
+                    item[0][1],
+                ),
             ):
                 buffer_name = self._get_gbuf_name(buf_group_id, dtype, bucket_offset)
                 materialized_buffer = get_global_memory_buffer().get_tensor(
