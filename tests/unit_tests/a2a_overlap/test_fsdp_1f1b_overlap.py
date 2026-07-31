@@ -104,7 +104,7 @@ class TestFSDP1F1BOverlap:
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     def test_fsdp_1f1b_double_buffer_multi_microbatch(self):
-        """Combined 1F1B must keep at most two persistent FSDP units live."""
+        """Combined 1F1B can use three persistent FSDP units concurrently."""
         self._run_test_helper(
             dispatcher_type="alltoall",
             sharding_strategy="optim_grads_params",
@@ -113,6 +113,7 @@ class TestFSDP1F1BOverlap:
             mtp_loss_scaling_factor=0.1,
             num_microbatches=2,
             fsdp_double_buffer=True,
+            fsdp_buffer_count=3,
             megatron_fsdp_max_pool_double_buffer=True,
         )
 
@@ -238,6 +239,7 @@ class TestFSDP1F1BOverlap:
         mtp_num_layers=None,
         mtp_loss_scaling_factor=None,
         fsdp_double_buffer=False,
+        fsdp_buffer_count=2,
         megatron_fsdp_max_pool_double_buffer=False,
     ):
         """Verify multi-step FSDP training with overlap produces identical
@@ -276,6 +278,7 @@ class TestFSDP1F1BOverlap:
                     recompute_modules and "mla_up_proj" in recompute_modules
                 ),
                 fsdp_double_buffer=fsdp_double_buffer,
+                fsdp_buffer_count=fsdp_buffer_count,
                 megatron_fsdp_max_pool_double_buffer=megatron_fsdp_max_pool_double_buffer,
             )
 

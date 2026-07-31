@@ -2594,8 +2594,9 @@ class ParamAndGradBuffer:
         for group in self.parameter_groups:
             group.grad_dtype = self._resolve_group_grad_dtype(group, meta_device_init_fp8_params)
         if self.ddp_config.fsdp_double_buffer and len(self.bucketing_policy.fsdp_unit_modules) > 0:
-            # Double Buffering
-            UB_BUFFER_NUM = 2
+            # Persistent communication-buffer pooling. The default pool size is two,
+            # while combined 1F1B overlap may require a third concurrently-live unit.
+            ub_buffer_num = self.ddp_config.fsdp_buffer_count
             # Double Buffer Allocator Choice
             FIXED_POOL_ALLOC_TYPE = (
                 MaxPoolAllocator
@@ -2605,13 +2606,13 @@ class ParamAndGradBuffer:
             self.weight_alloc = FIXED_POOL_ALLOC_TYPE(
                 name="fsdp_params",
                 fsdp_param_groups=self.parameter_groups,
-                size=UB_BUFFER_NUM,
+                size=ub_buffer_num,
                 fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
             )
             self.transpose_weight_alloc = FIXED_POOL_ALLOC_TYPE(
                 name="fsdp_fp8_transpose_params",
                 fsdp_param_groups=self.parameter_groups,
-                size=UB_BUFFER_NUM,
+                size=ub_buffer_num,
                 fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
             )
             # Resolve gradient bucket dtype used for MaxPoolAllocator bucket allocation
@@ -2625,7 +2626,7 @@ class ParamAndGradBuffer:
             self.main_grad_alloc = FIXED_POOL_ALLOC_TYPE(
                 name="fsdp_grads",
                 fsdp_param_groups=self.parameter_groups,
-                size=UB_BUFFER_NUM,
+                size=ub_buffer_num,
                 dtype_fn=grad_dtype_fn,
                 fallback_to_persistent_buffer=(
                     self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
@@ -2639,7 +2640,7 @@ class ParamAndGradBuffer:
                 self.hsdp_grad_comm_alloc = FIXED_POOL_ALLOC_TYPE(
                     name="hsdp_grad_comm",
                     fsdp_param_groups=self.parameter_groups,
-                    size=UB_BUFFER_NUM,
+                    size=ub_buffer_num,
                     dtype_fn=grad_dtype_fn,
                     fallback_to_persistent_buffer=(
                         self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
@@ -4034,21 +4035,23 @@ class GradReducePipeline:
         if not self.buffer.ddp_config.fsdp_double_buffer:
             return
 
+        buffer_count = self.buffer.ddp_config.fsdp_buffer_count
         param_groups = self.buffer.parameter_groups
         double_buf_units = set()
         for bucket_id in add_buckets:
             fsdp_unit_id = param_groups[bucket_id].fsdp_unit_id
             if fsdp_unit_id in self.buffer.double_buf_units:
                 double_buf_units.add(fsdp_unit_id)
-        assert (
-            len(double_buf_units) <= 2
-        ), f"Double buffer limit exceeded. Current double_buf_units: {double_buf_units}."
+        assert len(double_buf_units) <= buffer_count, (
+            f"FSDP buffer pool limit ({buffer_count}) exceeded. "
+            f"Current double_buf_units: {double_buf_units}."
+        )
 
         keep_n = len(self.grad_reduce_queue)
         for _, _, bucket_id in reversed(self.grad_reduce_queue):
             fsdp_unit_id = param_groups[bucket_id].fsdp_unit_id
             double_buf_units.add(fsdp_unit_id)
-            if len(double_buf_units) > 2:
+            if len(double_buf_units) > buffer_count:
                 keep_n -= 1
 
         with torch.cuda.stream(self.rs_stream):
@@ -4519,15 +4522,16 @@ class AllGatherPipeline:
         ag_buckets = list(sorted(set(ag_buckets)))  # Sort in order of unique bucket ID.
         parameter_groups = self.buffer.parameter_groups
         if self.buffer.ddp_config.fsdp_double_buffer:
+            buffer_count = self.buffer.ddp_config.fsdp_buffer_count
             double_buf_units = set()
             for bucket_id in ag_buckets:
                 fsdp_unit_id = parameter_groups[bucket_id].fsdp_unit_id
                 if fsdp_unit_id in self.buffer.double_buf_units:
                     double_buf_units.add(fsdp_unit_id)
-            if len(double_buf_units) > 2:
+            if len(double_buf_units) > buffer_count:
                 raise ValueError(
                     f"{double_buf_units} FSDP units were requested, "
-                    "but double buffers can support no more than 2 FSDP units."
+                    f"but the buffer pool can support no more than {buffer_count} FSDP units."
                 )
 
         # Do not release the buckets that are being all-gathered.
@@ -4545,7 +4549,7 @@ class AllGatherPipeline:
             # Non-unit module pre-fetch can run inside other FSDP unit modules and
             # un-shard irrelevant model components that pointlessly steal buffer
             # allocations from the expected FSDP unit allocation and violating
-            # the maximum limit of 2 buffers allocated at any point in time.
+            # the configured persistent-buffer limit.
             self.buffer.ddp_config.fsdp_double_buffer
             and no_fsdp_units
         ):
@@ -4579,7 +4583,7 @@ class AllGatherPipeline:
                 if self.buffer.ddp_config.fsdp_double_buffer:
                     fsdp_unit_id = parameter_groups[bucket_id].fsdp_unit_id
                     double_buf_units.add(fsdp_unit_id)
-                    if len(double_buf_units) > 2:
+                    if len(double_buf_units) > buffer_count:
                         # Prefetching the next bucket will exceed the coverage of
                         # the double buffer, so we need to stop prefetching.
                         return True

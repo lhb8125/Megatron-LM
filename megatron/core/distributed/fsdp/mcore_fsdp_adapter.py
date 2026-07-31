@@ -167,10 +167,13 @@ class FullyShardedDataParallel(_BaseDataParallel):
         self._annotate_tensor_parallelism(module)
 
         if config.overlap_moe_expert_parallel_comm:
-            # The combined schedule explicitly releases each forward/backward
-            # FSDP unit at its layer boundary.  The double-buffer allocators
-            # independently enforce the two-live-unit invariant, so persistent
-            # buffers (and therefore NCCL UBR) are safe on this path.
+            if ddp_config.fsdp_double_buffer:
+                assert ddp_config.fsdp_buffer_count >= 3, (
+                    "1F1B overlap with persistent Megatron-FSDP communication buffers "
+                    "requires fsdp_buffer_count >= 3. A backward/recompute unit, the "
+                    "current forward unit, and its forward-prefetched successor can be "
+                    "live concurrently."
+                )
             assert config.cuda_graph_impl in ("none", "full_iteration"), (
                 "1F1B overlap with FSDP does not support per-layer CUDA graphs "
                 f"(cuda_graph_impl={config.cuda_graph_impl!r}). "
