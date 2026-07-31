@@ -10,6 +10,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer impo
     MaxPoolAllocator,
     ParameterGroup,
     _get_parameter_groups,
+    _max_pool_assignment_signature,
     _mem_pool_registration_signature,
 )
 
@@ -122,6 +123,27 @@ def test_max_pool_materialize_uses_exact_largest_padded_bucket(monkeypatch):
         ("test_pool_1_torch.float32_0", torch.float32): 8,
         ("test_pool_1_torch.uint8_0", torch.uint8): 64,
     }
+
+
+def test_max_pool_assignment_signature_tracks_logical_bucket_slots():
+    """Runtime signatures distinguish the pool slot used by each logical bucket."""
+    first_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
+    second_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
+    parameter_groups = [
+        ParameterGroup([first_param], dtype=torch.bfloat16, fsdp_unit_id=0),
+        ParameterGroup([second_param], dtype=torch.bfloat16, fsdp_unit_id=1),
+    ]
+    param_to_name = {first_param: "layers.0.weight", second_param: "layers.1.weight"}
+    allocator = MaxPoolAllocator("test_pool", parameter_groups, size=2)
+
+    allocator.bucket_alloc_index = {0: (0, 0), 1: (1, 0)}
+    first_signature = _max_pool_assignment_signature((allocator,), parameter_groups, param_to_name)
+
+    allocator.bucket_alloc_index = {0: (1, 0), 1: (0, 0)}
+    second_signature = _max_pool_assignment_signature((allocator,), parameter_groups, param_to_name)
+
+    assert first_signature != second_signature
+    assert {assignment[5] for assignment in first_signature} == {0, 1}
 
 
 def test_multi_use_embedding_gets_separate_bucket_when_sharded():

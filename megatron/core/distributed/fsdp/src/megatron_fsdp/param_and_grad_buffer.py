@@ -16,7 +16,7 @@ import warnings
 from collections import defaultdict, namedtuple
 from contextlib import ExitStack, nullcontext
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 
 import torch
 from torch.distributed import _coalescing_manager
@@ -1340,6 +1340,44 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
             self.backup_allocator.free(bucket_id)
 
 
+def _max_pool_assignment_signature(
+    allocators: Sequence[Optional[TemporaryBucketAllocator]],
+    parameter_groups: Sequence["ParameterGroup"],
+    param_to_name: Dict[torch.nn.Parameter, str],
+) -> tuple:
+    """Return a rank-comparable signature of runtime MaxPool bucket assignments.
+
+    Symmetric NCCL kernels require the same logical communication bucket to use
+    the same registered pool slot on every rank in a communicator.  Segment
+    sizes alone cannot detect a rank-dependent first-iteration assignment.
+    Parameter-name digests make the signature independent of local bucket IDs.
+    """
+    signature = []
+    for allocator in allocators:
+        if not isinstance(allocator, MaxPoolAllocator):
+            continue
+        for bucket_id, (buffer_id, bucket_offset) in allocator.bucket_alloc_index.items():
+            parameter_group = parameter_groups[bucket_id]
+            group_name_digest = hashlib.sha256(
+                ",".join(sorted(param_to_name[param] for param in parameter_group.params)).encode()
+            ).hexdigest()[:16]
+            dtype = allocator.dtype_fn(parameter_group)
+            if dtype == "float8":
+                dtype = torch.uint8
+            signature.append(
+                (
+                    allocator.name,
+                    parameter_group.is_expert_param,
+                    parameter_group.fsdp_unit_id,
+                    group_name_digest,
+                    str(dtype),
+                    buffer_id,
+                    bucket_offset,
+                )
+            )
+    return tuple(sorted(signature))
+
+
 class DataParallelBuffer:
     """
     A class that manages the data parallel buffer for Fully Sharded Data Parallel (FSDP) training.
@@ -2475,6 +2513,102 @@ class ParamAndGradBuffer:
         torch.cuda.synchronize()
         torch.distributed.barrier(async_op=False)
         torch.cuda.synchronize()
+
+        # MaxPool slots are materialized deterministically before training, but
+        # buckets are assigned to those slots lazily during the warmup iteration.
+        # Symmetric collectives require every rank to use the same slot for the
+        # same logical bucket, so validate this semantic mapping separately from
+        # the allocator segment layout below.
+        runtime_assignment_signature = _max_pool_assignment_signature(
+            (
+                self.weight_alloc,
+                self.transpose_weight_alloc,
+                self.main_grad_alloc,
+                getattr(self, "hsdp_grad_comm_alloc", None),
+            ),
+            self.parameter_groups,
+            self.param_to_name,
+        )
+        runtime_assignment_hash = hashlib.sha256(
+            repr(runtime_assignment_signature).encode()
+        ).hexdigest()[:12]
+        runtime_assignment_errors = []
+        for group in self.ubr_groups:
+            group_hashes = [None] * torch.distributed.get_world_size(group)
+            torch.distributed.all_gather_object(group_hashes, runtime_assignment_hash, group=group)
+            if any(signature_hash != group_hashes[0] for signature_hash in group_hashes[1:]):
+                group_signatures = [None] * torch.distributed.get_world_size(group)
+                torch.distributed.all_gather_object(
+                    group_signatures, runtime_assignment_signature, group=group
+                )
+                reference_signature = group_signatures[0]
+                different_rank_index = next(
+                    index
+                    for index, signature_hash in enumerate(group_hashes)
+                    if signature_hash != group_hashes[0]
+                )
+                different_signature = group_signatures[different_rank_index]
+                signature_rank_counts = defaultdict(int)
+                for signature_hash in group_hashes:
+                    signature_rank_counts[signature_hash] += 1
+                first_difference = next(
+                    (
+                        index
+                        for index, (reference, signature) in enumerate(
+                            zip(reference_signature, different_signature)
+                        )
+                        if reference != signature
+                    ),
+                    None,
+                )
+                if first_difference is None and len(reference_signature) != len(
+                    different_signature
+                ):
+                    first_difference = min(len(reference_signature), len(different_signature))
+                reference_assignment = (
+                    reference_signature[first_difference]
+                    if first_difference is not None and first_difference < len(reference_signature)
+                    else None
+                )
+                different_assignment = (
+                    different_signature[first_difference]
+                    if first_difference is not None and first_difference < len(different_signature)
+                    else None
+                )
+                runtime_assignment_errors.append(
+                    f"{group.group_desc} (size={group.size()}): "
+                    f"hashes={dict(signature_rank_counts)}, "
+                    f"first_difference={first_difference}, "
+                    f"reference={reference_assignment}, different={different_assignment}"
+                )
+
+        has_runtime_assignment_error = torch.tensor(
+            [bool(runtime_assignment_errors)], dtype=torch.int32, device=torch.cuda.current_device()
+        )
+        torch.distributed.all_reduce(
+            has_runtime_assignment_error, op=torch.distributed.ReduceOp.MAX
+        )
+        if has_runtime_assignment_error.item():
+            group_leader_ranks = {
+                torch.distributed.get_process_group_ranks(group)[0] for group in self.ubr_groups
+            }
+            if runtime_assignment_errors and torch.distributed.get_rank() in group_leader_ranks:
+                logger.error(
+                    "[MCORE][FSDP][Manual REG] Runtime MaxPool assignment mismatch: %s",
+                    " | ".join(runtime_assignment_errors),
+                )
+            raise RuntimeError(
+                "NCCL memory-pool runtime bucket assignments differ across an FSDP "
+                "registration group. See the rank-local mismatch log for mapping details."
+            )
+
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[MCORE][FSDP][Manual REG] Validated {len(runtime_assignment_signature)} "
+            f"runtime MaxPool assignments (sha256={runtime_assignment_hash}) across all "
+            "registration groups.",
+        )
 
         # register_mem_pool performs one collective registration per pool
         # segment. Validate that every communicator sees the same segment-size
