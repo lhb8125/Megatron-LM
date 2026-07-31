@@ -2589,6 +2589,19 @@ class ParamAndGradBuffer:
         # BF16 for FP8 parameters, otherwise grad.dtype == param.dtype.
         return torch.bfloat16 if is_fp8 else group.dtype
 
+    def _take_ubr_persistent_data(
+        self, buffer: DataParallelBuffer, size: int, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Consume canonically preallocated UBR storage, or allocate normally."""
+        persistent_data = getattr(self, "_ubr_persistent_data", None)
+        if persistent_data is None:
+            return torch.empty(size, dtype=dtype, device=self.device)
+
+        data = persistent_data.pop(id(buffer))
+        assert data.numel() == size, f"Preallocated UBR size mismatch: {data.numel()} != {size}"
+        assert data.dtype == dtype, f"Preallocated UBR dtype mismatch: {data.dtype} != {dtype}"
+        return data
+
     def _init_each_parameter_group_buffers(self, meta_device_init_fp8_params):
         """
         Initialize the buffers for each parameter group.
@@ -3119,6 +3132,33 @@ class ParamAndGradBuffer:
                 if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
                     allocator.materialize(bucket_specs, self.mem_alloc_context)
 
+            # Persistent weight shards are normally allocated in parameter-group
+            # traversal order.  MoE parameter-group order can differ across ranks,
+            # which gives the NCCL pool the same segment multiset in a different
+            # registration order.  Allocate the backing tensors by canonical
+            # (byte-size, dtype) order and consume them during parameter init.
+            persistent_buffers = []
+            for group in self.parameter_groups:
+                for buffer in (
+                    group.hfsdp_helper_wbuf or group.model_weight_buffer,
+                    group.hfsdp_helper_wtbuf or group.transpose_weight_buffer,
+                ):
+                    if buffer is not None:
+                        persistent_buffers.append(buffer)
+
+            self._ubr_persistent_data = {}
+            with self.mem_alloc_context():
+                for buffer in sorted(
+                    persistent_buffers,
+                    key=lambda item: (
+                        item.data_size * torch.empty((), dtype=item.dtype).element_size(),
+                        str(item.dtype),
+                    ),
+                ):
+                    self._ubr_persistent_data[id(buffer)] = torch.empty(
+                        buffer.data_size, dtype=buffer.dtype, device=self.device
+                    )
+
         reset_context_args = {"init_param_with_fp8": self.ddp_config.fp8_param_gather}
         module_reset_flag = {}
         if self.reset_parameters_for_meta_device_init_module:
@@ -3158,8 +3198,8 @@ class ParamAndGradBuffer:
                         _init_hfsdp_helper_and_dp_buffer_data(
                             group.hfsdp_helper_wbuf,
                             wbuf,
-                            mem_alloc=lambda size, dtype: torch.empty(
-                                size, dtype=dtype, device=self.device
+                            mem_alloc=lambda size, dtype, buffer=group.hfsdp_helper_wbuf: (
+                                self._take_ubr_persistent_data(buffer, size, dtype)
                             ),
                             outer_dp_group=self.dist_index.get_outer_fsdp_group(
                                 is_expert_parallel=group.is_expert_param
@@ -3168,7 +3208,7 @@ class ParamAndGradBuffer:
                     else:
                         # When not using HSDP, the main buffer shards across the FSDP group.
                         wbuf.init_data(
-                            torch.empty(wbuf.data_size, dtype=wbuf.dtype, device=self.device)
+                            self._take_ubr_persistent_data(wbuf, wbuf.data_size, wbuf.dtype)
                         )
                 # Allocate some memory to initialize the model.
                 bucket = wbuf.fetch_bucket(strict_assignments=False)
@@ -3180,8 +3220,8 @@ class ParamAndGradBuffer:
                         _init_hfsdp_helper_and_dp_buffer_data(
                             group.hfsdp_helper_wtbuf,
                             tbuf,
-                            mem_alloc=lambda size, dtype: torch.empty(
-                                size, dtype=dtype, device=self.device
+                            mem_alloc=lambda size, dtype, buffer=group.hfsdp_helper_wtbuf: (
+                                self._take_ubr_persistent_data(buffer, size, dtype)
                             ),
                             outer_dp_group=self.dist_index.get_outer_fsdp_group(
                                 is_expert_parallel=group.is_expert_param
@@ -3190,7 +3230,7 @@ class ParamAndGradBuffer:
                     else:
                         # Initialize the transpose buffer.
                         tbuf.init_data(
-                            torch.empty(tbuf.data_size, dtype=tbuf.dtype, device=self.device)
+                            self._take_ubr_persistent_data(tbuf, tbuf.data_size, tbuf.dtype)
                         )
                 # Allocate some memory to initialize the model.
                 transpose_bucket = tbuf.fetch_bucket(strict_assignments=False)
