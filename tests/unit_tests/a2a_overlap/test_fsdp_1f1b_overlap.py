@@ -103,6 +103,20 @@ class TestFSDP1F1BOverlap:
         )
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
+    def test_fsdp_1f1b_double_buffer_multi_microbatch(self):
+        """Combined 1F1B must keep at most two persistent FSDP units live."""
+        self._run_test_helper(
+            dispatcher_type="alltoall",
+            sharding_strategy="optim_grads_params",
+            recompute_modules=["mla_up_proj"],
+            mtp_num_layers=1,
+            mtp_loss_scaling_factor=0.1,
+            num_microbatches=2,
+            fsdp_double_buffer=True,
+            megatron_fsdp_max_pool_double_buffer=True,
+        )
+
+    @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     def test_fsdp_1f1b_genuine_forward_state(self):
         """A genuine forward must leave PRE_BACKWARD without changing its peer layer."""
         num_layers = 2
@@ -223,6 +237,8 @@ class TestFSDP1F1BOverlap:
         num_microbatches=1,
         mtp_num_layers=None,
         mtp_loss_scaling_factor=None,
+        fsdp_double_buffer=False,
+        megatron_fsdp_max_pool_double_buffer=False,
     ):
         """Verify multi-step FSDP training with overlap produces identical
         per-step loss and final weights as standard FSDP training.
@@ -259,6 +275,8 @@ class TestFSDP1F1BOverlap:
                 megatron_fsdp_prefetch_recompute_forward_weights=bool(
                     recompute_modules and "mla_up_proj" in recompute_modules
                 ),
+                fsdp_double_buffer=fsdp_double_buffer,
+                megatron_fsdp_max_pool_double_buffer=megatron_fsdp_max_pool_double_buffer,
             )
 
         with deterministic_mode():
