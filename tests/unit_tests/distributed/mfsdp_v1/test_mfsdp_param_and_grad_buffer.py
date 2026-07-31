@@ -7,6 +7,7 @@ import torch
 from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import (
     BucketingPolicy,
     _get_parameter_groups,
+    _mem_pool_registration_signature,
 )
 
 
@@ -47,6 +48,35 @@ def _get_bucket_signatures(module):
         }
         for group in bucket_groups
     ]
+
+
+class _TestMemoryPool:
+    def __init__(self, segments):
+        self.segments = segments
+
+    def snapshot(self):
+        return self.segments
+
+
+def test_mem_pool_registration_signature_uses_registration_order():
+    """Signature order must match ProcessGroupNCCL's registration order."""
+    pool = _TestMemoryPool(
+        [
+            {"total_size": 4096, "registration_counter": 7, "address": 0x1000},
+            {"total_size": 1024, "registration_counter": 3, "address": 0x2000},
+            {"total_size": 2048, "registration_counter": 5, "address": 0x3000},
+        ]
+    )
+
+    assert _mem_pool_registration_signature(pool) == (1024, 2048, 4096)
+
+
+def test_mem_pool_registration_signature_ignores_local_addresses():
+    """Different rank-local addresses do not change the collective layout."""
+    first = _TestMemoryPool([{"total_size": 1024, "address": 0x1000}])
+    second = _TestMemoryPool([{"total_size": 1024, "address": 0x9000}])
+
+    assert _mem_pool_registration_signature(first) == _mem_pool_registration_signature(second)
 
 
 def test_multi_use_embedding_gets_separate_bucket_when_sharded():

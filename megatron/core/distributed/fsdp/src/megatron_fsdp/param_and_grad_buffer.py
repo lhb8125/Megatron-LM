@@ -105,6 +105,27 @@ except ImportError:
 NCCL_MEMORY_POOL = None
 
 
+def _mem_pool_registration_signature(pool) -> Tuple[int, ...]:
+    """Return segment sizes in the order used by ProcessGroupNCCL registration.
+
+    ProcessGroupNCCL sorts a memory-pool snapshot by ``registration_counter``
+    and collectively registers every segment in that order.  A different
+    number or ordering of segment sizes across ranks can therefore deadlock
+    ``register_mem_pool`` before NCCL has a chance to report a useful error.
+    Addresses are intentionally excluded: each rank owns a different local
+    address, while collective registration requires the segment layout to
+    match.
+    """
+    snapshot = list(pool.snapshot())
+
+    def registration_order(item):
+        index, segment = item
+        return (segment.get("registration_counter", index), index)
+
+    ordered_segments = sorted(enumerate(snapshot), key=registration_order)
+    return tuple(int(segment["total_size"]) for _, segment in ordered_segments)
+
+
 def _p_assert(cond: Any, s: str, raise_assertion_error: bool = True) -> None:
     """Alternate to ``assert`` when in the backward context to print the error
     message ``s`` since otherwise, it is swallowed.
@@ -2375,6 +2396,49 @@ class ParamAndGradBuffer:
         torch.cuda.synchronize()
         torch.distributed.barrier(async_op=False)
         torch.cuda.synchronize()
+
+        # register_mem_pool performs one collective registration per pool
+        # segment. Validate that every communicator sees the same segment-size
+        # sequence first, otherwise a rank that has fewer or differently sized
+        # segments can leave its peers blocked inside ProcessGroupNCCL forever.
+        pool_signature = _mem_pool_registration_signature(NCCL_MEMORY_POOL)
+        registration_errors = []
+        for group in self.ubr_groups:
+            group_signatures = [None] * torch.distributed.get_world_size(group)
+            torch.distributed.all_gather_object(group_signatures, pool_signature, group=group)
+            reference_signature = group_signatures[0]
+            if any(signature != reference_signature for signature in group_signatures[1:]):
+                group_ranks = torch.distributed.get_process_group_ranks(group)
+                signature_groups = defaultdict(list)
+                for rank, signature in zip(group_ranks, group_signatures):
+                    signature_groups[signature].append(rank)
+                summary = [
+                    {
+                        "ranks": ranks,
+                        "segments": len(signature),
+                        "total_bytes": sum(signature),
+                        "sizes": signature,
+                    }
+                    for signature, ranks in signature_groups.items()
+                ]
+                registration_errors.append(f"{group.group_desc} (size={group.size()}): {summary}")
+
+        # Synchronize the validation outcome globally so no rank enters NCCL
+        # registration while another rank is already raising an exception.
+        has_registration_error = torch.tensor(
+            [bool(registration_errors)], dtype=torch.uint8, device=torch.cuda.current_device()
+        )
+        torch.distributed.all_reduce(has_registration_error, op=torch.distributed.ReduceOp.MAX)
+        if has_registration_error.item():
+            if registration_errors:
+                logger.error(
+                    "[MCORE][FSDP][Manual REG] NCCL memory-pool layout mismatch: %s",
+                    " | ".join(registration_errors),
+                )
+            raise RuntimeError(
+                "NCCL memory-pool segment layout differs across an FSDP registration group. "
+                "See the rank-local mismatch log for segment details."
+            )
 
         for group in self.ubr_groups:
             log_single_rank(
