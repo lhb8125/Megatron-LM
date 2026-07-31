@@ -5317,12 +5317,25 @@ class AllGatherPipeline:
                             inner_dp_wbuf = self.get_fsdp_buffer(bucket_id, bwd=bwd)
                             shard_size = inner_dp_wbuf.data_size // outer_fsdp_group.size()
                             rank = outer_fsdp_group.rank()
+                            outer_input_shard = inner_dp_wbuf.data[
+                                rank * shard_size : (rank + 1) * shard_size
+                            ]
+                            self.buffer.trace_ubr_collective(
+                                "ag-outer-before",
+                                bucket_id,
+                                outer_fsdp_group,
+                                (("input", outer_input_shard), ("output", inner_dp_wbuf.data)),
+                            )
                             torch.distributed.all_gather_into_tensor(
                                 output_tensor=inner_dp_wbuf.data,
-                                input_tensor=inner_dp_wbuf.data[
-                                    rank * shard_size : (rank + 1) * shard_size
-                                ],
+                                input_tensor=outer_input_shard,
                                 group=outer_fsdp_group,
+                            )
+                            self.buffer.trace_ubr_collective(
+                                "ag-outer-after",
+                                bucket_id,
+                                outer_fsdp_group,
+                                (("input", outer_input_shard), ("output", inner_dp_wbuf.data)),
                             )
                 # Wait for the DP-Outer group all-gather to finish.
                 all_gather_stream.wait_stream(self.outer_fsdp_group_param_gather_stream)
