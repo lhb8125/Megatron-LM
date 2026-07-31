@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import gc
+import hashlib
 import inspect
 import logging
 import math
@@ -1112,6 +1113,53 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
             required_by_slot[(dtype, bucket_offset)] += 1
         return all(
             required <= available_by_slot[slot] for slot, required in required_by_slot.items()
+        )
+
+    def materialize(
+        self,
+        bucket_specs: Dict[int, Tuple[int, torch.dtype]],
+        mem_alloc_context: Optional[Callable] = None,
+    ) -> None:
+        """Allocate every runtime-reachable pool slot in a deterministic order.
+
+        Manual NCCL memory-pool registration sorts segments by PyTorch's global
+        allocation counter. If the first allocation of a MaxPool slot happens
+        from overlapping FSDP streams, that order can differ across ranks even
+        when the final segment sizes are identical. Pre-materializing the slots
+        before training gives every rank the same registration order and keeps
+        the first 1F1B/CUDA-graph iteration allocation-free.
+
+        ``bucket_specs`` uses the exact padded ``DataParallelBuffer`` sizes,
+        rather than the unpadded parameter counts used for capacity planning.
+        """
+        required_slot_sizes = {}
+        for bucket_id, (size, dtype) in bucket_specs.items():
+            if self.fsdp_param_groups[bucket_id].fsdp_unit_id is None:
+                continue
+            _, bucket_offset = self.bucket_alloc_index[bucket_id]
+            if dtype == "float8":
+                dtype = torch.uint8
+            slot = (dtype, bucket_offset)
+            required_slot_sizes[slot] = max(size, required_slot_sizes.get(slot, 0))
+
+        total_bytes = 0
+        for buf_group_id in range(self.size):
+            for (dtype, bucket_offset), size in sorted(
+                required_slot_sizes.items(), key=lambda item: (str(item[0][0]), item[0][1])
+            ):
+                buffer_name = self._get_gbuf_name(buf_group_id, dtype, bucket_offset)
+                materialized_buffer = get_global_memory_buffer().get_tensor(
+                    [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
+                )
+                self.allocation_tracker[(buffer_name, dtype)] = size
+                total_bytes += size * materialized_buffer.element_size()
+
+        torch.cuda.synchronize()
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[MaxPoolAllocator][{self.name}] Materialized {len(required_slot_sizes)} slots "
+            f"x {self.size} buffers ({total_bytes} bytes) for manual NCCL registration.",
         )
 
     def allocate(
@@ -2412,25 +2460,47 @@ class ParamAndGradBuffer:
                 signature_groups = defaultdict(list)
                 for rank, signature in zip(group_ranks, group_signatures):
                     signature_groups[signature].append(rank)
-                summary = [
-                    {
-                        "ranks": ranks,
-                        "segments": len(signature),
-                        "total_bytes": sum(signature),
-                        "sizes": signature,
-                    }
-                    for signature, ranks in signature_groups.items()
-                ]
+                summary = []
+                for signature, ranks in signature_groups.items():
+                    first_difference = next(
+                        (
+                            index
+                            for index, (reference_size, size) in enumerate(
+                                zip(reference_signature, signature)
+                            )
+                            if reference_size != size
+                        ),
+                        None,
+                    )
+                    if first_difference is None and len(signature) != len(reference_signature):
+                        first_difference = min(len(signature), len(reference_signature))
+                    window_start = max(0, (first_difference or 0) - 2)
+                    window_end = min(len(signature), (first_difference or 0) + 3)
+                    signature_bytes = ",".join(map(str, signature)).encode()
+                    summary.append(
+                        {
+                            "rank_count": len(ranks),
+                            "first_ranks": ranks[:8],
+                            "segments": len(signature),
+                            "total_bytes": sum(signature),
+                            "sha256": hashlib.sha256(signature_bytes).hexdigest()[:12],
+                            "first_difference": first_difference,
+                            "sizes_near_difference": signature[window_start:window_end],
+                        }
+                    )
                 registration_errors.append(f"{group.group_desc} (size={group.size()}): {summary}")
 
         # Synchronize the validation outcome globally so no rank enters NCCL
         # registration while another rank is already raising an exception.
         has_registration_error = torch.tensor(
-            [bool(registration_errors)], dtype=torch.uint8, device=torch.cuda.current_device()
+            [bool(registration_errors)], dtype=torch.int32, device=torch.cuda.current_device()
         )
         torch.distributed.all_reduce(has_registration_error, op=torch.distributed.ReduceOp.MAX)
         if has_registration_error.item():
-            if registration_errors:
+            group_leader_ranks = {
+                torch.distributed.get_process_group_ranks(group)[0] for group in self.ubr_groups
+            }
+            if registration_errors and torch.distributed.get_rank() in group_leader_ranks:
                 logger.error(
                     "[MCORE][FSDP][Manual REG] NCCL memory-pool layout mismatch: %s",
                     " | ".join(registration_errors),
@@ -2999,6 +3069,55 @@ class ParamAndGradBuffer:
                     mem_alloc_context=self.mem_alloc_context,
                     **hfsdp_kwargs,
                 )
+
+        if self.ddp_config.nccl_ub and self.ddp_config.fsdp_manual_registration:
+            # Materialize every MaxPool tensor before initialization and training
+            # can first-touch the slots from rank-dependent CUDA stream timings.
+            weight_specs = {}
+            transpose_weight_specs = {}
+            main_grad_specs = {}
+            hsdp_grad_comm_specs = {}
+            for bucket_id, group in enumerate(self.parameter_groups):
+                weight_buffer = group.model_weight_buffer
+                if weight_buffer is not None and weight_buffer.is_data_distributed:
+                    weight_specs[bucket_id] = (weight_buffer.bucket_index.size, weight_buffer.dtype)
+
+                transpose_buffer = group.transpose_weight_buffer
+                if transpose_buffer is not None and transpose_buffer.is_data_distributed:
+                    transpose_weight_specs[bucket_id] = (
+                        transpose_buffer.bucket_index.size,
+                        transpose_buffer.dtype,
+                    )
+
+                grad_buffer = group.hfsdp_helper_gbuf or group.main_grad_buffer
+                if grad_buffer is not None and grad_buffer.is_data_distributed:
+                    main_grad_specs[bucket_id] = (
+                        grad_buffer.bucket_index.size,
+                        self.mp_policy.grad_comm_dtype or grad_buffer.dtype,
+                    )
+
+                custom_grad_comm_dtype = (
+                    group.main_grad_buffer is not None
+                    and self.mp_policy.grad_comm_dtype is not None
+                    and group.main_grad_buffer.dtype != self.mp_policy.grad_comm_dtype
+                )
+                if custom_grad_comm_dtype:
+                    hsdp_comm_buffer = group.hsdp_comm_gbuf
+                    assert hsdp_comm_buffer is not None
+                    hsdp_grad_comm_specs[bucket_id] = (
+                        hsdp_comm_buffer.bucket_index.size,
+                        self.mp_policy.grad_comm_dtype,
+                    )
+
+            allocator_specs = (
+                (self.weight_alloc, weight_specs),
+                (self.transpose_weight_alloc, transpose_weight_specs),
+                (self.main_grad_alloc, main_grad_specs),
+                (getattr(self, "hsdp_grad_comm_alloc", None), hsdp_grad_comm_specs),
+            )
+            for allocator, bucket_specs in allocator_specs:
+                if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
+                    allocator.materialize(bucket_specs, self.mem_alloc_context)
 
         reset_context_args = {"init_param_with_fp8": self.ddp_config.fp8_param_gather}
         module_reset_flag = {}

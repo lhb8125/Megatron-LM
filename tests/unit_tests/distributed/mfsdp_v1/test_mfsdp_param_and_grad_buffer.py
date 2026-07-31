@@ -4,8 +4,11 @@ import math
 
 import torch
 
+from megatron.core.distributed.fsdp.src.megatron_fsdp import param_and_grad_buffer as pgb_module
 from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import (
     BucketingPolicy,
+    MaxPoolAllocator,
+    ParameterGroup,
     _get_parameter_groups,
     _mem_pool_registration_signature,
 )
@@ -77,6 +80,44 @@ def test_mem_pool_registration_signature_ignores_local_addresses():
     second = _TestMemoryPool([{"total_size": 1024, "address": 0x9000}])
 
     assert _mem_pool_registration_signature(first) == _mem_pool_registration_signature(second)
+
+
+def test_max_pool_materialize_uses_exact_largest_padded_bucket(monkeypatch):
+    """Eager materialization uses exact runtime sizes in deterministic slot order."""
+    parameter_groups = [
+        ParameterGroup(
+            [torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))],
+            dtype=torch.bfloat16,
+            fsdp_unit_id=0,
+        ),
+        ParameterGroup(
+            [torch.nn.Parameter(torch.empty(8, dtype=torch.bfloat16))],
+            dtype=torch.bfloat16,
+            fsdp_unit_id=1,
+        ),
+    ]
+    allocator = MaxPoolAllocator("test_pool", parameter_groups, size=2)
+
+    allocations = []
+
+    class _TestGlobalMemoryBuffer:
+        def get_tensor(self, tensor_shape, dtype, name, mem_alloc_context=None):
+            allocations.append((tuple(tensor_shape), dtype, name, mem_alloc_context))
+            return torch.empty(tensor_shape, dtype=dtype)
+
+    monkeypatch.setattr(pgb_module, "get_global_memory_buffer", _TestGlobalMemoryBuffer)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    allocator.materialize({0: (16, torch.bfloat16), 1: (32, torch.bfloat16)})
+
+    assert allocations == [
+        ((32,), torch.bfloat16, "test_pool_0_torch.bfloat16_0", None),
+        ((32,), torch.bfloat16, "test_pool_1_torch.bfloat16_0", None),
+    ]
+    assert allocator.allocation_tracker == {
+        ("test_pool_0_torch.bfloat16_0", torch.bfloat16): 32,
+        ("test_pool_1_torch.bfloat16_0", torch.bfloat16): 32,
+    }
 
 
 def test_multi_use_embedding_gets_separate_bucket_when_sharded():
