@@ -4095,14 +4095,18 @@ def train(
     # Wrap forward_backward_func for Full iteration CUDA graph
     forward_backward_func = get_forward_backward_func(schedule_pg_collection=pg_collection)
     if args.cuda_graph_impl == "full_iteration":
+        selective_prefetch_without_a2a_overlap = (
+            args.use_megatron_fsdp
+            and args.megatron_fsdp_prefetch_recompute_forward_weights
+            and not args.overlap_moe_expert_parallel_comm
+        )
         forward_backward_func = FullCudaGraphWrapper(
             forward_backward_func,
             cuda_graph_warmup_steps=args.cuda_graph_warmup_steps,
             use_single_mempool=config.cuda_graph_use_single_mempool,
-            disable_autograd_multithreading=(
-                args.use_megatron_fsdp
-                and args.megatron_fsdp_prefetch_recompute_forward_weights
-                and not args.overlap_moe_expert_parallel_comm
+            disable_autograd_multithreading=selective_prefetch_without_a2a_overlap,
+            capture_error_mode=(
+                "relaxed" if selective_prefetch_without_a2a_overlap else "thread_local"
             ),
         )
     # Wrap forward_backward_func for overflow handling with moe_expert_rank_capacity_factor
