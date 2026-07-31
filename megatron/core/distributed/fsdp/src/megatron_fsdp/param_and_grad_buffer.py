@@ -2522,6 +2522,13 @@ class ParamAndGradBuffer:
                 "See the rank-local mismatch log for segment details."
             )
 
+        log_single_rank(
+            logger,
+            logging.INFO,
+            f"[MCORE][FSDP][Manual REG] Validated {len(pool_signature)} pool segments "
+            f"({sum(pool_signature)} bytes) across all registration groups.",
+        )
+
         for group in self.ubr_groups:
             log_single_rank(
                 logger,
