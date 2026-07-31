@@ -4352,6 +4352,17 @@ class PrefetchOrder(Enum):
     BACKWARD_PASS_ORDER = 1
 
 
+class _CudaEventWait:
+    """CUDA-event-backed replacement for a distributed work handle."""
+
+    def __init__(self, event: torch.cuda.Event) -> None:
+        self.event = event
+
+    def wait(self) -> None:
+        """Make the current stream wait for the deferred communication."""
+        torch.cuda.current_stream().wait_event(self.event)
+
+
 class AllGatherPipeline:
     """
     Pipeline for all-gathering parameters.
@@ -4366,6 +4377,14 @@ class AllGatherPipeline:
         self.ag_stream = ag_stream
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
+        # A selective-recompute prefetch may be launched and consumed from separate
+        # autograd hooks. During full-iteration CUDA graph capture, retaining the
+        # ProcessGroupNCCL Work object across those hooks can invalidate stream capture
+        # when its tensor references are released. Convert that Work into a persistent
+        # CUDA event on demand, preserving the asynchronous stream dependency without
+        # extending the Work object's lifetime.
+        self.deferred_wait_stream = None
+        self.deferred_wait_events = {}
         # All buckets are initially deallocated / empty after initialization of ParamAndGradBuffer.
         self.bucket_status = {}
         for i in range(self.buffer.num_buckets):
@@ -4471,6 +4490,7 @@ class AllGatherPipeline:
         async_param_gather: bool = True,
         outer_fsdp_group_param_gather: bool = False,
         bwd: bool = False,
+        defer_wait_with_cuda_event: bool = False,
     ):
         """All-gather the params. If prefetch is enabled, prefetch next buckets
         in the order of `prefetch_order`.
@@ -4487,6 +4507,10 @@ class AllGatherPipeline:
             bwd (bool, optional):
                 Whether to all-gather column-wise parameters instead of row-wise parameters
                 for the backward pass for formats that require a transpose buffer like MXFP8.
+            defer_wait_with_cuda_event (bool, optional):
+                Convert the asynchronous distributed Work into a persistent CUDA event
+                before returning. This keeps a cross-hook prefetch graph-capturable while
+                deferring the consuming stream's wait. Defaults to False.
         """
         if len(params) == 0:
             return
@@ -4655,6 +4679,18 @@ class AllGatherPipeline:
                         # All-gather the module weights from each FSDP buffer shard
                         # into an allocated bucket containing unsharded weights.
                         self.async_bucket_gather(bucket_id, bwd)
+
+            if defer_wait_with_cuda_event:
+                if self.deferred_wait_stream is None:
+                    self.deferred_wait_stream = torch.cuda.Stream()
+                event_key = tuple(self.get_bucket_key(bucket_id, bwd) for bucket_id in buckets)
+                if event_key not in self.deferred_wait_events:
+                    self.deferred_wait_events[event_key] = torch.cuda.Event()
+                deferred_wait_event = self.deferred_wait_events[event_key]
+                with torch.cuda.stream(self.deferred_wait_stream):
+                    coalescing_event.wait()
+                    deferred_wait_event.record()
+                coalescing_event = _CudaEventWait(deferred_wait_event)
 
             # Replace the parameter all-gather event with coalescing event.
             for bucket_id in buckets:

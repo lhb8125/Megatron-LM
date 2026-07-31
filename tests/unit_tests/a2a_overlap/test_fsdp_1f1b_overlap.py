@@ -169,9 +169,9 @@ class TestFSDP1F1BOverlap:
             if ref_fsdp.ddp_config.megatron_fsdp_prefetch_recompute_forward_weights:
                 original_reference_prefetch = ref_fsdp.module.prefetch_recompute_forward_parameters
 
-                def _track_reference_selective_prefetch(module):
+                def _track_reference_selective_prefetch(module, **kwargs):
                     reference_selective_prefetch_calls.append(module)
-                    return original_reference_prefetch(module)
+                    return original_reference_prefetch(module, **kwargs)
 
                 ref_fsdp.module.prefetch_recompute_forward_parameters = (
                     _track_reference_selective_prefetch
