@@ -2742,9 +2742,24 @@ class ParamAndGradBuffer:
         tensor mixing without changing the collective schedule itself.
         """
         trace_limit = int(os.environ.get("MCORE_FSDP_UBR_TRACE_LIMIT", "512"))
+        global_rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        trace_ranks_env = os.environ.get("MCORE_FSDP_UBR_TRACE_RANKS")
+        if trace_ranks_env:
+            trace_ranks = {int(rank) for rank in trace_ranks_env.split(",")}
+        elif world_size >= 128:
+            # A full DeepSeek iteration contains far more than 512 FSDP trace
+            # points.  Keep large diagnostics tractable while covering both
+            # halves of the DOI=2 layout and their boundary ranks.
+            midpoint = world_size // 2
+            trace_ranks = {0, 1, midpoint - 1, midpoint, midpoint + 1, world_size - 1}
+            trace_limit = max(trace_limit, 65_536)
+        else:
+            trace_ranks = None
         if (
             not self.already_registered
             or os.environ.get("MCORE_FSDP_UBR_TRACE") != "1"
+            or (trace_ranks is not None and global_rank not in trace_ranks)
             or self._ubr_trace_sequence >= trace_limit
         ):
             return
@@ -2765,7 +2780,7 @@ class ParamAndGradBuffer:
             "[MCORE][FSDP][UBR TRACE] rank=%s seq=%s stage=%s bucket=%s "
             "group=%s group_size=%s group_rank=%s group_first=%s group_last=%s "
             "group_hash=%s locations=%s",
-            torch.distributed.get_rank(),
+            global_rank,
             self._ubr_trace_sequence,
             stage,
             bucket_id,
