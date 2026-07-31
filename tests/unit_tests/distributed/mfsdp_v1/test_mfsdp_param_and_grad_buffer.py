@@ -112,8 +112,8 @@ def test_max_pool_materialize_uses_exact_largest_padded_bucket(monkeypatch):
 
     assert allocations == [
         ((8,), torch.float32, "test_pool_0_torch.float32_0", None),
-        ((64,), torch.uint8, "test_pool_0_torch.uint8_0", None),
         ((8,), torch.float32, "test_pool_1_torch.float32_0", None),
+        ((64,), torch.uint8, "test_pool_0_torch.uint8_0", None),
         ((64,), torch.uint8, "test_pool_1_torch.uint8_0", None),
     ]
     assert allocator.allocation_tracker == {

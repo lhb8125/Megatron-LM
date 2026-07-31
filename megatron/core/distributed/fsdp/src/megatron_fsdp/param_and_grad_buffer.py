@@ -1130,6 +1130,28 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
             required_slot_sizes[slot] = max(size, required_slot_sizes.get(slot, 0))
         return required_slot_sizes
 
+    def materialization_requests(
+        self, bucket_specs: Dict[int, Tuple[int, torch.dtype]]
+    ) -> List[Tuple[int, torch.dtype, str]]:
+        """Return every backing tensor required to materialize this pool.
+
+        The returned requests are independent of parameter-group traversal order,
+        allowing callers to merge requests from multiple MaxPool allocators into
+        one globally ordered NCCL memory-pool allocation plan.
+        """
+        required_slot_sizes = self.materialization_requirements(bucket_specs)
+        requests = []
+        for buf_group_id in range(self.size):
+            for (dtype, bucket_offset), size in required_slot_sizes.items():
+                requests.append(
+                    (size, dtype, self._get_gbuf_name(buf_group_id, dtype, bucket_offset))
+                )
+        return requests
+
+    def record_materialized(self, size: int, dtype: torch.dtype, buffer_name: str) -> None:
+        """Record a backing tensor materialized by a shared allocation plan."""
+        self.allocation_tracker[(buffer_name, dtype)] = size
+
     def materialize(
         self,
         bucket_specs: Dict[int, Tuple[int, torch.dtype]],
@@ -1147,31 +1169,28 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         ``bucket_specs`` uses the exact padded ``DataParallelBuffer`` sizes,
         rather than the unpadded parameter counts used for capacity planning.
         """
-        required_slot_sizes = self.materialization_requirements(bucket_specs)
-
         total_bytes = 0
-        for buf_group_id in range(self.size):
-            for (dtype, bucket_offset), size in sorted(
-                required_slot_sizes.items(),
-                key=lambda item: (
-                    item[1] * torch.empty((), dtype=item[0][0]).element_size(),
-                    str(item[0][0]),
-                    item[0][1],
-                ),
-            ):
-                buffer_name = self._get_gbuf_name(buf_group_id, dtype, bucket_offset)
-                materialized_buffer = get_global_memory_buffer().get_tensor(
-                    [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
-                )
-                self.allocation_tracker[(buffer_name, dtype)] = size
-                total_bytes += size * materialized_buffer.element_size()
+        requests = self.materialization_requests(bucket_specs)
+        for size, dtype, buffer_name in sorted(
+            requests,
+            key=lambda item: (
+                item[0] * torch.empty((), dtype=item[1]).element_size(),
+                str(item[1]),
+                item[2],
+            ),
+        ):
+            materialized_buffer = get_global_memory_buffer().get_tensor(
+                [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
+            )
+            self.record_materialized(size, dtype, buffer_name)
+            total_bytes += size * materialized_buffer.element_size()
 
         torch.cuda.synchronize()
         log_single_rank(
             logger,
             logging.INFO,
-            f"[MaxPoolAllocator][{self.name}] Materialized {len(required_slot_sizes)} slots "
-            f"x {self.size} buffers ({total_bytes} bytes) for manual NCCL registration.",
+            f"[MaxPoolAllocator][{self.name}] Materialized {len(requests)} buffers "
+            f"({total_bytes} bytes) for manual NCCL registration.",
         )
 
     def allocate(
@@ -3156,81 +3175,79 @@ class ParamAndGradBuffer:
                     if buffer is not None:
                         persistent_buffers.append(buffer)
 
-            # Build one identically-sized cached NCCL segment on every rank before
-            # allocating individual tensors.  Even canonical tensor ordering is
-            # insufficient when MoE shards have different local buffer-size sets.
-            # Subsequent allocations split this segment without creating new
-            # registration records, so symmetric registration is independent of
-            # rank-local parameter-group topology.
-            reservation_bytes = 0
-            reservation_allocations = 0
+            # ProcessGroupNCCL registers memory-pool segments in allocator creation
+            # order.  Merge every known long-lived allocation into one global plan
+            # sorted by byte size so rank-local MoE parameter-group traversal cannot
+            # permute the registration sequence.  Unlike reserving a second pool-
+            # sized allocation, this creates only the storage training will consume.
+            allocation_plan = []
             for allocator, bucket_specs in allocator_specs:
                 if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
-                    requirements = allocator.materialization_requirements(bucket_specs)
-                    reservation_bytes += allocator.size * sum(
-                        size * torch.empty((), dtype=dtype).element_size()
-                        for (dtype, _), size in requirements.items()
-                    )
-                    reservation_allocations += allocator.size * len(requirements)
+                    for size, dtype, buffer_name in allocator.materialization_requests(
+                        bucket_specs
+                    ):
+                        allocation_plan.append(
+                            (
+                                size * torch.empty((), dtype=dtype).element_size(),
+                                "max_pool",
+                                allocator,
+                                size,
+                                dtype,
+                                buffer_name,
+                            )
+                        )
 
-            reservation_bytes += sum(
-                buffer.data_size * torch.empty((), dtype=buffer.dtype).element_size()
-                for buffer in persistent_buffers
-            )
-            reservation_allocations += len(persistent_buffers)
+            for buffer in persistent_buffers:
+                allocation_plan.append(
+                    (
+                        buffer.data_size * torch.empty((), dtype=buffer.dtype).element_size(),
+                        "persistent",
+                        buffer,
+                        buffer.data_size,
+                        buffer.dtype,
+                        "",
+                    )
+                )
 
             for dtype, size in buffer_size.items():
                 if size == 0:
                     continue
                 actual_dtype = torch.uint8 if dtype == "float8" else dtype
-                reservation_bytes += size * torch.empty((), dtype=actual_dtype).element_size()
-                reservation_allocations += 1
-
-            # Allow one 2-MiB allocator segment of rounding per eventual tensor.
-            segment_alignment = 2 * 1024 * 1024
-            reservation_bytes += segment_alignment * (reservation_allocations + 1)
-            reservation_bytes = (
-                (reservation_bytes + segment_alignment - 1) // segment_alignment
-            ) * segment_alignment
-            global_reservation_bytes = torch.tensor(
-                [reservation_bytes], dtype=torch.int64, device=self.device
-            )
-            torch.distributed.all_reduce(
-                global_reservation_bytes, op=torch.distributed.ReduceOp.MAX
-            )
-            reservation_bytes = global_reservation_bytes.item()
-            with self.mem_alloc_context():
-                pool_reservation = torch.empty(
-                    reservation_bytes, dtype=torch.uint8, device=self.device
+                allocation_plan.append(
+                    (
+                        size * torch.empty((), dtype=actual_dtype).element_size(),
+                        "all_in_one",
+                        dtype,
+                        size,
+                        actual_dtype,
+                        "",
+                    )
                 )
-            del pool_reservation
+
+            self._ubr_persistent_data = {}
+            self._ubr_all_in_one_data = {}
+            with self.mem_alloc_context():
+                for _, request_kind, owner, size, dtype, buffer_name in sorted(
+                    allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
+                ):
+                    if request_kind == "max_pool":
+                        get_global_memory_buffer().get_tensor([size], dtype=dtype, name=buffer_name)
+                        owner.record_materialized(size, dtype, buffer_name)
+                    elif request_kind == "persistent":
+                        self._ubr_persistent_data[id(owner)] = torch.empty(
+                            size, dtype=dtype, device=self.device
+                        )
+                    else:
+                        self._ubr_all_in_one_data[owner] = torch.empty(
+                            size, dtype=dtype, device=self.device
+                        )
             torch.cuda.synchronize()
             log_single_rank(
                 logger,
                 logging.INFO,
-                f"[MCORE][FSDP][Manual REG] Reserved {reservation_bytes} bytes as one "
-                "cached NCCL pool segment.",
+                f"[MCORE][FSDP][Manual REG] Materialized {len(allocation_plan)} buffers "
+                f"({sum(item[0] for item in allocation_plan)} requested bytes) in global order.",
             )
-
-            for allocator, bucket_specs in allocator_specs:
-                if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
-                    allocator.materialize(bucket_specs, self.mem_alloc_context)
-
-            # Persistent weight shards are normally allocated in parameter-group
-            # traversal order.  Allocate and consume them in canonical order so
-            # splitting of the shared reserved segment is deterministic as well.
-            self._ubr_persistent_data = {}
-            with self.mem_alloc_context():
-                for buffer in sorted(
-                    persistent_buffers,
-                    key=lambda item: (
-                        item.data_size * torch.empty((), dtype=item.dtype).element_size(),
-                        str(item.dtype),
-                    ),
-                ):
-                    self._ubr_persistent_data[id(buffer)] = torch.empty(
-                        buffer.data_size, dtype=buffer.dtype, device=self.device
-                    )
 
         reset_context_args = {"init_param_with_fp8": self.ddp_config.fp8_param_gather}
         module_reset_flag = {}
@@ -3468,21 +3485,23 @@ class ParamAndGradBuffer:
 
         # Allocate the main_weight buffer and main_grad buffer data in one buffer.
         if self.buffer_all_in_one:
+            preallocated_all_in_one = getattr(self, "_ubr_all_in_one_data", {})
             with self.mem_alloc_context():
-                self.buffer = {
-                    torch.float32: torch.empty(
-                        buffer_size[torch.float32], dtype=torch.float32, device=self.device
-                    ),
-                    torch.float16: torch.empty(
-                        buffer_size[torch.float16], dtype=torch.float16, device=self.device
-                    ),
-                    torch.bfloat16: torch.empty(
-                        buffer_size[torch.bfloat16], dtype=torch.bfloat16, device=self.device
-                    ),
-                    "float8": torch.empty(
-                        buffer_size["float8"], dtype=torch.uint8, device=self.device
-                    ),
-                }
+                self.buffer = {}
+                for dtype, size in buffer_size.items():
+                    actual_dtype = torch.uint8 if dtype == "float8" else dtype
+                    self.buffer[dtype] = preallocated_all_in_one.pop(
+                        dtype,
+                        (
+                            torch.empty(size, dtype=actual_dtype, device=self.device)
+                            if size == 0
+                            else None
+                        ),
+                    )
+                    if self.buffer[dtype] is None:
+                        self.buffer[dtype] = torch.empty(
+                            size, dtype=actual_dtype, device=self.device
+                        )
             offset = {torch.float32: 0, torch.float16: 0, torch.bfloat16: 0, "float8": 0}
 
         def _alloc(dtype, size):
