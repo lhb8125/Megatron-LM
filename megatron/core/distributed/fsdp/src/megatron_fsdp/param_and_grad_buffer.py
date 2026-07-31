@@ -2431,6 +2431,12 @@ class ParamAndGradBuffer:
         self.mem_alloc_context = self.get_mem_alloc_context(
             groups=self.ubr_groups, symmetric=not self.ddp_config.disable_symmetric_registration
         )
+        # Registered-buffer collectives require matching pool-relative offsets
+        # across ranks. FSDP reduce-scatter is in-place and intentionally writes
+        # each rank's output to ``rank * recvcount`` inside the input bucket.
+        # Keep gradient communication outside the registered pool until this
+        # path provides a same-offset staging output.
+        self.grad_mem_alloc_context = nullcontext
 
         # Mark FP8 params. If TransformerEngine is not installed, we can skip this.
         meta_device_init_fp8_params = {}
@@ -2547,12 +2553,7 @@ class ParamAndGradBuffer:
         # same logical bucket, so validate this semantic mapping separately from
         # the allocator segment layout below.
         runtime_assignment_signature = _max_pool_assignment_signature(
-            (
-                self.weight_alloc,
-                self.transpose_weight_alloc,
-                self.main_grad_alloc,
-                getattr(self, "hsdp_grad_comm_alloc", None),
-            ),
+            (self.weight_alloc, self.transpose_weight_alloc),
             self.parameter_groups,
             self.param_to_name,
         )
@@ -3274,7 +3275,7 @@ class ParamAndGradBuffer:
                     gradient_scaling_factor=gradient_scaling_factor,
                     bucket_id=group_id,
                     chunk_size_factor=group.chunk_size_factor,
-                    mem_alloc_context=self.mem_alloc_context,
+                    mem_alloc_context=self.grad_mem_alloc_context,
                     **main_buf_extra_kwargs,
                 )
 
@@ -3344,7 +3345,7 @@ class ParamAndGradBuffer:
                     temporary_bucket_allocator=self.hsdp_grad_comm_alloc,
                     bucket_id=group_id,
                     chunk_size_factor=group.chunk_size_factor,
-                    mem_alloc_context=self.mem_alloc_context,
+                    mem_alloc_context=self.grad_mem_alloc_context,
                     **hfsdp_kwargs,
                 )
 
@@ -3353,8 +3354,6 @@ class ParamAndGradBuffer:
             # can first-touch the slots from rank-dependent CUDA stream timings.
             weight_specs = {}
             transpose_weight_specs = {}
-            main_grad_specs = {}
-            hsdp_grad_comm_specs = {}
             for bucket_id, group in enumerate(self.parameter_groups):
                 weight_buffer = group.model_weight_buffer
                 if weight_buffer is not None and weight_buffer.is_data_distributed:
@@ -3367,31 +3366,9 @@ class ParamAndGradBuffer:
                         transpose_buffer.dtype,
                     )
 
-                grad_buffer = group.hfsdp_helper_gbuf or group.main_grad_buffer
-                if grad_buffer is not None and grad_buffer.is_data_distributed:
-                    main_grad_specs[bucket_id] = (
-                        grad_buffer.bucket_index.size,
-                        self.mp_policy.grad_comm_dtype or grad_buffer.dtype,
-                    )
-
-                custom_grad_comm_dtype = (
-                    group.main_grad_buffer is not None
-                    and self.mp_policy.grad_comm_dtype is not None
-                    and group.main_grad_buffer.dtype != self.mp_policy.grad_comm_dtype
-                )
-                if custom_grad_comm_dtype:
-                    hsdp_comm_buffer = group.hsdp_comm_gbuf
-                    assert hsdp_comm_buffer is not None
-                    hsdp_grad_comm_specs[bucket_id] = (
-                        hsdp_comm_buffer.bucket_index.size,
-                        self.mp_policy.grad_comm_dtype,
-                    )
-
             allocator_specs = (
                 (self.weight_alloc, weight_specs),
                 (self.transpose_weight_alloc, transpose_weight_specs),
-                (self.main_grad_alloc, main_grad_specs),
-                (getattr(self, "hsdp_grad_comm_alloc", None), hsdp_grad_comm_specs),
             )
             persistent_buffers = []
             for group in self.parameter_groups:
@@ -3443,21 +3420,6 @@ class ParamAndGradBuffer:
                     )
                 )
 
-            for dtype, size in buffer_size.items():
-                if size == 0:
-                    continue
-                actual_dtype = torch.uint8 if dtype == "float8" else dtype
-                allocation_plan.append(
-                    (
-                        size * torch.empty((), dtype=actual_dtype).element_size(),
-                        "all_in_one",
-                        dtype,
-                        size,
-                        actual_dtype,
-                        f"all_in_one:{dtype}",
-                    )
-                )
-
             ordered_allocation_plan = sorted(
                 allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
             )
@@ -3496,7 +3458,6 @@ class ParamAndGradBuffer:
                 )
 
             self._ubr_persistent_data = {}
-            self._ubr_all_in_one_data = {}
             with self.mem_alloc_context():
                 for _, request_kind, owner, size, dtype, buffer_name in ordered_allocation_plan:
                     if request_kind == "max_pool":
@@ -3507,9 +3468,7 @@ class ParamAndGradBuffer:
                             size, dtype=dtype, device=self.device
                         )
                     else:
-                        self._ubr_all_in_one_data[owner] = torch.empty(
-                            size, dtype=dtype, device=self.device
-                        )
+                        raise AssertionError(f"Unexpected UBR allocation kind: {request_kind}")
             torch.cuda.synchronize()
             log_single_rank(
                 logger,
@@ -3755,23 +3714,11 @@ class ParamAndGradBuffer:
 
         # Allocate the main_weight buffer and main_grad buffer data in one buffer.
         if self.buffer_all_in_one:
-            preallocated_all_in_one = getattr(self, "_ubr_all_in_one_data", {})
-            with self.mem_alloc_context():
+            with self.grad_mem_alloc_context():
                 self.buffer = {}
                 for dtype, size in buffer_size.items():
                     actual_dtype = torch.uint8 if dtype == "float8" else dtype
-                    self.buffer[dtype] = preallocated_all_in_one.pop(
-                        dtype,
-                        (
-                            torch.empty(size, dtype=actual_dtype, device=self.device)
-                            if size == 0
-                            else None
-                        ),
-                    )
-                    if self.buffer[dtype] is None:
-                        self.buffer[dtype] = torch.empty(
-                            size, dtype=actual_dtype, device=self.device
-                        )
+                    self.buffer[dtype] = torch.empty(size, dtype=actual_dtype, device=self.device)
             offset = {torch.float32: 0, torch.float16: 0, torch.bfloat16: 0, "float8": 0}
 
         def _alloc(dtype, size):
@@ -3797,7 +3744,7 @@ class ParamAndGradBuffer:
                 # No gradient sharding.
                 continue
             # Allocate the main grad buffer data, and attach it to the main grad buffer.
-            with self.mem_alloc_context():
+            with self.grad_mem_alloc_context():
                 if group.hfsdp_helper_gbuf:
                     _init_hfsdp_helper_and_dp_buffer_data(
                         group.hfsdp_helper_gbuf,
