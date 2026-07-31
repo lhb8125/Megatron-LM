@@ -2759,15 +2759,22 @@ class ParamAndGradBuffer:
             )
             for name, tensor in tensors
         ]
+        group_ranks = torch.distributed.get_process_group_ranks(group)
+        group_rank_hash = hashlib.sha256(",".join(map(str, group_ranks)).encode()).hexdigest()[:8]
         logger.warning(
             "[MCORE][FSDP][UBR TRACE] rank=%s seq=%s stage=%s bucket=%s "
-            "group=%s group_size=%s locations=%s",
+            "group=%s group_size=%s group_rank=%s group_first=%s group_last=%s "
+            "group_hash=%s locations=%s",
             torch.distributed.get_rank(),
             self._ubr_trace_sequence,
             stage,
             bucket_id,
             getattr(group, "group_desc", "unknown"),
             group.size(),
+            group.rank(),
+            group_ranks[0],
+            group_ranks[-1],
+            group_rank_hash,
             locations,
         )
         self._ubr_trace_sequence += 1
