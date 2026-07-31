@@ -458,7 +458,6 @@ class MegatronFSDP(torch.nn.Module):
         prefetch_order=PrefetchOrder.FORWARD_PASS_ORDER,
         wait_bucket_ready=True,
         bwd=False,
-        defer_wait_with_cuda_event=False,
     ):
         """
         All-gather parameters across the data parallel group and wait for
@@ -486,7 +485,6 @@ class MegatronFSDP(torch.nn.Module):
                 and (self.microbatch_count == 0 or self.model_auto_sync)
             ),
             bwd=bwd,
-            defer_wait_with_cuda_event=defer_wait_with_cuda_event,
         )
         if wait_bucket_ready:
             for param in params:
@@ -509,9 +507,7 @@ class MegatronFSDP(torch.nn.Module):
             param.overwrite_main_grad = True
 
     @torch.compiler.disable
-    def prefetch_recompute_forward_parameters(
-        self, module: nn.Module, defer_wait_with_cuda_event: bool = False
-    ):
+    def prefetch_recompute_forward_parameters(self, module: nn.Module):
         """Asynchronously gather selective-recompute forward weights for ``module``.
 
         Selective activation recomputation only replays a subset of a layer. The
@@ -538,11 +534,7 @@ class MegatronFSDP(torch.nn.Module):
                     params.append(param)
 
         self.all_gather_and_wait_parameters_ready(
-            params=params,
-            prefetch=False,
-            wait_bucket_ready=False,
-            bwd=False,
-            defer_wait_with_cuda_event=defer_wait_with_cuda_event,
+            params=params, prefetch=False, wait_bucket_ready=False, bwd=False
         )
 
     def _register_fsdp_hooks(self, root_module):
@@ -977,10 +969,7 @@ class MegatronFSDP(torch.nn.Module):
                     # rowwise gather after its backward-layout weights are ready, leaving
                     # the layer's MLP backward compute to hide the communication before
                     # attention backward replays mla_up_proj.
-                    self.prefetch_recompute_forward_parameters(
-                        module,
-                        defer_wait_with_cuda_event=self.ddp_config.megatron_fsdp_cuda_graph_mode,
-                    )
+                    self.prefetch_recompute_forward_parameters(module)
 
         self._root_pre_backward_hook_issued = False
 
