@@ -2741,10 +2741,11 @@ class ParamAndGradBuffer:
         to distinguish collective ordering mismatches from registered/unregistered
         tensor mixing without changing the collective schedule itself.
         """
+        trace_limit = int(os.environ.get("MCORE_FSDP_UBR_TRACE_LIMIT", "64"))
         if (
             not self.already_registered
             or os.environ.get("MCORE_FSDP_UBR_TRACE") != "1"
-            or self._ubr_trace_sequence >= 64
+            or self._ubr_trace_sequence >= trace_limit
         ):
             return
 
