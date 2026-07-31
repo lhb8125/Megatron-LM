@@ -3168,12 +3168,19 @@ class ParamAndGradBuffer:
             )
             persistent_buffers = []
             for group in self.parameter_groups:
-                for buffer in (
-                    group.hfsdp_helper_wbuf or group.model_weight_buffer,
-                    group.hfsdp_helper_wtbuf or group.transpose_weight_buffer,
+                group_name_digest = hashlib.sha256(
+                    ",".join(sorted(self.param_to_name[param] for param in group.params)).encode()
+                ).hexdigest()[:16]
+                for buffer_role, buffer in (
+                    ("weight", group.hfsdp_helper_wbuf or group.model_weight_buffer),
+                    ("transpose_weight", group.hfsdp_helper_wtbuf or group.transpose_weight_buffer),
                 ):
                     if buffer is not None:
-                        persistent_buffers.append(buffer)
+                        stable_name = (
+                            f"persistent:{buffer_role}:expert={group.is_expert_param}:"
+                            f"unit={group.fsdp_unit_id}:params={group_name_digest}"
+                        )
+                        persistent_buffers.append((buffer, stable_name))
 
             # ProcessGroupNCCL registers memory-pool segments in allocator creation
             # order.  Merge every known long-lived allocation into one global plan
@@ -3197,7 +3204,7 @@ class ParamAndGradBuffer:
                             )
                         )
 
-            for buffer in persistent_buffers:
+            for buffer, stable_name in persistent_buffers:
                 allocation_plan.append(
                     (
                         buffer.data_size * torch.empty((), dtype=buffer.dtype).element_size(),
@@ -3205,7 +3212,7 @@ class ParamAndGradBuffer:
                         buffer,
                         buffer.data_size,
                         buffer.dtype,
-                        "",
+                        stable_name,
                     )
                 )
 
@@ -3220,16 +3227,51 @@ class ParamAndGradBuffer:
                         dtype,
                         size,
                         actual_dtype,
-                        "",
+                        f"all_in_one:{dtype}",
                     )
+                )
+
+            ordered_allocation_plan = sorted(
+                allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
+            )
+            logical_plan_signature = tuple(
+                (num_bytes, request_kind, str(dtype), stable_name)
+                for num_bytes, request_kind, _, _, dtype, stable_name in ordered_allocation_plan
+            )
+            logical_plan_hash = hashlib.sha256(repr(logical_plan_signature).encode()).hexdigest()[
+                :12
+            ]
+            logical_plan_errors = []
+            for group in self.ubr_groups:
+                group_hashes = [None] * torch.distributed.get_world_size(group)
+                torch.distributed.all_gather_object(group_hashes, logical_plan_hash, group=group)
+                if any(plan_hash != group_hashes[0] for plan_hash in group_hashes[1:]):
+                    hash_rank_counts = defaultdict(int)
+                    for plan_hash in group_hashes:
+                        hash_rank_counts[plan_hash] += 1
+                    logical_plan_errors.append(
+                        f"{group.group_desc} (size={group.size()}): {dict(hash_rank_counts)}"
+                    )
+
+            has_logical_plan_error = torch.tensor(
+                [bool(logical_plan_errors)], dtype=torch.int32, device=self.device
+            )
+            torch.distributed.all_reduce(has_logical_plan_error, op=torch.distributed.ReduceOp.MAX)
+            if has_logical_plan_error.item():
+                if logical_plan_errors:
+                    logger.error(
+                        "[MCORE][FSDP][Manual REG] Logical allocation-plan mismatch: %s",
+                        " | ".join(logical_plan_errors),
+                    )
+                raise RuntimeError(
+                    "NCCL memory-pool logical allocation plan differs across an FSDP "
+                    "registration group. See the rank-local mismatch log for plan hashes."
                 )
 
             self._ubr_persistent_data = {}
             self._ubr_all_in_one_data = {}
             with self.mem_alloc_context():
-                for _, request_kind, owner, size, dtype, buffer_name in sorted(
-                    allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
-                ):
+                for _, request_kind, owner, size, dtype, buffer_name in ordered_allocation_plan:
                     if request_kind == "max_pool":
                         get_global_memory_buffer().get_tensor([size], dtype=dtype, name=buffer_name)
                         owner.record_materialized(size, dtype, buffer_name)
@@ -3246,7 +3288,8 @@ class ParamAndGradBuffer:
                 logger,
                 logging.INFO,
                 f"[MCORE][FSDP][Manual REG] Materialized {len(allocation_plan)} buffers "
-                f"({sum(item[0] for item in allocation_plan)} requested bytes) in global order.",
+                f"({sum(item[0] for item in allocation_plan)} requested bytes) in global order "
+                f"(logical plan {logical_plan_hash}).",
             )
 
         reset_context_args = {"init_param_with_fp8": self.ddp_config.fp8_param_gather}
