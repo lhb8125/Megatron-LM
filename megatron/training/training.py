@@ -4099,6 +4099,11 @@ def train(
             forward_backward_func,
             cuda_graph_warmup_steps=args.cuda_graph_warmup_steps,
             use_single_mempool=config.cuda_graph_use_single_mempool,
+            disable_autograd_multithreading=(
+                args.use_megatron_fsdp
+                and args.megatron_fsdp_prefetch_recompute_forward_weights
+                and not args.overlap_moe_expert_parallel_comm
+            ),
         )
     # Wrap forward_backward_func for overflow handling with moe_expert_rank_capacity_factor
     if args.moe_expert_rank_capacity_factor is not None:

@@ -4,6 +4,7 @@
 
 import gc
 import logging
+from contextlib import nullcontext
 
 import torch
 
@@ -149,11 +150,18 @@ class FullCudaGraphWrapper:
     cuda_graph = {'training': None, 'validation': None}
     result = {'training': None, 'validation': None}
 
-    def __init__(self, forward_backward_func, cuda_graph_warmup_steps=1, use_single_mempool=False):
+    def __init__(
+        self,
+        forward_backward_func,
+        cuda_graph_warmup_steps=1,
+        use_single_mempool=False,
+        disable_autograd_multithreading=False,
+    ):
         self.forward_backward_func = forward_backward_func
         self.static_loader = StaticBufferLoader()
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
         self.use_single_mempool = use_single_mempool
+        self.disable_autograd_multithreading = disable_autograd_multithreading
 
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
@@ -230,15 +238,21 @@ class FullCudaGraphWrapper:
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = get_shared_capture_stream()
-            with torch.cuda.graph(
-                FullCudaGraphWrapper.cuda_graph[training_str],
-                stream=capture_stream,
-                pool=get_graph_pool(self.use_single_mempool),
-                capture_error_mode="thread_local",
-            ):
-                FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
-                    *args, **kwargs
-                )
+            autograd_context = (
+                torch.autograd.set_multithreading_enabled(False)
+                if self.disable_autograd_multithreading
+                else nullcontext()
+            )
+            with autograd_context:
+                with torch.cuda.graph(
+                    FullCudaGraphWrapper.cuda_graph[training_str],
+                    stream=capture_stream,
+                    pool=get_graph_pool(self.use_single_mempool),
+                    capture_error_mode="thread_local",
+                ):
+                    FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                        *args, **kwargs
+                    )
             torch.cuda.synchronize()
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
