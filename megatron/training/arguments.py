@@ -1271,10 +1271,6 @@ def validate_args(args, defaults={}):
                     "Selective --megatron-fsdp-prefetch-recompute-forward-weights "
                     "requires mla_up_proj in --recompute-modules."
                 )
-                assert args.overlap_moe_expert_parallel_comm, (
-                    "Selective --megatron-fsdp-prefetch-recompute-forward-weights "
-                    "currently requires --overlap-moe-expert-parallel-comm."
-                )
 
         if args.nccl_ub:
             # In Megatron-LM, required implementation for manual registration is already provided.

@@ -959,6 +959,17 @@ class MegatronFSDP(torch.nn.Module):
                 self.all_gather_and_wait_parameters_ready(
                     param_list, prefetch_order=PrefetchOrder.BACKWARD_PASS_ORDER, bwd=True
                 )
+                if (
+                    self.prefetch_recompute_forward_weights
+                    and self._selective_recompute_forward_weight_modules
+                    and not self.enable_fine_grained_param_gather_backward_hook
+                ):
+                    # The regular forward/backward schedule enters an FSDP unit through
+                    # this unit-level pre-backward hook. Start the selective-recompute
+                    # rowwise gather after its backward-layout weights are ready, leaving
+                    # the layer's MLP backward compute to hide the communication before
+                    # attention backward replays mla_up_proj.
+                    self.prefetch_recompute_forward_parameters(module)
 
         self._root_pre_backward_hook_issued = False
 
