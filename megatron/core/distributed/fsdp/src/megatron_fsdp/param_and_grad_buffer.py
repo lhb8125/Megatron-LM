@@ -522,6 +522,12 @@ class TemporaryBucketAllocator:
             _free_storage(self.buckets[bucket_id].data)
             del self.buckets[bucket_id]
 
+    def can_allocate(
+        self, bucket_ids: List[int], releasable_bucket_ids: Optional[set[int]] = None
+    ) -> bool:
+        """Return whether ``bucket_ids`` fit after releasing the supplied buckets."""
+        return True
+
 
 class StorageResizeBasedBucketAllocator(TemporaryBucketAllocator):
     """
@@ -751,6 +757,33 @@ class FixedPoolAllocator(TemporaryBucketAllocator):
             if self.dtype_fn(pg_a) != self.dtype_fn(pg_b) or a_size != b_size:
                 return False
         return True
+
+    def can_allocate(
+        self, bucket_ids: List[int], releasable_bucket_ids: Optional[set[int]] = None
+    ) -> bool:
+        """Return whether the requested buckets fit in the fixed pool."""
+        releasable_bucket_ids = releasable_bucket_ids or set()
+        available_by_offset = defaultdict(int)
+        for _, bucket_offset in self.idle_buffer:
+            available_by_offset[bucket_offset] += 1
+        for bucket_id in releasable_bucket_ids:
+            if bucket_id in self.using_buffer:
+                _, bucket_offset = self.using_buffer[bucket_id]
+                available_by_offset[bucket_offset] += 1
+
+        required_by_offset = defaultdict(int)
+        for bucket_id in set(bucket_ids):
+            fsdp_unit_id = self.fsdp_param_groups[bucket_id].fsdp_unit_id
+            if fsdp_unit_id not in self.fsdp_double_buffer_units or (
+                bucket_id in self.using_buffer and bucket_id not in releasable_bucket_ids
+            ):
+                continue
+            _, bucket_offset = self.fsdp_unit_buckets[fsdp_unit_id][bucket_id]
+            required_by_offset[bucket_offset] += 1
+        return all(
+            required <= available_by_offset[bucket_offset]
+            for bucket_offset, required in required_by_offset.items()
+        )
 
     def allocate(
         self,
@@ -1030,6 +1063,35 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
                     f"\tBucket Sizes: {bucket_sizes} / Max (Unit, Bucket): {max_bucket_ids}"
                 ),
             )
+
+    def can_allocate(
+        self, bucket_ids: List[int], releasable_bucket_ids: Optional[set[int]] = None
+    ) -> bool:
+        """Return whether the requested buckets fit in the max-sized pool."""
+        releasable_bucket_ids = releasable_bucket_ids or set()
+        available_by_slot = defaultdict(int)
+        for _, dtype, bucket_offset in self.idle_buffer:
+            available_by_slot[(dtype, bucket_offset)] += 1
+        for bucket_id in releasable_bucket_ids:
+            if bucket_id in self.using_buffer:
+                _, dtype, bucket_offset = self.using_buffer[bucket_id]
+                available_by_slot[(dtype, bucket_offset)] += 1
+
+        required_by_slot = defaultdict(int)
+        for bucket_id in set(bucket_ids):
+            fsdp_unit_id = self.fsdp_param_groups[bucket_id].fsdp_unit_id
+            if fsdp_unit_id is None or (
+                bucket_id in self.using_buffer and bucket_id not in releasable_bucket_ids
+            ):
+                continue
+            _, bucket_offset = self.bucket_alloc_index[bucket_id]
+            dtype = self.dtype_fn(self.fsdp_param_groups[bucket_id])
+            if dtype == "float8":
+                dtype = torch.uint8
+            required_by_slot[(dtype, bucket_offset)] += 1
+        return all(
+            required <= available_by_slot[slot] for slot, required in required_by_slot.items()
+        )
 
     def allocate(
         self,
@@ -4521,18 +4583,13 @@ class AllGatherPipeline:
         ag_buckets = [self.buffer.param_to_param_group[item] for item in params]
         ag_buckets = list(sorted(set(ag_buckets)))  # Sort in order of unique bucket ID.
         parameter_groups = self.buffer.parameter_groups
-        if self.buffer.ddp_config.fsdp_double_buffer:
-            buffer_count = self.buffer.ddp_config.fsdp_buffer_count
-            double_buf_units = set()
-            for bucket_id in ag_buckets:
-                fsdp_unit_id = parameter_groups[bucket_id].fsdp_unit_id
-                if fsdp_unit_id in self.buffer.double_buf_units:
-                    double_buf_units.add(fsdp_unit_id)
-            if len(double_buf_units) > buffer_count:
-                raise ValueError(
-                    f"{double_buf_units} FSDP units were requested, "
-                    f"but the buffer pool can support no more than {buffer_count} FSDP units."
-                )
+        if self.buffer.ddp_config.fsdp_double_buffer and not self._persistent_allocators_can_fit(
+            ag_buckets, bwd
+        ):
+            raise ValueError(
+                f"FSDP buckets {ag_buckets} do not fit in the configured persistent "
+                f"buffer pools (fsdp_buffer_count={self.buffer.ddp_config.fsdp_buffer_count})."
+            )
 
         # Do not release the buckets that are being all-gathered.
         no_fsdp_units = True
@@ -4581,12 +4638,10 @@ class AllGatherPipeline:
                 # If use double buffer, we need to check if the next bucket
                 # is exceeding the coverage of the double buffer.
                 if self.buffer.ddp_config.fsdp_double_buffer:
-                    fsdp_unit_id = parameter_groups[bucket_id].fsdp_unit_id
-                    double_buf_units.add(fsdp_unit_id)
-                    if len(double_buf_units) > buffer_count:
-                        # Prefetching the next bucket will exceed the coverage of
-                        # the double buffer, so we need to stop prefetching.
-                        return True
+                    candidate_buckets = self.buffer.bucket_to_bucket_group[bucket_id]
+                    return not self._persistent_allocators_can_fit(
+                        ag_buckets + candidate_buckets, bwd
+                    )
                 return False
 
             if suggested_AG_prefetch_size is None:
@@ -4807,6 +4862,27 @@ class AllGatherPipeline:
             return param_group.transpose_weight_buffer
         else:
             return param_group.model_weight_buffer
+
+    def _persistent_allocators_can_fit(self, bucket_ids: List[int], bwd: bool) -> bool:
+        """Check pool capacity, including allocations live before this all-gather call."""
+        allocator_buckets = defaultdict(list)
+        for bucket_id in set(bucket_ids):
+            allocator = self.get_fsdp_buffer(bucket_id, bwd=bwd).temporary_bucket_allocator
+            allocator_buckets[allocator].append(bucket_id)
+
+        allocator_releasable_buckets = defaultdict(set)
+        for bucket_key, can_be_released in self.bucket_can_be_released.items():
+            if not can_be_released:
+                continue
+            bucket_id, release_bwd = bucket_key
+            allocator = self.get_fsdp_buffer(bucket_id, bwd=release_bwd).temporary_bucket_allocator
+            if bucket_id not in allocator_buckets[allocator]:
+                allocator_releasable_buckets[allocator].add(bucket_id)
+
+        return all(
+            allocator.can_allocate(requested_buckets, allocator_releasable_buckets[allocator])
+            for allocator, requested_buckets in allocator_buckets.items()
+        )
 
     @torch.no_grad()
     def async_bucket_gather(self, bucket_id, bwd) -> None:
