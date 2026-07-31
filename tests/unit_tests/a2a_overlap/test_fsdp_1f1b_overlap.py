@@ -167,9 +167,7 @@ class TestFSDP1F1BOverlap:
             )
             reference_selective_prefetch_calls = []
             if ref_fsdp.ddp_config.megatron_fsdp_prefetch_recompute_forward_weights:
-                original_reference_prefetch = (
-                    ref_fsdp.module.prefetch_recompute_forward_parameters
-                )
+                original_reference_prefetch = ref_fsdp.module.prefetch_recompute_forward_parameters
 
                 def _track_reference_selective_prefetch(module):
                     reference_selective_prefetch_calls.append(module)
