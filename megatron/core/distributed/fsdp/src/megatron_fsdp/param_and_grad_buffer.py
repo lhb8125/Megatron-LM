@@ -2742,11 +2742,19 @@ class ParamAndGradBuffer:
         to distinguish collective ordering mismatches from registered/unregistered
         tensor mixing without changing the collective schedule itself.
         """
+        if not self.already_registered or os.environ.get("MCORE_FSDP_UBR_TRACE") != "1":
+            return
+
+        trace_sequence = self._ubr_trace_sequence
+        self._ubr_trace_sequence += 1
+        trace_start = int(os.environ.get("MCORE_FSDP_UBR_TRACE_START", "0"))
         trace_limit = int(os.environ.get("MCORE_FSDP_UBR_TRACE_LIMIT", "512"))
         global_rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         trace_ranks_env = os.environ.get("MCORE_FSDP_UBR_TRACE_RANKS")
-        if trace_ranks_env:
+        if trace_ranks_env == "all":
+            trace_ranks = None
+        elif trace_ranks_env:
             trace_ranks = {int(rank) for rank in trace_ranks_env.split(",")}
         elif world_size >= 128:
             # A full DeepSeek iteration contains far more than 512 FSDP trace
@@ -2758,10 +2766,9 @@ class ParamAndGradBuffer:
         else:
             trace_ranks = None
         if (
-            not self.already_registered
-            or os.environ.get("MCORE_FSDP_UBR_TRACE") != "1"
-            or (trace_ranks is not None and global_rank not in trace_ranks)
-            or self._ubr_trace_sequence >= trace_limit
+            (trace_ranks is not None and global_rank not in trace_ranks)
+            or trace_sequence < trace_start
+            or trace_sequence >= trace_limit
         ):
             return
 
@@ -2782,7 +2789,7 @@ class ParamAndGradBuffer:
             "group=%s group_size=%s group_rank=%s group_first=%s group_last=%s "
             "group_hash=%s locations=%s",
             global_rank,
-            self._ubr_trace_sequence,
+            trace_sequence,
             stage,
             bucket_id,
             getattr(group, "group_desc", "unknown"),
@@ -2793,7 +2800,6 @@ class ParamAndGradBuffer:
             group_rank_hash,
             locations,
         )
-        self._ubr_trace_sequence += 1
 
     def _log_parameter_groups(self):
         """Compact log of FSDP parameter groups and their parameters."""
