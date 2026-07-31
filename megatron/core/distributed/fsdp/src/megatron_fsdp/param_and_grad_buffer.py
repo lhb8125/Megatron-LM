@@ -5282,6 +5282,7 @@ class AllGatherPipeline:
                     outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group(
                         is_expert_parallel=is_expert_parallel
                     )
+                    outer_input_staging = []
                     with _coalescing_manager(outer_fsdp_group, async_ops=False):
                         for bucket_id in buckets:
                             inner_dp_wbuf = self.get_fsdp_buffer(bucket_id, bwd=bwd)
@@ -5290,6 +5291,14 @@ class AllGatherPipeline:
                             outer_input_shard = inner_dp_wbuf.data[
                                 rank * shard_size : (rank + 1) * shard_size
                             ]
+                            if self.buffer.ddp_config.nccl_ub:
+                                # In-place all-gather selects a rank-dependent input
+                                # offset. Registered-buffer collectives require equal
+                                # pool-relative offsets across ranks, so use an
+                                # unregistered input copy for this outer gather. Keep
+                                # all copies alive until the coalesced group completes.
+                                outer_input_shard = outer_input_shard.clone()
+                                outer_input_staging.append(outer_input_shard)
                             self.buffer.trace_ubr_collective(
                                 "ag-outer-before",
                                 bucket_id,
