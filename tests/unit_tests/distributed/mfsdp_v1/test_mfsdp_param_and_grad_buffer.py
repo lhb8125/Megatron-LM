@@ -2,6 +2,7 @@
 
 import math
 
+import pytest
 import torch
 
 from megatron.core.distributed.fsdp.src.megatron_fsdp import param_and_grad_buffer as pgb_module
@@ -10,6 +11,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer impo
     MaxPoolAllocator,
     ParameterGroup,
     _get_parameter_groups,
+    _get_ubr_registration_groups,
     _max_pool_assignment_signature,
     _mem_pool_registration_signature,
     _tensor_mem_pool_location,
@@ -77,6 +79,58 @@ class _TestTensorLocation:
 
     def element_size(self):
         return self.tensor_element_size
+
+
+class _TestDistIndex:
+    def __init__(self, use_hybrid_fsdp):
+        self.use_hybrid_fsdp = use_hybrid_fsdp
+        self.dense = object()
+        self.expert = object()
+        self.dense_ag = object()
+        self.expert_ag = object()
+        self.outer = object()
+
+    def get_fsdp_group(self, is_expert_parallel=False, independent_all_gather=False):
+        if is_expert_parallel:
+            return self.expert_ag if independent_all_gather else self.expert
+        return self.dense_ag if independent_all_gather else self.dense
+
+    def get_outer_fsdp_group(self):
+        return self.outer
+
+
+def test_dense_inner_ubr_scope_selects_hsdp_dense_helper_group_only():
+    """HSDP inner parameter AG uses the base dense FSDP group, not outer/expert groups."""
+    dist_index = _TestDistIndex(use_hybrid_fsdp=True)
+
+    assert _get_ubr_registration_groups(dist_index, "dense_inner") == [dist_index.dense]
+
+
+def test_dense_inner_ubr_scope_prefers_independent_ag_without_hsdp():
+    """Non-HSDP parameter AG uses its independent communicator when one is provided."""
+    dist_index = _TestDistIndex(use_hybrid_fsdp=False)
+
+    assert _get_ubr_registration_groups(dist_index, "dense_inner") == [dist_index.dense_ag]
+
+
+def test_all_ubr_scope_preserves_every_registration_group():
+    """The default scope remains backward compatible with the previous group list."""
+    dist_index = _TestDistIndex(use_hybrid_fsdp=True)
+
+    assert _get_ubr_registration_groups(dist_index, "all") == [
+        dist_index.dense,
+        dist_index.expert,
+        dist_index.dense_ag,
+        dist_index.expert_ag,
+        dist_index.outer,
+    ]
+
+
+def test_ubr_scope_rejects_unknown_value():
+    dist_index = _TestDistIndex(use_hybrid_fsdp=True)
+
+    with pytest.raises(ValueError, match="Invalid FSDP UBR registration scope"):
+        _get_ubr_registration_groups(dist_index, "outer")
 
 
 def test_mem_pool_registration_signature_uses_registration_order():

@@ -160,6 +160,13 @@ Megatron-FSDP's `fully_shard_*` API has a comprehensive set of arguments for fin
     - Defaults to `False`, but will be automatically enabled in Megatron-LM.
 - `disable_symmetric_registration` will disable NCCL window (i.e. symmetric) registration when using `nccl_ub`. 
     - Defaults to `False`.
+- `fsdp_ubr_registration_scope` controls which FSDP communicators register the NCCL
+  memory pool. `all` preserves the default dense/expert/outer registration behavior.
+  `dense_inner` registers only the communicator used by dense inner-FSDP parameter
+  all-gathers; expert and outer-DP collectives remain unregistered and use ordinary
+  NCCL kernels. This is useful when dense inner AG dominates communication and the
+  outer-DP payload is small.
+    - Defaults to `all`.
 - `fsdp_double_buffer` will use persistently allocated double buffers for temporarily-defined memory needed in `MegatronFSDP` communications. Having persistent double buffers may increase peak VRAM utilization, but is required to register NCCL user buffers (`nccl_ub=True`) for `MegatronFSDP`. Currently, this is only supported for simple repetitive model structures such as GPT.
     - Defaults to `False`. Automatically overridden to `True` when `nccl_ub` is enabled.
 - `fsdp_buffer_count` controls the number of persistent buffers in each Megatron-FSDP communication pool. The default of two preserves conventional double buffering. Combined 1F1B overlap requires at least three because a backward/recompute unit, the current forward unit, and its forward-prefetched successor may be live concurrently.

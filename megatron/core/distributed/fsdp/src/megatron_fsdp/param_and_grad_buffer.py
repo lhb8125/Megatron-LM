@@ -107,6 +107,54 @@ except ImportError:
 NCCL_MEMORY_POOL = None
 
 
+def _get_ubr_registration_groups(
+    dist_index: FSDPDistributedIndex, registration_scope: str
+) -> List[torch.distributed.ProcessGroup]:
+    """Return the process groups that should register the FSDP NCCL memory pool.
+
+    ``dense_inner`` is intended for HSDP configurations where only dense inner-DP
+    parameter all-gathers are large enough to justify symmetric registration. Outer-DP
+    and expert collectives remain valid on tensors allocated from the pool without
+    registering that pool to their communicators; NCCL then selects its ordinary path.
+
+    HSDP parameter all-gathers use the dense helper buffer's base inner-FSDP group. In
+    non-HSDP configurations, prefer the independent dense all-gather group when present.
+    """
+    if registration_scope == "dense_inner":
+        if dist_index.use_hybrid_fsdp:
+            dense_param_ag_group = dist_index.get_fsdp_group(is_expert_parallel=False)
+        else:
+            dense_param_ag_group = dist_index.get_fsdp_group(
+                is_expert_parallel=False, independent_all_gather=True
+            ) or dist_index.get_fsdp_group(is_expert_parallel=False)
+        return [dense_param_ag_group] if dense_param_ag_group is not None else []
+
+    if registration_scope != "all":
+        raise ValueError(
+            f"Invalid FSDP UBR registration scope: {registration_scope}. "
+            "Expected one of: all, dense_inner."
+        )
+
+    groups = [dist_index.get_fsdp_group(is_expert_parallel=False)]
+    expert_group = dist_index.get_fsdp_group(is_expert_parallel=True)
+    if expert_group is not None:
+        groups.append(expert_group)
+    dense_ag_group = dist_index.get_fsdp_group(
+        is_expert_parallel=False, independent_all_gather=True
+    )
+    if dense_ag_group is not None:
+        groups.append(dense_ag_group)
+    expert_ag_group = dist_index.get_fsdp_group(
+        is_expert_parallel=True, independent_all_gather=True
+    )
+    if expert_ag_group is not None:
+        groups.append(expert_ag_group)
+    outer_group = dist_index.get_outer_fsdp_group()
+    if outer_group is not None:
+        groups.append(outer_group)
+    return groups
+
+
 def _mem_pool_registration_signature(pool) -> Tuple[int, ...]:
     """Return segment sizes in the order used by ProcessGroupNCCL registration.
 
@@ -2370,41 +2418,20 @@ class ParamAndGradBuffer:
                 logging.INFO,
                 f"[Rank {torch.distributed.get_rank()}] FSDP double buffer is enabled.",
             )
-            # Select the communicator groups to register FSDP buffers.
-            self.ubr_groups = [self.dist_index.get_fsdp_group(is_expert_parallel=False)]
-            if self.dist_index.get_fsdp_group(is_expert_parallel=True) is not None:
-                # Expert-DP group when using EP
-                self.ubr_groups.append(self.dist_index.get_fsdp_group(is_expert_parallel=True))
-            if (
-                self.dist_index.get_fsdp_group(
-                    is_expert_parallel=False, independent_all_gather=True
-                )
-                is not None
-            ):
-                # All-gather group used when overlapping all-gather and gradient reduction.
-                self.ubr_groups.append(
-                    self.dist_index.get_fsdp_group(
-                        is_expert_parallel=False, independent_all_gather=True
-                    )
-                )
-            if (
-                self.dist_index.get_fsdp_group(is_expert_parallel=True, independent_all_gather=True)
-                is not None
-            ):
-                # Expert all-gather group used when overlapping all-gather and gradient reduction.
-                self.ubr_groups.append(
-                    self.dist_index.get_fsdp_group(
-                        is_expert_parallel=True, independent_all_gather=True
-                    )
-                )
-            if self.dist_index.get_outer_fsdp_group() is not None:
-                # Outer/Inter-FSDP group when using hybrid FSDP (IB domain, registered last).
-                self.ubr_groups.append(self.dist_index.get_outer_fsdp_group())
+            # Register only the communicators selected by the configured UBR scope. A
+            # dense-inner-only scope deliberately leaves expert and outer-DP collectives
+            # on NCCL's ordinary path; this avoids registration cost and the requirement
+            # that their physical pool segment layouts match across ranks.
+            self.ubr_groups = _get_ubr_registration_groups(
+                self.dist_index, self.ddp_config.fsdp_ubr_registration_scope
+            )
 
             log_single_rank(
                 logger,
                 logging.INFO,
-                f"[ParamAndGradBuffer] FSDP UBRegistration Groups ({len(self.ubr_groups)}):",
+                f"[ParamAndGradBuffer] FSDP UBRegistration Scope "
+                f"{self.ddp_config.fsdp_ubr_registration_scope}; "
+                f"Groups ({len(self.ubr_groups)}):",
             )
             # All ranks in each group must participate in the collective to avoid deadlock.
             for i, group in enumerate(self.ubr_groups):
