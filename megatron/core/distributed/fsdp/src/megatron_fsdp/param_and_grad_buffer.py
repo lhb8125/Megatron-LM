@@ -201,6 +201,29 @@ def _tensor_mem_pool_location(pool, tensor: torch.Tensor) -> Optional[Tuple[int,
     return None
 
 
+def _build_ubr_arena_layout(
+    ordered_allocation_plan: Sequence[tuple], alignment: int = 256
+) -> Tuple[List[Tuple[int, tuple]], int]:
+    """Assign deterministic byte offsets inside one registered UBR arena.
+
+    A PyTorch MemPool can expose the same live allocations as differently ordered
+    physical segments across ranks, even when their logical allocation plan is
+    identical. Packing all registered tensors into one backing allocation makes the
+    ProcessGroupNCCL registration sequence a single segment and also guarantees equal
+    tensor offsets across ranks.
+    """
+    assert alignment > 0 and alignment & (alignment - 1) == 0
+    layout = []
+    next_offset = 0
+    for request in ordered_allocation_plan:
+        num_bytes = request[0]
+        aligned_offset = (next_offset + alignment - 1) // alignment * alignment
+        layout.append((aligned_offset, request))
+        next_offset = aligned_offset + num_bytes
+    arena_size = (next_offset + alignment - 1) // alignment * alignment
+    return layout, arena_size
+
+
 def _p_assert(cond: Any, s: str, raise_assertion_error: bool = True) -> None:
     """Alternate to ``assert`` when in the backward context to print the error
     message ``s`` since otherwise, it is swallowed.
@@ -3611,24 +3634,46 @@ class ParamAndGradBuffer:
                 )
 
             self._ubr_persistent_data = {}
-            with self.mem_alloc_context():
-                for _, request_kind, owner, size, dtype, buffer_name in ordered_allocation_plan:
+            if dense_inner_ubr:
+                arena_layout, arena_size = _build_ubr_arena_layout(ordered_allocation_plan)
+                with self.mem_alloc_context():
+                    self._ubr_arena = torch.empty(
+                        arena_size, dtype=torch.uint8, device=self.device, requires_grad=False
+                    )
+                global_memory_buffer = get_global_memory_buffer()
+                for byte_offset, request in arena_layout:
+                    num_bytes, request_kind, owner, size, dtype, buffer_name = request
+                    data = self._ubr_arena.narrow(0, byte_offset, num_bytes).view(dtype)
+                    assert data.numel() == size
                     if request_kind == "max_pool":
-                        get_global_memory_buffer().get_tensor([size], dtype=dtype, name=buffer_name)
+                        global_memory_buffer.buffer[(buffer_name, dtype)] = data
                         owner.record_materialized(size, dtype, buffer_name)
                     elif request_kind == "persistent":
-                        self._ubr_persistent_data[id(owner)] = torch.empty(
-                            size, dtype=dtype, device=self.device
-                        )
+                        self._ubr_persistent_data[id(owner)] = data
                     else:
                         raise AssertionError(f"Unexpected UBR allocation kind: {request_kind}")
+            else:
+                arena_size = None
+                with self.mem_alloc_context():
+                    for _, request_kind, owner, size, dtype, buffer_name in ordered_allocation_plan:
+                        if request_kind == "max_pool":
+                            get_global_memory_buffer().get_tensor(
+                                [size], dtype=dtype, name=buffer_name
+                            )
+                            owner.record_materialized(size, dtype, buffer_name)
+                        elif request_kind == "persistent":
+                            self._ubr_persistent_data[id(owner)] = torch.empty(
+                                size, dtype=dtype, device=self.device
+                            )
+                        else:
+                            raise AssertionError(f"Unexpected UBR allocation kind: {request_kind}")
             torch.cuda.synchronize()
             log_single_rank(
                 logger,
                 logging.INFO,
                 f"[MCORE][FSDP][Manual REG] Materialized {len(allocation_plan)} buffers "
                 f"({sum(item[0] for item in allocation_plan)} requested bytes) in global order "
-                f"(logical plan {logical_plan_hash}).",
+                f"(logical plan {logical_plan_hash}, arena bytes {arena_size}).",
             )
 
             # Expert parameter AG uses an unregistered communicator in the dense-inner

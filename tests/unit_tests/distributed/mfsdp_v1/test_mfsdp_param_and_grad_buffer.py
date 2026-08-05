@@ -10,6 +10,7 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer impo
     BucketingPolicy,
     MaxPoolAllocator,
     ParameterGroup,
+    _build_ubr_arena_layout,
     _get_parameter_groups,
     _get_ubr_registration_groups,
     _max_pool_assignment_signature,
@@ -152,6 +153,20 @@ def test_mem_pool_registration_signature_ignores_local_addresses():
     second = _TestMemoryPool([{"total_size": 1024, "address": 0x9000}])
 
     assert _mem_pool_registration_signature(first) == _mem_pool_registration_signature(second)
+
+
+def test_ubr_arena_layout_aligns_requests_in_logical_order():
+    requests = [
+        (17, "max_pool", object(), 17, torch.uint8, "first"),
+        (512, "persistent", object(), 128, torch.float32, "second"),
+        (33, "max_pool", object(), 33, torch.uint8, "third"),
+    ]
+
+    layout, arena_size = _build_ubr_arena_layout(requests, alignment=256)
+
+    assert [offset for offset, _ in layout] == [0, 256, 768]
+    assert [request[-1] for _, request in layout] == ["first", "second", "third"]
+    assert arena_size == 1024
 
 
 def test_tensor_mem_pool_location_uses_registration_order_and_offset():

@@ -166,9 +166,11 @@ Megatron-FSDP's `fully_shard_*` API has a comprehensive set of arguments for fin
   all-gathers; expert and outer-DP collectives remain unregistered and use ordinary
   NCCL kernels. It also isolates dense parameter and transpose-parameter MaxPool
   storage from the ordinary expert pool so rank-dependent expert traffic cannot change
-  the registered pool's physical segment order. This is useful when dense inner AG
-  dominates communication and the outer-DP payload is small. The isolated-pool path
-  requires `maxpool_double_buffer=True`.
+  the registered pool's physical segment order, then packs the registered dense buffers
+  into one aligned arena so their offsets and the single physical registration segment
+  are identical across ranks. This is useful when dense inner AG dominates communication
+  and the outer-DP payload is small. The isolated-pool path requires
+  `maxpool_double_buffer=True`.
     - Defaults to `all`.
 - `fsdp_double_buffer` will use persistently allocated double buffers for temporarily-defined memory needed in `MegatronFSDP` communications. Having persistent double buffers may increase peak VRAM utilization, but is required to register NCCL user buffers (`nccl_ub=True`) for `MegatronFSDP`. Currently, this is only supported for simple repetitive model structures such as GPT.
     - Defaults to `False`. Automatically overridden to `True` when `nccl_ub` is enabled.
