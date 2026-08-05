@@ -1031,6 +1031,7 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         size: int = 2,
         dtype_fn: Callable[["ParameterGroup"], torch.dtype] = operator.attrgetter("dtype"),
         fallback_to_persistent_buffer: bool = False,
+        bucket_filter: Optional[Callable[[int, "ParameterGroup"], bool]] = None,
     ):
         self.name = name
         self.fsdp_param_groups = fsdp_param_groups
@@ -1039,10 +1040,13 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         self.bucket_alloc_index = {}  # map bucket ID to offset
         self.max_dtype_bucket_sizes = {}  # dtype -> [bucket sizes from smallest to largest]
         self.dtype_fn = dtype_fn
+        self.bucket_filter = bucket_filter
 
         # Build a mapping from FSDP unit id to its associated bucket ids.
         fsdp_unit_buckets = defaultdict(list)
         for bucket_id, param_group in enumerate(self.fsdp_param_groups):
+            if self.bucket_filter is not None and not self.bucket_filter(bucket_id, param_group):
+                continue
             # Filter out FSDP non-units. Only FSDP units can be double-buffered.
             if param_group.fsdp_unit_id is None:
                 continue
@@ -1059,7 +1063,11 @@ class MaxPoolAllocator(TemporaryBucketAllocator):
         assert (
             len(self.fsdp_double_buffer_units) > 0
         ), "Found no FSDP units to use max-sized buffering."
-        if any(pg.fsdp_unit_id is None for pg in self.fsdp_param_groups):
+        if any(
+            pg.fsdp_unit_id is None
+            for bucket_id, pg in enumerate(self.fsdp_param_groups)
+            if self.bucket_filter is None or self.bucket_filter(bucket_id, pg)
+        ):
             log_single_rank(
                 logger,
                 logging.INFO,
@@ -2896,7 +2904,13 @@ class ParamAndGradBuffer:
         if persistent_data is None:
             return torch.empty(size, dtype=dtype, device=self.device)
 
-        data = persistent_data.pop(id(buffer))
+        data = persistent_data.pop(id(buffer), None)
+        if data is None:
+            assert buffer.mem_alloc_context == nullcontext, (
+                "Registered FSDP parameter buffer was not included in the canonical "
+                "UBR allocation plan."
+            )
+            return torch.empty(size, dtype=dtype, device=self.device)
         assert data.numel() == size, f"Preallocated UBR size mismatch: {data.numel()} != {size}"
         assert data.dtype == dtype, f"Preallocated UBR dtype mismatch: {data.dtype} != {dtype}"
         return data
@@ -3111,18 +3125,81 @@ class ParamAndGradBuffer:
                 if self.ddp_config.megatron_fsdp_max_pool_double_buffer
                 else FixedPoolAllocator
             )
-            self.weight_alloc = FIXED_POOL_ALLOC_TYPE(
-                name="fsdp_params",
-                fsdp_param_groups=self.parameter_groups,
-                size=ub_buffer_num,
-                fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
+            dense_inner_ubr = (
+                self.ddp_config.nccl_ub
+                and self.ddp_config.fsdp_ubr_registration_scope == "dense_inner"
             )
-            self.transpose_weight_alloc = FIXED_POOL_ALLOC_TYPE(
-                name="fsdp_fp8_transpose_params",
-                fsdp_param_groups=self.parameter_groups,
-                size=ub_buffer_num,
-                fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
-            )
+            self.expert_weight_alloc = None
+            self.expert_transpose_weight_alloc = None
+            if dense_inner_ubr:
+                if FIXED_POOL_ALLOC_TYPE is not MaxPoolAllocator:
+                    raise ValueError(
+                        "Dense-inner-only FSDP UBR requires "
+                        "megatron_fsdp_max_pool_double_buffer=True."
+                    )
+
+                # Keep the registered dense inner-AG buffers in a pool that cannot be
+                # first-touched or resized by rank-dependent expert/outer-DP traffic.
+                # Expert collectives retain their own ordinary MaxPool allocator.
+                dense_bucket_filter = lambda _, pg: not pg.is_expert_param  # noqa: E731
+                expert_bucket_filter = lambda _, pg: pg.is_expert_param  # noqa: E731
+                self.weight_alloc = MaxPoolAllocator(
+                    name="fsdp_dense_params",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                    bucket_filter=dense_bucket_filter,
+                )
+                self.transpose_weight_alloc = MaxPoolAllocator(
+                    name="fsdp_dense_fp8_transpose_params",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                    bucket_filter=dense_bucket_filter,
+                )
+                if any(
+                    pg.is_expert_param and pg.fsdp_unit_id is not None
+                    for pg in self.parameter_groups
+                ):
+                    self.expert_weight_alloc = MaxPoolAllocator(
+                        name="fsdp_expert_params",
+                        fsdp_param_groups=self.parameter_groups,
+                        size=ub_buffer_num,
+                        fallback_to_persistent_buffer=(
+                            self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                        ),
+                        bucket_filter=expert_bucket_filter,
+                    )
+                    self.expert_transpose_weight_alloc = MaxPoolAllocator(
+                        name="fsdp_expert_fp8_transpose_params",
+                        fsdp_param_groups=self.parameter_groups,
+                        size=ub_buffer_num,
+                        fallback_to_persistent_buffer=(
+                            self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                        ),
+                        bucket_filter=expert_bucket_filter,
+                    )
+            else:
+                self.weight_alloc = FIXED_POOL_ALLOC_TYPE(
+                    name="fsdp_params",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                )
+                self.transpose_weight_alloc = FIXED_POOL_ALLOC_TYPE(
+                    name="fsdp_fp8_transpose_params",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                )
             # Resolve gradient bucket dtype used for MaxPoolAllocator bucket allocation
             # planning and FixedPoolAllocator unit symmetries. Falls back to each
             # parameter group's main `grad_dtype` when no comm-dtype override is set.
@@ -3154,10 +3231,17 @@ class ParamAndGradBuffer:
                         self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
                     ),
                 )
-            self.double_buf_units = self.weight_alloc.fsdp_double_buffer_units
+            self.double_buf_units = list(self.weight_alloc.fsdp_double_buffer_units)
+            if self.expert_weight_alloc is not None:
+                self.double_buf_units = list(
+                    set(self.double_buf_units)
+                    | set(self.expert_weight_alloc.fsdp_double_buffer_units)
+                )
         else:
             self.weight_alloc = StorageResizeBasedBucketAllocator()
             self.transpose_weight_alloc = StorageResizeBasedBucketAllocator()
+            self.expert_weight_alloc = None
+            self.expert_transpose_weight_alloc = None
             self.main_grad_alloc = None
             if self.dist_index.use_hybrid_fsdp:
                 # Only required for custom communication dtype buffer allocation
@@ -3171,6 +3255,27 @@ class ParamAndGradBuffer:
 
         # For all bucket groups (partitioned parameter groups)...
         for group_id, group in enumerate(self.parameter_groups):
+            dense_inner_ubr = (
+                self.ddp_config.nccl_ub
+                and self.ddp_config.fsdp_ubr_registration_scope == "dense_inner"
+            )
+            param_mem_alloc_context = (
+                nullcontext if dense_inner_ubr and group.is_expert_param else self.mem_alloc_context
+            )
+            weight_alloc = (
+                self.expert_weight_alloc
+                if dense_inner_ubr and group.is_expert_param
+                else self.weight_alloc
+            )
+            transpose_weight_alloc = (
+                self.expert_transpose_weight_alloc
+                if dense_inner_ubr and group.is_expert_param
+                else self.transpose_weight_alloc
+            )
+            if dense_inner_ubr and group.is_expert_param:
+                assert weight_alloc is not None
+                assert transpose_weight_alloc is not None
+
             main_buf_extra_kwargs = {}
             if should_create_hfsdp_helper_buffers:
                 # DP-Outer + DP-Shard
@@ -3243,10 +3348,10 @@ class ParamAndGradBuffer:
                     # using basic HSDP or FSDP.
                     data_parallel_group=model_wbuf_dp_group,
                     is_transpose_buffer=False,
-                    temporary_bucket_allocator=self.weight_alloc,
+                    temporary_bucket_allocator=weight_alloc,
                     bucket_id=group_id,
                     chunk_size_factor=group.chunk_size_factor,
-                    mem_alloc_context=self.mem_alloc_context,
+                    mem_alloc_context=param_mem_alloc_context,
                     **main_buf_extra_kwargs,
                 )
                 if should_create_transpose_weight_buffer:
@@ -3259,10 +3364,10 @@ class ParamAndGradBuffer:
                         device=self.device,
                         data_parallel_group=main_buf_dp_group,
                         is_transpose_buffer=True,
-                        temporary_bucket_allocator=self.transpose_weight_alloc,
+                        temporary_bucket_allocator=transpose_weight_alloc,
                         bucket_id=group_id,
                         chunk_size_factor=group.chunk_size_factor,
-                        mem_alloc_context=self.mem_alloc_context,
+                        mem_alloc_context=param_mem_alloc_context,
                         **main_buf_extra_kwargs,
                     )
 
@@ -3282,7 +3387,7 @@ class ParamAndGradBuffer:
                     data_parallel_group=main_buf_dp_group,
                     bucket_id=group_id,
                     chunk_size_factor=group.chunk_size_factor,
-                    mem_alloc_context=self.mem_alloc_context,
+                    mem_alloc_context=param_mem_alloc_context,
                     **main_buf_extra_kwargs,
                 )
 
@@ -3387,14 +3492,27 @@ class ParamAndGradBuffer:
             # can first-touch the slots from rank-dependent CUDA stream timings.
             weight_specs = {}
             transpose_weight_specs = {}
+            expert_weight_specs = {}
+            expert_transpose_weight_specs = {}
+            dense_inner_ubr = self.ddp_config.fsdp_ubr_registration_scope == "dense_inner"
             for bucket_id, group in enumerate(self.parameter_groups):
                 weight_buffer = group.model_weight_buffer
                 if weight_buffer is not None and weight_buffer.is_data_distributed:
-                    weight_specs[bucket_id] = (weight_buffer.bucket_index.size, weight_buffer.dtype)
+                    target_specs = (
+                        expert_weight_specs
+                        if dense_inner_ubr and group.is_expert_param
+                        else weight_specs
+                    )
+                    target_specs[bucket_id] = (weight_buffer.bucket_index.size, weight_buffer.dtype)
 
                 transpose_buffer = group.transpose_weight_buffer
                 if transpose_buffer is not None and transpose_buffer.is_data_distributed:
-                    transpose_weight_specs[bucket_id] = (
+                    target_specs = (
+                        expert_transpose_weight_specs
+                        if dense_inner_ubr and group.is_expert_param
+                        else transpose_weight_specs
+                    )
+                    target_specs[bucket_id] = (
                         transpose_buffer.bucket_index.size,
                         transpose_buffer.dtype,
                     )
@@ -3405,6 +3523,8 @@ class ParamAndGradBuffer:
             )
             persistent_buffers = []
             for group in self.parameter_groups:
+                if dense_inner_ubr and group.is_expert_param:
+                    continue
                 group_name_digest = hashlib.sha256(
                     ",".join(sorted(self.param_to_name[param] for param in group.params)).encode()
                 ).hexdigest()[:16]
@@ -3511,6 +3631,18 @@ class ParamAndGradBuffer:
                 f"(logical plan {logical_plan_hash}).",
             )
 
+            # Expert parameter AG uses an unregistered communicator in the dense-inner
+            # scope. Materialize its independent MaxPool outside the symmetric pool so
+            # expert/outer traffic cannot alter the registered physical segment order.
+            if dense_inner_ubr:
+                ordinary_allocator_specs = (
+                    (self.expert_weight_alloc, expert_weight_specs),
+                    (self.expert_transpose_weight_alloc, expert_transpose_weight_specs),
+                )
+                for allocator, bucket_specs in ordinary_allocator_specs:
+                    if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
+                        allocator.materialize(bucket_specs, mem_alloc_context=nullcontext)
+
         reset_context_args = {"init_param_with_fp8": self.ddp_config.fp8_param_gather}
         module_reset_flag = {}
         if self.reset_parameters_for_meta_device_init_module:
@@ -3545,7 +3677,7 @@ class ParamAndGradBuffer:
         for group in self.parameter_groups:
             wbuf = group.model_weight_buffer
             if wbuf:
-                with self.mem_alloc_context():
+                with wbuf.mem_alloc_context():
                     if group.hfsdp_helper_wbuf:
                         _init_hfsdp_helper_and_dp_buffer_data(
                             group.hfsdp_helper_wbuf,
@@ -3567,7 +3699,7 @@ class ParamAndGradBuffer:
 
             tbuf = group.transpose_weight_buffer
             if tbuf:
-                with self.mem_alloc_context():
+                with tbuf.mem_alloc_context():
                     if group.hfsdp_helper_wbuf:
                         _init_hfsdp_helper_and_dp_buffer_data(
                             group.hfsdp_helper_wtbuf,

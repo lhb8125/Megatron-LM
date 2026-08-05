@@ -233,6 +233,40 @@ def test_max_pool_assignment_signature_tracks_logical_bucket_slots():
     assert {assignment[5] for assignment in first_signature} == {0, 1}
 
 
+def test_max_pool_bucket_filter_keeps_dense_and_expert_slots_disjoint():
+    """Dense-inner UBR cannot share registered MaxPool slots with expert traffic."""
+    dense_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
+    expert_param = torch.nn.Parameter(torch.empty(8, dtype=torch.bfloat16))
+    parameter_groups = [
+        ParameterGroup([dense_param], dtype=torch.bfloat16, fsdp_unit_id=0),
+        ParameterGroup([expert_param], dtype=torch.bfloat16, is_expert_param=True, fsdp_unit_id=0),
+    ]
+
+    dense_allocator = MaxPoolAllocator(
+        "dense_pool",
+        parameter_groups,
+        size=2,
+        bucket_filter=lambda _, group: not group.is_expert_param,
+    )
+    expert_allocator = MaxPoolAllocator(
+        "expert_pool",
+        parameter_groups,
+        size=2,
+        bucket_filter=lambda _, group: group.is_expert_param,
+    )
+
+    assert set(dense_allocator.bucket_alloc_index) == {0}
+    assert set(expert_allocator.bucket_alloc_index) == {1}
+    assert dense_allocator.materialization_requests({0: (16, torch.bfloat16)}) == [
+        (16, torch.bfloat16, "dense_pool_0_torch.bfloat16_0"),
+        (16, torch.bfloat16, "dense_pool_1_torch.bfloat16_0"),
+    ]
+    assert expert_allocator.materialization_requests({1: (32, torch.bfloat16)}) == [
+        (32, torch.bfloat16, "expert_pool_0_torch.bfloat16_0"),
+        (32, torch.bfloat16, "expert_pool_1_torch.bfloat16_0"),
+    ]
+
+
 def test_multi_use_embedding_gets_separate_bucket_when_sharded():
     """Root-handled multi-use embeddings must not share a bucket with regular-hook params."""
     module = _MultiUseEmbeddingTestModule()
