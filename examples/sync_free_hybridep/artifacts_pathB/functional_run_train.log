@@ -1,0 +1,1087 @@
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+using world size: 8, data-parallel size: 8, context-parallel size: 1, hierarchical context-parallel sizes: None, tensor-model-parallel size: 1, pipeline-model-parallel size: 1
+Number of virtual stages per pipeline stage: None
+accumulate and all-reduce gradients in fp32 for bfloat16 data type.
+using torch.bfloat16 for parameters ...
+------------------------ arguments ------------------------
+  _is_global_batch_size_explicitly_specified ...... True
+  account_for_embedding_in_pipeline_split ......... False
+  account_for_loss_in_pipeline_split .............. False
+  accumulate_allreduce_grads_in_fp32 .............. True
+  activation_func_clamp_value ..................... None
+  activation_offload_fraction ..................... 1.0
+  adam_beta1 ...................................... 0.9
+  adam_beta2 ...................................... 0.95
+  adam_eps ........................................ 1e-08
+  add_bias_linear ................................. False
+  add_position_embedding .......................... True
+  add_qkv_bias .................................... False
+  adlr_autoresume ................................. False
+  adlr_autoresume_interval ........................ 1000
+  align_grad_reduce ............................... True
+  align_param_gather .............................. False
+  allow_ambiguous_pad_tokens ...................... False
+  app_tag_run_name ................................ None
+  app_tag_run_version ............................. 0.0.0
+  apply_dsa_kernel_fusion ......................... None
+  apply_query_key_layer_scaling ................... False
+  apply_residual_connection_post_layernorm ........ False
+  apply_rope_fusion ............................... True
+  apply_wd_to_qk_layernorm ........................ False
+  async_ckpt_cpu_priority ......................... 10
+  async_ckpt_io_priority .......................... 3
+  async_ckpt_use_cpu_shm .......................... False
+  async_save ...................................... False
+  async_strategy .................................. mcore
+  attention_backend ............................... AttnBackend.auto
+  attention_dropout ............................... 0.0
+  attention_output_gate ........................... False
+  attention_softmax_in_fp32 ....................... False
+  auto_detect_ckpt_format ......................... False
+  barrier_with_L1_time ............................ True
+  batch_invariant_mode ............................ False
+  bert_binary_head ................................ True
+  bert_embedder_type .............................. megatron
+  bert_load ....................................... None
+  bf16 ............................................ True
+  bias_dropout_fusion ............................. True
+  bias_gelu_fusion ................................ False
+  bias_swiglu_fusion .............................. True
+  biencoder_projection_dim ........................ 0
+  biencoder_shared_query_context_model ............ False
+  block_data_path ................................. None
+  cache_mla_latents ............................... False
+  calc_ft_timeouts ................................ False
+  calculate_per_token_loss ........................ False
+  chat_template ................................... None
+  check_for_large_grads ........................... False
+  check_for_nan_in_loss_and_grad .................. False
+  check_for_spiky_loss ............................ False
+  check_weight_hash_across_dp_replicas_interval ... None
+  ckpt_assume_constant_structure .................. False
+  ckpt_convert_format ............................. None
+  ckpt_convert_save ............................... None
+  ckpt_convert_update_legacy_dist_opt_format ...... False
+  ckpt_format ..................................... torch_dist
+  ckpt_fully_parallel_load ........................ False
+  ckpt_fully_parallel_load_exchange_algo .......... broadcast
+  ckpt_fully_parallel_load_process_group .......... dp
+  ckpt_fully_parallel_save ........................ True
+  ckpt_fully_parallel_save_deprecated ............. False
+  ckpt_fully_parallel_save_process_group .......... dp
+  ckpt_load_validate_sharding_integrity ........... True
+  ckpt_step ....................................... None
+  classes_fraction ................................ 1.0
+  clip_grad ....................................... 1.0
+  clone_scatter_output_in_embedding ............... True
+  config_logger_dir ............................... 
+  consumed_train_samples .......................... 0
+  consumed_valid_samples .......................... 0
+  context_parallel_size ........................... 1
+  cp_comm_type .................................... ['p2p']
+  cp_partition_mode ............................... zigzag
+  cpu_offloading_num_layers ....................... 0
+  cpu_offloading_retain_pinned_cpu_buffers ........ False
+  create_all_gather_group ......................... False
+  create_attention_mask_in_dataloader ............. False
+  cross_entropy_fusion_impl ....................... native
+  cross_entropy_loss_fusion ....................... True
+  csa_compress_ratios ............................. None
+  csa_compress_rotary_base ........................ 40000.0
+  csa_dense_mode .................................. False
+  csa_window_size ................................. 128
+  cuda_graph_dynamic_microbatches ................. False
+  cuda_graph_impl ................................. none
+  cuda_graph_modules .............................. []
+  cuda_graph_warmup_steps ......................... 3
+  data_args_path .................................. None
+  data_cache_path ................................. None
+  data_parallel_random_init ....................... False
+  data_parallel_sharding_strategy ................. optim_grads_params
+  data_parallel_size .............................. 8
+  data_path ....................................... None
+  data_per_class_fraction ......................... 1.0
+  data_sharding ................................... True
+  dataloader_defer_npy_index_mmap ................. False
+  dataloader_fast_cache_load ...................... False
+  dataloader_inter_document_masking ............... False
+  dataloader_type ................................. single
+  ddp_average_in_collective ....................... False
+  ddp_bucket_size ................................. None
+  ddp_num_buckets ................................. None
+  ddp_pad_buckets_for_high_nccl_busbw ............. False
+  ddp_param_name_patterns_for_fp32_local_accumulation  []
+  ddp_reduce_scatter_with_fp32_accumulation ....... False
+  decode_only_cuda_graphs ......................... False
+  decoder_first_pipeline_num_layers ............... None
+  decoder_last_pipeline_num_layers ................ None
+  decoder_num_layers .............................. None
+  decoder_seq_length .............................. None
+  decoupled_lr .................................... None
+  decoupled_min_lr ................................ None
+  decrease_batch_size_if_needed ................... False
+  defer_embedding_wgrad_compute ................... False
+  delay_offload_until_cuda_graph .................. False
+  delay_wgrad_compute ............................. True
+  delta_offload_bytes_across_pp_ranks ............. 0
+  dense_grouped_gemm .............................. False
+  deprecated_use_mcore_models ..................... True
+  deterministic_mode .............................. False
+  dino_bottleneck_size ............................ 256
+  dino_freeze_last_layer .......................... 1
+  dino_head_hidden_size ........................... 2048
+  dino_local_crops_number ......................... 10
+  dino_local_img_size ............................. 96
+  dino_norm_last_layer ............................ False
+  dino_teacher_temp ............................... 0.07
+  dino_warmup_teacher_temp ........................ 0.04
+  dino_warmup_teacher_temp_epochs ................. 30
+  disable_bf16_reduced_precision_matmul ........... False
+  disable_grad_buffers_cpu_backup ................. False
+  disable_jit_fuser ............................... False
+  disable_msc_deprecated .......................... False
+  disable_param_buffers_cpu_backup ................ False
+  disable_straggler_on_startup .................... False
+  disable_symmetric_registration .................. False
+  dist_ckpt_format_deprecated ..................... None
+  dist_ckpt_optim_fully_reshardable ............... False
+  dist_ckpt_save_pre_mcore_014 .................... False
+  dist_ckpt_strictness ............................ assume_ok_unexpected
+  dist_ckpt_workers ............................... 1
+  distrib_optim_fully_reshardable_mem_efficient ... False
+  distribute_saved_activations .................... False
+  distributed_backend ............................. nccl
+  distributed_timeout_minutes ..................... 30
+  distributed_timeout_seconds_after_init .......... None
+  dsa_indexer_head_dim ............................ None
+  dsa_indexer_k_norm_epsilon ...................... None
+  dsa_indexer_k_norm_fp32 ......................... False
+  dsa_indexer_loss_coeff .......................... None
+  dsa_indexer_n_heads ............................. None
+  dsa_indexer_rope_interleaved .................... False
+  dsa_indexer_rotate_activation ................... True
+  dsa_indexer_scoring_relu ........................ True
+  dsa_indexer_skip_topk_offset .................... 0
+  dsa_indexer_topk ................................ None
+  dsa_indexer_topk_freq ........................... 1
+  dsa_indexer_use_sparse_loss ..................... False
+  dsa_kernel_backend .............................. None
+  dump_param_to_param_group_map ................... None
+  dynamic_context_parallel ........................ False
+  embedding_init_method_std ....................... None
+  embedding_path .................................. None
+  empty_unused_memory_level ....................... 0
+  enable_chunked_prefill .......................... False
+  enable_cuda_graph ............................... False
+  enable_experimental ............................. True
+  enable_ft_package ............................... False
+  enable_full_sharding_in_hsdp .................... False
+  enable_gpt_oss .................................. False
+  enable_hyper_connections ........................ False
+  enable_msc ...................................... False
+  enable_one_logger ............................... True
+  encoder_num_layers .............................. 8
+  encoder_seq_length .............................. 4096
+  end_weight_decay ................................ 0.1
+  eod_mask_loss ................................... False
+  ep_overlap_early_attn_memory_release ............ False
+  error_injection_rate ............................ 0
+  error_injection_type ............................ transient_error
+  eval_global_batch_size .......................... 64
+  eval_interval ................................... 100000
+  eval_iters ...................................... 0
+  eval_micro_batch_size ........................... 1
+  evidence_data_path .............................. None
+  exit_duration_in_mins ........................... None
+  exit_interval ................................... None
+  exit_on_missing_checkpoint ...................... False
+  exit_signal ..................................... 15
+  exit_signal_handler ............................. False
+  exit_signal_handler_for_dataloader .............. False
+  exit_signal_handler_for_training ................ False
+  exp_avg_dtype ................................... torch.bfloat16
+  exp_avg_sq_dtype ................................ torch.bfloat16
+  experimental_attention_variant .................. None
+  expert_model_parallel_size ...................... 8
+  expert_tensor_parallel_size ..................... 1
+  export_default_te_spec .......................... False
+  export_force_local_attention .................... False
+  export_kd_cfg ................................... None
+  export_kd_teacher_ckpt_format ................... None
+  export_kd_teacher_load .......................... None
+  export_kd_teacher_model_config .................. None
+  export_kv_cache_quant ........................... none
+  export_legacy_megatron .......................... False
+  export_model_type ............................... GPTModel
+  export_moe_apply_probs_on_input ................. False
+  export_offline_model ............................ False
+  export_qk_l2_norm ............................... False
+  export_quant_cfg ................................ None
+  export_real_quant_cfg ........................... None
+  export_te_mcore_model ........................... False
+  external_cuda_graph ............................. False
+  fake_process_group .............................. False
+  fallback_to_eager_attn .......................... False
+  fault_injector_delay_start_iteration ............ None
+  fault_injector_fault_delay ...................... None
+  fault_injector_fault_probabilities .............. None
+  fault_injector_fault_types ...................... None
+  fault_injector_mtti_seconds ..................... None
+  fault_injector_num_ranks ........................ None
+  fault_injector_offset_seconds ................... None
+  fault_injector_ranks ............................ None
+  fault_injector_seed ............................. None
+  ffn_hidden_size ................................. 6144
+  fim_data ........................................ False
+  fim_eod_token ................................... <|endoftext|>
+  fim_fragment_rate ............................... None
+  fim_middle_token ................................ <fim_middle>
+  fim_no_prefix ................................... None
+  fim_pad_token ................................... <fim_pad>
+  fim_prefix_token ................................ <fim_prefix>
+  fim_rate ........................................ 0.5
+  fim_split_sample ................................ None
+  fim_spm_rate .................................... 0.5
+  fim_suffix_token ................................ <fim_suffix>
+  fine_grained_activation_offloading .............. False
+  fine_grained_offloading_max_inflight_offloads ... None
+  finetune ........................................ False
+  finetune_data_split ............................. train
+  finetune_hf_dataset ............................. None
+  first_last_layers_bf16 .......................... False
+  flash_decode .................................... False
+  flight_recorder_dump_on_timeout ................. True
+  flight_recorder_dump_path ....................... None
+  flight_recorder_extra_dump_on_exec .............. True
+  flight_recorder_include_only_active ............. True
+  flight_recorder_include_stack_trace ............. False
+  flight_recorder_trace_buffer_size ............... 2000
+  fp16 ............................................ False
+  fp16_lm_cross_entropy ........................... False
+  fp32_residual_connection ........................ False
+  fp4 ............................................. None
+  fp4_param_gather ................................ False
+  fp4_quantizer_factory ........................... None
+  fp4_recipe ...................................... nvfp4
+  fp8 ............................................. e4m3
+  fp8_amax_compute_algo ........................... most_recent
+  fp8_amax_history_len ............................ 1
+  fp8_interval .................................... 1
+  fp8_margin ...................................... 0
+  fp8_output_proj ................................. False
+  fp8_param_gather ................................ True
+  fp8_quantizer_factory ........................... None
+  fp8_recipe ...................................... mxfp8
+  fp8_wgrad ....................................... True
+  freeze_all_layers ............................... False
+  freeze_base_for_mtp ............................. False
+  fsdp_db_use_persist_buf_on_alloc_fail ........... False
+  fsdp_double_buffer .............................. False
+  fsdp_manual_registration ........................ False
+  ft_num_warmup_iters ............................. 5
+  full_validation ................................. False
+  fused_residual_rmsnorm .......................... False
+  gdn_conv_pad_alignment .......................... None
+  gdn_pre_gated_delta_rule_fusion ................. False
+  global_batch_size ............................... 64
+  glu_linear_offset ............................... 0.0
+  gpu_sniff_test_interval ......................... None
+  grad_reduce_in_bf16 ............................. False
+  gradient_accumulation_fusion .................... True
+  gradient_reduce_div_fusion ...................... True
+  group_query_attention ........................... True
+  grpo_clamp_eps_lower ............................ 0.01
+  grpo_clamp_eps_upper ............................ 0.01
+  grpo_entropy_term_weight ........................ 0.0
+  grpo_filter_groups_with_same_reward ............. False
+  grpo_group_size ................................. 2
+  grpo_iterations ................................. 2
+  grpo_kl_beta .................................... 0.001
+  grpo_prompts_per_step ........................... 32
+  head_lr_mult .................................... 1.0
+  head_wise_attn_gate ............................. False
+  heterogeneous_layers_config_encoded_json ........ None
+  heterogeneous_layers_config_path ................ None
+  hidden_dropout .................................. 0.0
+  hidden_size ..................................... 2048
+  hierarchical_context_parallel_sizes ............. None
+  high_priority_a2a_comm_stream ................... False
+  high_priority_stream_groups ..................... []
+  hybrid_context_parallel ......................... False
+  hybrid_layer_pattern ............................ None
+  hybrid_override_pattern ......................... None
+  hysteresis ...................................... 2
+  ict_head_size ................................... None
+  ict_load ........................................ None
+  img_h ........................................... 224
+  img_w ........................................... 224
+  indexer_batch_size .............................. 128
+  indexer_log_interval ............................ 1000
+  inference_batch_times_seqlen_threshold .......... -1
+  inference_coordinator_port ...................... None
+  inference_cuda_graph_all_prefills ............... False
+  inference_cuda_graph_scope ...................... InferenceCudaGraphScope.none
+  inference_disable_ep_consensus .................. False
+  inference_disable_triton_nvls_kernels ........... False
+  inference_dynamic_batching ...................... False
+  inference_dynamic_batching_async_sched_mode ..... legacy
+  inference_dynamic_batching_block_size ........... 256
+  inference_dynamic_batching_buffer_size_gb ....... 40.0
+  inference_dynamic_batching_cuda_graph_max_tokens  16384
+  inference_dynamic_batching_cuda_graph_mixed_prefill_count  16
+  inference_dynamic_batching_cuda_graph_sizing_distribution  exponential
+  inference_dynamic_batching_enable_prefix_caching  False
+  inference_dynamic_batching_logprobs_mode ........ raw_logprobs
+  inference_dynamic_batching_mamba_memory_ratio ... None
+  inference_dynamic_batching_max_requests ......... None
+  inference_dynamic_batching_max_tokens ........... None
+  inference_dynamic_batching_num_cuda_graphs ...... 16
+  inference_dynamic_batching_paused_buffer_size_gb  None
+  inference_dynamic_batching_prefix_caching_coordinator_policy  first_prefix_block
+  inference_dynamic_batching_prefix_caching_eviction_policy  ref_zero
+  inference_dynamic_batching_prefix_caching_mamba_gb  None
+  inference_dynamic_batching_prefix_caching_routing_alpha  0.5
+  inference_dynamic_batching_sampling_backend ..... torch
+  inference_dynamic_batching_track_generated_token_events  False
+  inference_dynamic_batching_track_paused_request_events  False
+  inference_dynamic_batching_unified_memory_level . 0
+  inference_fuse_tp_communication ................. False
+  inference_grouped_gemm_backend .................. vllm
+  inference_logging_step_interval ................. 0
+  inference_max_requests .......................... 8
+  inference_max_seq_length ........................ 2560
+  inference_moe_disable_fused_quant_kernels ....... False
+  inference_moe_token_dispatcher_type ............. nvls
+  inference_rng_tracker ........................... False
+  inference_shards ................................ None
+  inference_text_gen_server_logging ............... False
+  inference_use_synchronous_zmq_collectives ....... False
+  inference_wandb_logging ......................... False
+  init_method_std ................................. 0.02
+  init_method_xavier_uniform ...................... False
+  init_model_with_meta_device ..................... False
+  initial_loss_scale .............................. 4294967296
+  inprocess_active_world_size ..................... 8
+  inprocess_barrier_timeout ....................... 120
+  inprocess_completion_timeout .................... 120
+  inprocess_empty_cuda_cache ...................... False
+  inprocess_granularity ........................... node
+  inprocess_hard_timeout .......................... 90
+  inprocess_heartbeat_interval .................... 30
+  inprocess_heartbeat_timeout ..................... 60
+  inprocess_last_call_wait ........................ 1
+  inprocess_max_iterations ........................ None
+  inprocess_monitor_process_interval .............. 1.0
+  inprocess_monitor_thread_interval ............... 1.0
+  inprocess_progress_watchdog_interval ............ 1.0
+  inprocess_restart ............................... False
+  inprocess_soft_timeout .......................... 60
+  inprocess_termination_grace_time ................ 1
+  is_hybrid_model ................................. False
+  iter_per_epoch .................................. 1250
+  iterations_to_skip .............................. []
+  keep_fp8_transpose_cache ........................ False
+  kitchen_attention_backend ....................... sdpa
+  kv_channels ..................................... 128
+  kv_lora_rank .................................... 32
+  langrl_env_config ............................... None
+  layernorm_epsilon ............................... 1e-06
+  layernorm_zero_centered_gamma ................... False
+  lazy_mpu_init ................................... False
+  linear_attention_freq ........................... None
+  linear_attention_type ........................... None
+  linear_conv_kernel_dim .......................... 4
+  linear_cp_mode .................................. chunkwise
+  linear_key_head_dim ............................. 128
+  linear_num_key_heads ............................ 16
+  linear_num_value_heads .......................... 32
+  linear_value_head_dim ........................... 128
+  lion_beta1 ...................................... 0.95
+  lion_beta2 ...................................... 0.98
+  load ............................................ None
+  load_main_params_from_ckpt ...................... False
+  local_rank ...................................... 0
+  log_device_memory_used .......................... False
+  log_energy ...................................... False
+  log_interval .................................... 1
+  log_loss_scale_to_tensorboard ................... True
+  log_max_attention_logit ......................... False
+  log_memory_interval ............................. None
+  log_memory_to_tensorboard ....................... False
+  log_moe_overload_factor ......................... False
+  log_num_zeros_in_grad ........................... False
+  log_params_norm ................................. False
+  log_progress .................................... False
+  log_straggler ................................... False
+  log_throughput .................................. True
+  log_timers_to_tensorboard ....................... False
+  log_validation_ppl_to_tensorboard ............... False
+  log_world_size_to_tensorboard ................... False
+  logging_level ................................... 40
+  logits_load_decode_threads ...................... 4
+  logits_load_dir ................................. None
+  logits_load_ignore_errors ....................... False
+  logits_load_kd_loss_alpha ....................... 1.0
+  logits_load_msc_prefetch_depth .................. 2
+  logits_load_prefetch_factor ..................... 3
+  logits_save_dir ................................. None
+  logits_save_dtype ............................... fp16
+  logits_save_top_k ............................... None
+  logits_save_top_p ............................... None
+  logits_save_top_p_min_k ......................... 1
+  loss_scale ...................................... None
+  loss_scale_window ............................... 1000
+  lr .............................................. 0.00012
+  lr_decay_iters .................................. None
+  lr_decay_samples ................................ None
+  lr_decay_style .................................. cosine
+  lr_warmup_fraction .............................. None
+  lr_warmup_init .................................. 0.0
+  lr_warmup_iters ................................. 5
+  lr_warmup_samples ............................... 0
+  lr_wsd_decay_iters .............................. None
+  lr_wsd_decay_samples ............................ None
+  lr_wsd_decay_style .............................. exponential
+  main_grads_dtype ................................ torch.float32
+  main_params_dtype ............................... torch.float32
+  make_vocab_size_divisible_by .................... 1187
+  mamba_head_dim .................................. 64
+  mamba_inference_conv_states_dtype ............... torch.bfloat16
+  mamba_inference_ssm_states_dtype ................ torch.bfloat16
+  mamba_num_groups ................................ 8
+  mamba_num_heads ................................. None
+  mamba_state_dim ................................. 128
+  mamba_training_ssm_states_dtype ................. None
+  manual_gc ....................................... True
+  manual_gc_eval .................................. True
+  manual_gc_interval .............................. 5
+  mask_factor ..................................... 1.0
+  mask_prob ....................................... 0.15
+  mask_type ....................................... random
+  masked_softmax_fusion ........................... True
+  max_position_embeddings ......................... 4096
+  max_seqlen_per_dp_cp_rank ....................... None
+  max_tokens_to_oom ............................... 12000
+  megatron_fsdp_cache_param_bucket_views .......... False
+  megatron_fsdp_enable_fine_grained_param_gather .. False
+  megatron_fsdp_grad_comm_dtype ................... None
+  megatron_fsdp_main_grads_dtype .................. None
+  megatron_fsdp_main_params_dtype ................. torch.float32
+  megatron_fsdp_max_pool_double_buffer ............ False
+  megatron_fsdp_prefetch_recompute_forward_weights  False
+  memory_snapshot_path ............................ snapshot.pickle
+  merge_file ...................................... None
+  metadata_path ................................... None
+  mhc_init_gating_factor .......................... 0.01
+  mhc_recompute_layer_num ......................... None
+  mhc_sinkhorn_iterations ......................... 20
+  micro_batch_size ................................ 1
+  microbatch_group_size_per_vp_stage .............. None
+  mid_level_dataset_surplus ....................... 0.005
+  min_dynamic_context_parallel_size ............... 1
+  min_loss_scale .................................. 1.0
+  min_lr .......................................... 1.2e-05
+  min_offloaded_tensor_size ....................... 1048576
+  mla_down_proj_fusion ............................ False
+  mlp_chunks_for_prefill .......................... 1
+  mlp_chunks_for_training ......................... 1
+  mmap_bin_files .................................. True
+  mock_data ....................................... True
+  modelopt_enabled ................................ False
+  moe_apply_probs_on_input ........................ False
+  moe_aux_loss_coeff .............................. 0.001
+  moe_deepep_num_sms .............................. None
+  moe_enable_deepep ............................... False
+  moe_enable_routing_replay ....................... False
+  moe_expert_capacity_factor ...................... None
+  moe_expert_rank_capacity_factor ................. 1.5
+  moe_ffn_hidden_size ............................. 768
+  moe_flex_dispatcher_backend ..................... hybridep
+  moe_flex_dispatcher_num_sms ..................... None
+  moe_grouped_gemm ................................ True
+  moe_hybridep_num_blocks_permute ................. None
+  moe_hybridep_num_blocks_unpermute ............... None
+  moe_hybridep_num_sms ............................ 32
+  moe_hybridep_num_sms_preprocessing .............. 108
+  moe_hybridep_pad_variable_tokens ................ False
+  moe_input_jitter_eps ............................ None
+  moe_latent_size ................................. None
+  moe_layer_freq .................................. 1
+  moe_layer_recompute ............................. False
+  moe_mlp_glu_interleave_size ..................... None
+  moe_n_hash_layers ............................... 0
+  moe_ncclep_static_shape ......................... False
+  moe_ncclep_use_symm_mem ......................... False
+  moe_pad_expert_input_to_capacity ................ False
+  moe_pad_experts_for_cuda_graph_inference ........ False
+  moe_paged_stash ................................. True
+  moe_paged_stash_buffer_size_factor_cpu .......... 0.0
+  moe_paged_stash_buffer_size_factor_cuda ......... 1.1
+  moe_paged_stash_page_size ....................... 64
+  moe_per_layer_logging ........................... False
+  moe_permute_fusion .............................. True
+  moe_permute_fusion_into_hybridep ................ False
+  moe_router_bias_update_rate ..................... 0.001
+  moe_router_dtype ................................ fp32
+  moe_router_enable_expert_bias ................... False
+  moe_router_force_biased ......................... None
+  moe_router_force_load_balancing ................. True
+  moe_router_fusion ............................... True
+  moe_router_group_topk ........................... None
+  moe_router_load_balancing_type .................. aux_loss
+  moe_router_num_groups ........................... None
+  moe_router_padding_for_fp8 ...................... False
+  moe_router_padding_for_quantization ............. True
+  moe_router_pre_softmax .......................... False
+  moe_router_score_function ....................... softmax
+  moe_router_topk ................................. 8
+  moe_router_topk_scaling_factor .................. None
+  moe_routing_trace_capture_hidden_states ......... False
+  moe_routing_trace_capture_logits ................ False
+  moe_routing_trace_dump_weights .................. False
+  moe_routing_trace_max_training_iters ............ None
+  moe_routing_trace_path .......................... None
+  moe_shared_expert_gate .......................... False
+  moe_shared_expert_glu_interleave_size ........... None
+  moe_shared_expert_intermediate_size ............. None
+  moe_shared_expert_overlap ....................... False
+  moe_single_grouped_bias ......................... False
+  moe_single_grouped_weight ....................... False
+  moe_token_dispatcher_type ....................... flex
+  moe_token_drop_policy ........................... probs
+  moe_upcycling_granularity ....................... 1
+  moe_use_grouped_tensor .......................... True
+  moe_use_upcycling ............................... False
+  moe_z_loss_coeff ................................ None
+  mrope_interleaved ............................... False
+  mrope_section ................................... None
+  mscale .......................................... 1.0
+  mscale_all_dim .................................. 0.0
+  mtp_detach_heads ................................ False
+  mtp_hybrid_override_pattern ..................... None
+  mtp_loss_scaling_factor ......................... 0.1
+  mtp_num_layers .................................. None
+  mtp_standalone .................................. False
+  mtp_use_repeated_layer .......................... False
+  multi_latent_attention .......................... False
+  multiple_validation_sets ........................ False
+  muon_coefficient_type ........................... quintic
+  muon_extra_scale_factor ......................... 1.0
+  muon_fp32_matmul_prec ........................... medium
+  muon_momentum ................................... 0.9
+  muon_nesterov ................................... False
+  muon_num_ns_steps ............................... 5
+  muon_scalar_optimizer ........................... adam
+  muon_scale_mode ................................. spectral
+  muon_split_qkv .................................. True
+  muon_tp_mode .................................... blockwise
+  mup_attn_scale_power ............................ 1.0
+  mup_base_head_dim ............................... None
+  mup_base_hidden_size ............................ None
+  mup_embedding_mult .............................. 1.0
+  mup_output_mult ................................. 1.0
+  mup_width_mult .................................. 1.0
+  nccl_all_reduce_for_prefill ..................... False
+  nccl_communicator_config_path ................... None
+  nccl_ub ......................................... False
+  no_load_optim ................................... None
+  no_load_rng ..................................... None
+  no_persist_layer_norm ........................... False
+  no_rope_freq .................................... None
+  no_save_optim ................................... None
+  no_save_rng ..................................... None
+  no_weight_decay_cond_type ....................... None
+  non_persistent_ckpt_type ........................ None
+  non_persistent_global_ckpt_dir .................. None
+  non_persistent_local_ckpt_algo .................. fully_parallel
+  non_persistent_local_ckpt_dir ................... None
+  non_persistent_save_interval .................... None
+  normalization ................................... RMSNorm
+  null_tokenizer_eod_id ........................... None
+  null_tokenizer_pad_id ........................... -1
+  num_attention_heads ............................. 32
+  num_channels .................................... 3
+  num_classes ..................................... 1000
+  num_dataset_builder_threads ..................... 1
+  num_distributed_optimizer_instances ............. 1
+  num_experts ..................................... 64
+  num_layers ...................................... 8
+  num_layers_at_end_in_bf16 ....................... 1
+  num_layers_at_start_in_bf16 ..................... 1
+  num_layers_per_virtual_pipeline_stage ........... None
+  num_query_groups ................................ 4
+  num_residual_streams ............................ 4
+  num_speculative_tokens .......................... 0
+  num_virtual_stages_per_pipeline_rank ............ None
+  num_workers ..................................... 2
+  nvtx_ranges ..................................... False
+  o_groups ........................................ 8
+  o_lora_rank ..................................... 1024
+  object_storage_cache_path ....................... None
+  offload_modules ................................. []
+  offload_optimizer_states ........................ False
+  one_logger_async ................................ False
+  one_logger_project .............................. megatron-lm
+  one_logger_run_name ............................. None
+  onnx_safe ....................................... None
+  openai_gelu ..................................... False
+  optimizer ....................................... adam
+  optimizer_cpu_offload ........................... False
+  optimizer_cuda_graph ............................ False
+  optimizer_offload_fraction ...................... 1.0
+  original_max_position_embeddings ................ 4096
+  outer_dp_sharding_strategy ...................... no_shard
+  output_bert_embeddings .......................... False
+  overlap_cpu_optimizer_d2h_h2d ................... False
+  overlap_dispatch_backward_with_experts_wgrad .... False
+  overlap_grad_reduce ............................. True
+  overlap_moe_expert_parallel_comm ................ True
+  overlap_p2p_comm ................................ False
+  overlap_p2p_comm_warmup_flush ................... False
+  overlap_param_gather ............................ True
+  overlap_param_gather_with_optimizer_step ........ False
+  override_opt_param_scheduler .................... False
+  pad_packed_seq_alignment ........................ None
+  pad_vocab_size .................................. True
+  padded_vocab_size ............................... None
+  params_dtype .................................... torch.bfloat16
+  patch_dim ....................................... 16
+  per_dataset_sequences_path ...................... None
+  per_split_data_args_path ........................ None
+  perform_initialization .......................... True
+  perform_rl_step ................................. False
+  phase_transition_iterations ..................... None
+  pin_cpu_grads ................................... True
+  pin_cpu_params .................................. True
+  pipeline_model_parallel_comm_backend ............ None
+  pipeline_model_parallel_layout .................. None
+  pipeline_model_parallel_size .................... 1
+  position_embedding_type ......................... rope
+  pretrained_checkpoint ........................... None
+  profile ......................................... False
+  profile_ranks ................................... []
+  profile_step_end ................................ 12
+  profile_step_start .............................. 10
+  pytorch_profiler_collect_callstack .............. False
+  pytorch_profiler_collect_chakra ................. False
+  pytorch_profiler_collect_shapes ................. False
+  q_lora_rank ..................................... None
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]  qad_train_target ................................ None
+  qk_clip ......................................... False
+  qk_clip_alpha ................................... 0.5
+  qk_clip_threshold ............................... 100
+  qk_head_dim ..................................... 128
+
+  qk_l2_norm ...................................... False
+  qk_layernorm .................................... True
+  qk_pos_emb_head_dim ............................. 64
+  query_in_block_prob ............................. 0.1
+  quick_geglu ..................................... False
+  rampup_batch_size ............................... None
+  rank ............................................ 0
+  recompute_granularity ........................... None
+  recompute_method ................................ None
+  recompute_modules ............................... None
+  recompute_num_layers ............................ None
+  record_memory_history ........................... False
+  record_shapes ................................... False
+  refit_method .................................... gloo
+  relative_attention_max_distance ................. 128
+  relative_attention_num_buckets .................. 32
+  replication ..................................... False
+  replication_factor .............................. 2
+  replication_jump ................................ None
+  rerun_mode ...................................... validate_results
+  reset_attention_mask ............................ False
+  reset_position_ids .............................. False
+  result_rejected_tracker_filename ................ None
+  retriever_report_topk_accuracies ................ []
+  retriever_score_scaling ......................... False
+  reuse_grad_buf_for_mxfp8_param_ag ............... True
+  rl_consumption_granularity ...................... B
+  rl_default_temperature .......................... 1.0
+  rl_default_top_k ................................ -1
+  rl_default_top_p ................................ 0
+  rl_generation_lag ............................... 0
+  rl_importance_sampling_truncation_coef .......... None
+  rl_inference_expert_model_parallel_size ......... None
+  rl_inference_expert_tensor_model_parallel_size .. None
+  rl_inference_logprobs_is_correction ............. False
+  rl_inference_model_unified_memory_level ......... 0
+  rl_inference_parsers ............................ []
+  rl_inference_pipeline_model_parallel_size ....... None
+  rl_inference_tensor_model_parallel_size ......... None
+  rl_kv_cache_management_mode ..................... persist
+  rl_offload_inference_model_weights_when_idle .... False
+  rl_offload_optimizer_during_inference ........... False
+  rl_partial_rollouts ............................. False
+  rl_persist_cuda_graphs .......................... False
+  rl_profile ...................................... False
+  rl_profile_dir .................................. None
+  rl_prompts_per_eval ............................. 32
+  rl_sequence_packing_algo ........................ fifo
+  rl_sequence_packing_max_sequences_per_bin ....... 50
+  rl_skip_bos_token ............................... False
+  rl_submission_granularity ....................... B
+  rl_training_cuda_graphs ......................... False
+  rl_use_sequence_packing ......................... False
+  rl_verify_model_weights_swap .................... False
+  rope_scaling_factor ............................. 8.0
+  rope_type ....................................... None
+  rotary_base ..................................... 1000000
+  rotary_base_per_layer ........................... None
+  rotary_interleaved .............................. False
+  rotary_percent .................................. 1.0
+  rotary_scaling_factor ........................... 1.0
+  rotary_seq_len_interpolation_factor ............. None
+  run_workload_inspector_server ................... False
+  sample_rate ..................................... 1.0
+  save ............................................ None
+  save_activations_interval ....................... None
+  save_dgrads_interval ............................ None
+  save_interval ................................... 100000
+  save_params_interval ............................ None
+  save_retain_interval ............................ None
+  save_tokens_per_expert_interval ................. None
+  save_wgrads_interval ............................ None
+  seed ............................................ 1234
+  seq_length ...................................... 4096
+  sequence_packing_scheduler ...................... None
+  sequence_parallel ............................... False
+  sft ............................................. False
+  sft_mock_dataset_config_json .................... None
+  sft_tokenizer_prompt_format ..................... nemotron-h-aligned
+  sgd_momentum .................................... 0.9
+  sharp_enabled_group ............................. None
+  short_seq_prob .................................. 0.1
+  skip_train ...................................... False
+  skipped_train_samples ........................... 0
+  softmax_type .................................... vanilla
+  spec ............................................ None
+  special_tokens .................................. None
+  split ........................................... None
+  squared_relu .................................... False
+  start_eval_at_iter .............................. None
+  start_weight_decay .............................. 0.1
+  step_batch_size_schedule ........................ None
+  straggler_ctrlr_port ............................ 65535
+  straggler_minmax_count .......................... 1
+  strict_fsdp_dtensor_load ........................ True
+  suggested_communication_unit_size ............... None
+  swiglu .......................................... True
+  swin_backbone_type .............................. tiny
+  symmetric_ar_type ............................... None
+  te_precision_config_file ........................ None
+  te_rng_tracker .................................. True
+  tensor_model_parallel_size ...................... 1
+  tensorboard_dir ................................. /workspace/output/tensorboard
+  tensorboard_log_interval ........................ 1
+  tensorboard_queue_size .......................... 1000
+  test_data_path .................................. None
+  test_mode ....................................... False
+  thd_max_packed_sequences ........................ None
+  thd_tail_padding_policy ......................... None
+  tiktoken_num_special_tokens ..................... 1000
+  tiktoken_pattern ................................ None
+  timing_log_level ................................ 0
+  timing_log_option ............................... minmax
+  titles_data_path ................................ None
+  tokenizer_hf_no_include_special_tokens .......... False
+  tokenizer_hf_no_use_fast ........................ False
+  tokenizer_model ................................. /data/minimax-dialogue/pretrain_model/m2-mini/tokenizer
+  tokenizer_sentencepiece_ignore_extra_whitespaces  True
+  tokenizer_sentencepiece_legacy .................. False
+  tokenizer_type .................................. HuggingFaceTokenizer
+  torch_fsdp2_reshard_after_forward ............... True
+  tp_comm_bootstrap_backend ....................... nccl
+  tp_comm_bulk_dgrad .............................. True
+  tp_comm_bulk_wgrad .............................. True
+  tp_comm_overlap ................................. False
+  tp_comm_overlap_ag .............................. True
+  tp_comm_overlap_cfg ............................. None
+  tp_comm_overlap_rs .............................. True
+  tp_comm_overlap_rs_dgrad ........................ False
+  tp_comm_split_ag ................................ True
+  tp_comm_split_rs ................................ True
+  train_data_path ................................. None
+  train_iters ..................................... 60
+  train_samples ................................... None
+  train_sync_interval ............................. None
+  transformer_impl ................................ transformer_engine
+  transformer_pipeline_model_parallel_size ........ 1
+  trust_remote_code ............................... False
+  untie_embeddings_and_output_weights ............. True
+  use_checkpoint_args ............................. False
+  use_checkpoint_opt_param_scheduler .............. False
+  use_cpu_initialization .......................... None
+  use_dist_ckpt ................................... True
+  use_dist_ckpt_deprecated ........................ False
+  use_distributed_optimizer ....................... True
+  use_flash_attn .................................. True
+  use_fused_mhc ................................... False
+  use_fused_weighted_squared_relu ................. False
+  use_gloo_process_groups ......................... True
+  use_grouped_gemm_for_dense_mlp .................. False
+  use_grouped_gemm_for_shared_expert .............. False
+  use_kitchen_attention ........................... False
+  use_layer_wise_distributed_optimizer ............ False
+  use_layer_wise_param_layout ..................... False
+  use_legacy_static_engine ........................ False
+  use_mamba_mem_eff_path .......................... True
+  use_megatron_fsdp ............................... False
+  use_mp_args_from_checkpoint_args ................ False
+  use_mup ......................................... False
+  use_one_sent_docs ............................... False
+  use_persistent_ckpt_worker ...................... False
+  use_precision_aware_optimizer ................... True
+  use_pytorch_profiler ............................ False
+  use_ring_exchange_p2p ........................... False
+  use_rope_scaling ................................ False
+  use_rotary_position_embeddings .................. False
+  use_sharp ....................................... False
+  use_te_activation_func .......................... False
+  use_tokenizer_model_from_checkpoint_args ........ True
+  use_torch_fsdp2 ................................. False
+  use_torch_optimizer_for_cpu_offload ............. False
+  use_tp_pp_dp_mapping ............................ False
+  use_transformer_engine_op_fuser ................. False
+  use_varlen_dataset .............................. False
+  v_head_dim ...................................... 128
+  valid_data_path ................................. None
+  validation_set_names ............................ None
+  varlen_mock_dataset_config_json ................. None
+  varlen_sbhd_validation .......................... False
+  verify_integrity ................................ False
+  virtual_pipeline_model_parallel_size ............ None
+  vision_backbone_type ............................ vit
+  vision_pretraining .............................. False
+  vision_pretraining_type ......................... classify
+  vocab_extra_ids ................................. 0
+  vocab_file ...................................... None
+  vocab_size ...................................... None
+  wandb_entity .................................... None
+  wandb_exp_name .................................. None
+  wandb_project ................................... None
+  wandb_save_dir .................................. None
+  weight_decay .................................... 0.1
+  weight_decay_incr_style ......................... constant
+  wgrad_deferral_limit ............................ 0
+  window_attn_skip_freq ........................... None
+  window_size ..................................... None
+  world_size ...................................... 8
+  yaml_cfg ........................................ None
+  yarn_beta_fast .................................. None
+  yarn_beta_slow .................................. None
+  yarn_correction_range_round_to_int .............. None
+  yarn_original_max_position_embeddings ........... None
+-------------------- end of arguments ---------------------
+INFO:megatron.core.num_microbatches_calculator:setting number of microbatches to constant 8
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+INFO:megatron.core.tokenizers.utils.build_tokenizer: > padded vocab (size: 200035) with 568 dummy tokens (new size: 200603)
+> setting tensorboard ...
+WARNING: one_logger package is required to enable e2e metrics tracking. please go to https://confluence.nvidia.com/display/MLWFO/Package+Repositories for details to install it
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+WARNING: Inferring the appropriate argparse argument type from <class 'megatron.core.transformer.transformer_config.TransformerConfig'> failed for pad_packed_seq_alignment: typing.Union[int, typing.Literal['max'], NoneType].
+Deferring to attribute metadata. If the metadata is incomplete, 'parser.add_argument()' may fail.
+Original failure: Unions not supported by argparse: typing.Union[int, typing.Literal['max'], NoneType]
+INFO:megatron.training.initialize:Setting logging level to 40
+> initializing torch distributed ...
+> initialized tensor model parallel with size 1
+> initialized pipeline model parallel with size 1
+> setting random seeds to 1234 ...
+> compiling dataset index builder ...
+make: Entering directory '/workspace/Megatron-LM/megatron/core/datasets'
+make: Nothing to be done for 'default'.
+make: Leaving directory '/workspace/Megatron-LM/megatron/core/datasets'
+>>> done with dataset index builder. Compilation time: 0.034 seconds
+[rank0]:[W812 09:03:05.704084645 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+NCCL version 2.29.7+cuda13.2
+time to initialize megatron (seconds): 61.529
+[after in-process setup and before initialize_megatron] datetime: 2026-08-12 09:02:19.880705 
+[after in-job setup and before initialize_megatron] datetime: 2026-08-12 09:02:20.258524 
+[before library-setup] datetime: 2026-08-12 09:02:03.781034
+[after library-setup] datetime: 2026-08-12 09:02:19.121890
+[before megatron-init] datetime: 2026-08-12 09:02:19.880703
+[after megatron is initialized] datetime: 2026-08-12 09:03:15.412460 
+building GPT model ...
+ > number of parameters on (tensor, pipeline) model parallel rank (0, 0): 1275740160
+[after model, optimizer, and learning rate scheduler are built] datetime: 2026-08-12 09:03:26.185684 
+> building train, validation, and test datasets ...
+ > datasets target sizes (minimum size):
+    train:      3840
+    validation: 0
+    test:       0
+> building train, validation, and test datasets for GPT ...
+> finished creating GPT datasets ...
+[after dataloaders are built] datetime: 2026-08-12 09:03:27.590089 
+done with setup ...
+training ...
+Overwriting rerun_state_machine.current_iteration from -1 to 0...
+[before the start of training step] datetime: 2026-08-12 09:03:27.712728 
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+NCCL version 2.29.7+cuda13.2
+ [2026-08-12 09:04:18.690767] iteration        1/      60 | consumed samples:           64 | elapsed time per iteration (ms): 50978.0 | throughput per GPU (TFLOP/s/GPU): 3.8 | learning rate: 2.400000E-05 | global batch size:    64 | lm loss: 1.261809E+01 | load_balancing_loss: 1.000590E+00 | loss scale: 1.0 | grad norm: 2.215 | number of skipped iterations:   0 | number of nan iterations:   0 |Number of parameters in transformer block in billions:  2.57
+
+Number of active parameters in transformer block in billions:  0.45
+Number of parameters in embedding layers in billions: 0.82
+Total number of parameters in billions: 3.39
+Total number of active parameters in billions: 1.28
+Number of parameters in most loaded shard in billions: 1.2757
+compute_activation_memory_without_sp
+Activation memory footprint per transformer layer (precise, without SP): 272.0 MB
+Theoretical memory footprints: weight and optimizer=12148.79 MB, activation=3955.60 MB, total=16104.39 MB
+
+[Rank 0] (after 1 iterations) memory (MB) | allocated: 11603.29 | max allocated: 21468.65 | reserved: 28800.00 | max reserved: 28800.00
+Number of parameters in transformer block in billions:  2.57 [2026-08-12 09:04:19.570183] iteration        2/      60 | consumed samples:          128 | elapsed time per iteration (ms): 25928.7 | throughput per GPU (TFLOP/s/GPU): 7.6 | learning rate: 4.800000E-05 | global batch size:    64 | lm loss: 1.261537E+01 | load_balancing_loss: 1.000590E+00 | loss scale: 1.0 | grad norm: 2.296 | number of skipped iterations:   0 | number of nan iterations:   0 |
+Number of active parameters in transformer block in billions:  0.45
+Number of parameters in embedding layers in billions: 0.82
+
+Total number of parameters in billions: 3.39
+Total number of active parameters in billions: 1.28
+Number of parameters in most loaded shard in billions: 1.2757
+compute_activation_memory_without_sp
+Activation memory footprint per transformer layer (precise, without SP): 272.0 MB
+Theoretical memory footprints: weight and optimizer=12148.79 MB, activation=3955.60 MB, total=16104.39 MB
+
+[Rank 0] (after 2 iterations) memory (MB) | allocated: 11603.29 | max allocated: 23085.15 | reserved: 32106.00 | max reserved: 32106.00
+ [2026-08-12 09:04:20.409080] iteration        3/      60 | consumed samples:          192 | elapsed time per iteration (ms): 838.8 | throughput per GPU (TFLOP/s/GPU): 233.9 | learning rate: 7.200000E-05 | global batch size:    64 | lm loss: 1.240564E+01 | load_balancing_loss: 1.000591E+00 | loss scale: 1.0 | grad norm: 2.798 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:21.270067] iteration        4/      60 | consumed samples:          256 | elapsed time per iteration (ms): 860.9 | throughput per GPU (TFLOP/s/GPU): 227.9 | learning rate: 9.600000E-05 | global batch size:    64 | lm loss: 1.199253E+01 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 1.803 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:22.150807] iteration        5/      60 | consumed samples:          320 | elapsed time per iteration (ms): 880.6 | throughput per GPU (TFLOP/s/GPU): 222.8 | learning rate: 1.200000E-04 | global batch size:    64 | lm loss: 1.172900E+01 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 1.072 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:23.427978] iteration        6/      60 | consumed samples:          384 | elapsed time per iteration (ms): 1277.1 | throughput per GPU (TFLOP/s/GPU): 153.7 | learning rate: 1.199119E-04 | global batch size:    64 | lm loss: 1.148066E+01 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 0.928 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:24.245418] iteration        7/      60 | consumed samples:          448 | elapsed time per iteration (ms): 817.3 | throughput per GPU (TFLOP/s/GPU): 240.1 | learning rate: 1.196480E-04 | global batch size:    64 | lm loss: 1.121266E+01 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 0.849 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:25.076630] iteration        8/      60 | consumed samples:          512 | elapsed time per iteration (ms): 831.0 | throughput per GPU (TFLOP/s/GPU): 236.1 | learning rate: 1.192091E-04 | global batch size:    64 | lm loss: 1.083612E+01 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 0.847 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:25.902718] iteration        9/      60 | consumed samples:          576 | elapsed time per iteration (ms): 825.9 | throughput per GPU (TFLOP/s/GPU): 237.6 | learning rate: 1.185966E-04 | global batch size:    64 | lm loss: 1.052404E+01 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 0.764 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:26.723287] iteration       10/      60 | consumed samples:          640 | elapsed time per iteration (ms): 820.4 | throughput per GPU (TFLOP/s/GPU): 239.2 | learning rate: 1.178126E-04 | global batch size:    64 | lm loss: 1.016833E+01 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 0.736 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:27.948287] iteration       11/      60 | consumed samples:          704 | elapsed time per iteration (ms): 1224.9 | throughput per GPU (TFLOP/s/GPU): 160.2 | learning rate: 1.168596E-04 | global batch size:    64 | lm loss: 9.857224E+00 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 0.677 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:28.769619] iteration       12/      60 | consumed samples:          768 | elapsed time per iteration (ms): 821.2 | throughput per GPU (TFLOP/s/GPU): 238.9 | learning rate: 1.157407E-04 | global batch size:    64 | lm loss: 9.584630E+00 | load_balancing_loss: 1.000599E+00 | loss scale: 1.0 | grad norm: 0.612 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:29.621816] iteration       13/      60 | consumed samples:          832 | elapsed time per iteration (ms): 852.1 | throughput per GPU (TFLOP/s/GPU): 230.3 | learning rate: 1.144595E-04 | global batch size:    64 | lm loss: 9.301596E+00 | load_balancing_loss: 1.000595E+00 | loss scale: 1.0 | grad norm: 0.584 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:30.453150] iteration       14/      60 | consumed samples:          896 | elapsed time per iteration (ms): 831.3 | throughput per GPU (TFLOP/s/GPU): 236.1 | learning rate: 1.130203E-04 | global batch size:    64 | lm loss: 9.092695E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 0.523 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:31.271896] iteration       15/      60 | consumed samples:          960 | elapsed time per iteration (ms): 818.7 | throughput per GPU (TFLOP/s/GPU): 239.7 | learning rate: 1.114277E-04 | global batch size:    64 | lm loss: 8.886626E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 0.497 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:32.534700] iteration       16/      60 | consumed samples:         1024 | elapsed time per iteration (ms): 1262.7 | throughput per GPU (TFLOP/s/GPU): 155.4 | learning rate: 1.096869E-04 | global batch size:    64 | lm loss: 8.743850E+00 | load_balancing_loss: 1.000586E+00 | loss scale: 1.0 | grad norm: 0.438 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:33.362203] iteration       17/      60 | consumed samples:         1088 | elapsed time per iteration (ms): 827.3 | throughput per GPU (TFLOP/s/GPU): 237.2 | learning rate: 1.078036E-04 | global batch size:    64 | lm loss: 8.574923E+00 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 0.445 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:34.187902] iteration       18/      60 | consumed samples:         1152 | elapsed time per iteration (ms): 825.6 | throughput per GPU (TFLOP/s/GPU): 237.7 | learning rate: 1.057840E-04 | global batch size:    64 | lm loss: 8.495026E+00 | load_balancing_loss: 1.000588E+00 | loss scale: 1.0 | grad norm: 0.381 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:35.010539] iteration       19/      60 | consumed samples:         1216 | elapsed time per iteration (ms): 822.5 | throughput per GPU (TFLOP/s/GPU): 238.6 | learning rate: 1.036346E-04 | global batch size:    64 | lm loss: 8.432703E+00 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 0.335 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:35.831995] iteration       20/      60 | consumed samples:         1280 | elapsed time per iteration (ms): 821.4 | throughput per GPU (TFLOP/s/GPU): 238.9 | learning rate: 1.013625E-04 | global batch size:    64 | lm loss: 8.341754E+00 | load_balancing_loss: 1.000578E+00 | loss scale: 1.0 | grad norm: 0.312 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:37.096123] iteration       21/      60 | consumed samples:         1344 | elapsed time per iteration (ms): 1264.0 | throughput per GPU (TFLOP/s/GPU): 155.2 | learning rate: 9.897498E-05 | global batch size:    64 | lm loss: 8.301985E+00 | load_balancing_loss: 1.000596E+00 | loss scale: 1.0 | grad norm: 0.282 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:38.001245] iteration       22/      60 | consumed samples:         1408 | elapsed time per iteration (ms): 905.0 | throughput per GPU (TFLOP/s/GPU): 216.8 | learning rate: 9.647993E-05 | global batch size:    64 | lm loss: 8.269695E+00 | load_balancing_loss: 1.000586E+00 | loss scale: 1.0 | grad norm: 1.189 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:38.828755] iteration       23/      60 | consumed samples:         1472 | elapsed time per iteration (ms): 827.4 | throughput per GPU (TFLOP/s/GPU): 237.2 | learning rate: 9.388546E-05 | global batch size:    64 | lm loss: 8.249144E+00 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 2.138 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:39.666183] iteration       24/      60 | consumed samples:         1536 | elapsed time per iteration (ms): 837.3 | throughput per GPU (TFLOP/s/GPU): 234.3 | learning rate: 9.120003E-05 | global batch size:    64 | lm loss: 8.178241E+00 | load_balancing_loss: 1.000591E+00 | loss scale: 1.0 | grad norm: 0.289 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:40.494011] iteration       25/      60 | consumed samples:         1600 | elapsed time per iteration (ms): 827.7 | throughput per GPU (TFLOP/s/GPU): 237.1 | learning rate: 8.843241E-05 | global batch size:    64 | lm loss: 8.170803E+00 | load_balancing_loss: 1.000588E+00 | loss scale: 1.0 | grad norm: 0.232 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:41.769146] iteration       26/      60 | consumed samples:         1664 | elapsed time per iteration (ms): 1275.0 | throughput per GPU (TFLOP/s/GPU): 153.9 | learning rate: 8.559162E-05 | global batch size:    64 | lm loss: 8.129657E+00 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 0.880 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:42.600487] iteration       27/      60 | consumed samples:         1728 | elapsed time per iteration (ms): 831.3 | throughput per GPU (TFLOP/s/GPU): 236.1 | learning rate: 8.268691E-05 | global batch size:    64 | lm loss: 8.114742E+00 | load_balancing_loss: 1.000590E+00 | loss scale: 1.0 | grad norm: 0.828 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:43.442112] iteration       28/      60 | consumed samples:         1792 | elapsed time per iteration (ms): 841.5 | throughput per GPU (TFLOP/s/GPU): 233.2 | learning rate: 7.972779E-05 | global batch size:    64 | lm loss: 8.089926E+00 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 0.765 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:44.581101] iteration       29/      60 | consumed samples:         1856 | elapsed time per iteration (ms): 1138.9 | throughput per GPU (TFLOP/s/GPU): 172.3 | learning rate: 7.672388E-05 | global batch size:    64 | lm loss: 8.069909E+00 | load_balancing_loss: 1.000594E+00 | loss scale: 1.0 | grad norm: 0.588 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:45.403583] iteration       30/      60 | consumed samples:         1920 | elapsed time per iteration (ms): 822.4 | throughput per GPU (TFLOP/s/GPU): 238.6 | learning rate: 7.368500E-05 | global batch size:    64 | lm loss: 8.129772E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 3.990 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:46.641173] iteration       31/      60 | consumed samples:         1984 | elapsed time per iteration (ms): 1237.5 | throughput per GPU (TFLOP/s/GPU): 158.6 | learning rate: 7.062105E-05 | global batch size:    64 | lm loss: 8.004010E+00 | load_balancing_loss: 1.000591E+00 | loss scale: 1.0 | grad norm: 1.179 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:47.460850] iteration       32/      60 | consumed samples:         2048 | elapsed time per iteration (ms): 819.6 | throughput per GPU (TFLOP/s/GPU): 239.4 | learning rate: 6.754202E-05 | global batch size:    64 | lm loss: 7.998286E+00 | load_balancing_loss: 1.000595E+00 | loss scale: 1.0 | grad norm: 0.902 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:48.289550] iteration       33/      60 | consumed samples:         2112 | elapsed time per iteration (ms): 828.6 | throughput per GPU (TFLOP/s/GPU): 236.8 | learning rate: 6.445797E-05 | global batch size:    64 | lm loss: 7.985063E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 2.437 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:49.162363] iteration       34/      60 | consumed samples:         2176 | elapsed time per iteration (ms): 872.7 | throughput per GPU (TFLOP/s/GPU): 224.8 | learning rate: 6.137895E-05 | global batch size:    64 | lm loss: 7.963589E+00 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 1.331 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:50.036798] iteration       35/      60 | consumed samples:         2240 | elapsed time per iteration (ms): 874.3 | throughput per GPU (TFLOP/s/GPU): 224.4 | learning rate: 5.831500E-05 | global batch size:    64 | lm loss: 7.947149E+00 | load_balancing_loss: 1.000590E+00 | loss scale: 1.0 | grad norm: 0.609 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:51.297744] iteration       36/      60 | consumed samples:         2304 | elapsed time per iteration (ms): 1260.8 | throughput per GPU (TFLOP/s/GPU): 155.6 | learning rate: 5.527612E-05 | global batch size:    64 | lm loss: 7.935073E+00 | load_balancing_loss: 1.000583E+00 | loss scale: 1.0 | grad norm: 1.270 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:52.121805] iteration       37/      60 | consumed samples:         2368 | elapsed time per iteration (ms): 823.9 | throughput per GPU (TFLOP/s/GPU): 238.2 | learning rate: 5.227221E-05 | global batch size:    64 | lm loss: 7.888238E+00 | load_balancing_loss: 1.000602E+00 | loss scale: 1.0 | grad norm: 0.806 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:52.942085] iteration       38/      60 | consumed samples:         2432 | elapsed time per iteration (ms): 820.2 | throughput per GPU (TFLOP/s/GPU): 239.2 | learning rate: 4.931308E-05 | global batch size:    64 | lm loss: 7.914189E+00 | load_balancing_loss: 1.000594E+00 | loss scale: 1.0 | grad norm: 0.957 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:53.832899] iteration       39/      60 | consumed samples:         2496 | elapsed time per iteration (ms): 890.7 | throughput per GPU (TFLOP/s/GPU): 220.3 | learning rate: 4.640838E-05 | global batch size:    64 | lm loss: 7.864431E+00 | load_balancing_loss: 1.000585E+00 | loss scale: 1.0 | grad norm: 2.000 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:54.656332] iteration       40/      60 | consumed samples:         2560 | elapsed time per iteration (ms): 823.3 | throughput per GPU (TFLOP/s/GPU): 238.3 | learning rate: 4.356759E-05 | global batch size:    64 | lm loss: 7.867455E+00 | load_balancing_loss: 1.000600E+00 | loss scale: 1.0 | grad norm: 1.347 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:55.906703] iteration       41/      60 | consumed samples:         2624 | elapsed time per iteration (ms): 1250.3 | throughput per GPU (TFLOP/s/GPU): 156.9 | learning rate: 4.079997E-05 | global batch size:    64 | lm loss: 7.896008E+00 | load_balancing_loss: 1.000588E+00 | loss scale: 1.0 | grad norm: 1.239 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:56.737307] iteration       42/      60 | consumed samples:         2688 | elapsed time per iteration (ms): 830.5 | throughput per GPU (TFLOP/s/GPU): 236.3 | learning rate: 3.811454E-05 | global batch size:    64 | lm loss: 7.793557E+00 | load_balancing_loss: 1.000593E+00 | loss scale: 1.0 | grad norm: 1.032 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:57.592526] iteration       43/      60 | consumed samples:         2752 | elapsed time per iteration (ms): 855.1 | throughput per GPU (TFLOP/s/GPU): 229.5 | learning rate: 3.552006E-05 | global batch size:    64 | lm loss: 7.820335E+00 | load_balancing_loss: 1.000591E+00 | loss scale: 1.0 | grad norm: 0.856 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:58.412318] iteration       44/      60 | consumed samples:         2816 | elapsed time per iteration (ms): 819.7 | throughput per GPU (TFLOP/s/GPU): 239.4 | learning rate: 3.302502E-05 | global batch size:    64 | lm loss: 7.766733E+00 | load_balancing_loss: 1.000595E+00 | loss scale: 1.0 | grad norm: 1.209 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:04:59.237431] iteration       45/      60 | consumed samples:         2880 | elapsed time per iteration (ms): 825.0 | throughput per GPU (TFLOP/s/GPU): 237.9 | learning rate: 3.063752E-05 | global batch size:    64 | lm loss: 7.774769E+00 | load_balancing_loss: 1.000595E+00 | loss scale: 1.0 | grad norm: 1.986 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:00.479247] iteration       46/      60 | consumed samples:         2944 | elapsed time per iteration (ms): 1241.6 | throughput per GPU (TFLOP/s/GPU): 158.0 | learning rate: 2.836537E-05 | global batch size:    64 | lm loss: 7.829377E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 2.172 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:01.322556] iteration       47/      60 | consumed samples:         3008 | elapsed time per iteration (ms): 843.1 | throughput per GPU (TFLOP/s/GPU): 232.7 | learning rate: 2.621598E-05 | global batch size:    64 | lm loss: 7.701918E+00 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 1.133 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:02.175301] iteration       48/      60 | consumed samples:         3072 | elapsed time per iteration (ms): 852.6 | throughput per GPU (TFLOP/s/GPU): 230.1 | learning rate: 2.419635E-05 | global batch size:    64 | lm loss: 7.695278E+00 | load_balancing_loss: 1.000584E+00 | loss scale: 1.0 | grad norm: 1.234 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:02.996651] iteration       49/      60 | consumed samples:         3136 | elapsed time per iteration (ms): 821.3 | throughput per GPU (TFLOP/s/GPU): 238.9 | learning rate: 2.231308E-05 | global batch size:    64 | lm loss: 7.623214E+00 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 1.271 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:03.829729] iteration       50/      60 | consumed samples:         3200 | elapsed time per iteration (ms): 833.0 | throughput per GPU (TFLOP/s/GPU): 235.6 | learning rate: 2.057231E-05 | global batch size:    64 | lm loss: 7.650705E+00 | load_balancing_loss: 1.000601E+00 | loss scale: 1.0 | grad norm: 1.422 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:05.071396] iteration       51/      60 | consumed samples:         3264 | elapsed time per iteration (ms): 1241.6 | throughput per GPU (TFLOP/s/GPU): 158.0 | learning rate: 1.897971E-05 | global batch size:    64 | lm loss: 7.761026E+00 | load_balancing_loss: 1.000588E+00 | loss scale: 1.0 | grad norm: 14.472 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:05.951048] iteration       52/      60 | consumed samples:         3328 | elapsed time per iteration (ms): 879.3 | throughput per GPU (TFLOP/s/GPU): 223.1 | learning rate: 1.754049E-05 | global batch size:    64 | lm loss: 7.646724E+00 | load_balancing_loss: 1.000587E+00 | loss scale: 1.0 | grad norm: 10.457 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:06.875910] iteration       53/      60 | consumed samples:         3392 | elapsed time per iteration (ms): 924.7 | throughput per GPU (TFLOP/s/GPU): 212.2 | learning rate: 1.625932E-05 | global batch size:    64 | lm loss: 7.631234E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 2.829 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:07.793623] iteration       54/      60 | consumed samples:         3456 | elapsed time per iteration (ms): 917.5 | throughput per GPU (TFLOP/s/GPU): 213.9 | learning rate: 1.514040E-05 | global batch size:    64 | lm loss: 7.533730E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 1.260 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:08.647696] iteration       55/      60 | consumed samples:         3520 | elapsed time per iteration (ms): 854.0 | throughput per GPU (TFLOP/s/GPU): 229.8 | learning rate: 1.418738E-05 | global batch size:    64 | lm loss: 7.560743E+00 | load_balancing_loss: 1.000592E+00 | loss scale: 1.0 | grad norm: 1.468 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:09.893581] iteration       56/      60 | consumed samples:         3584 | elapsed time per iteration (ms): 1245.7 | throughput per GPU (TFLOP/s/GPU): 157.5 | learning rate: 1.340336E-05 | global batch size:    64 | lm loss: 7.477997E+00 | load_balancing_loss: 1.000579E+00 | loss scale: 1.0 | grad norm: 1.732 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:10.757360] iteration       57/      60 | consumed samples:         3648 | elapsed time per iteration (ms): 863.7 | throughput per GPU (TFLOP/s/GPU): 227.2 | learning rate: 1.279089E-05 | global batch size:    64 | lm loss: 7.532289E+00 | load_balancing_loss: 1.000589E+00 | loss scale: 1.0 | grad norm: 1.688 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:11.584333] iteration       58/      60 | consumed samples:         3712 | elapsed time per iteration (ms): 826.8 | throughput per GPU (TFLOP/s/GPU): 237.3 | learning rate: 1.235199E-05 | global batch size:    64 | lm loss: 7.499122E+00 | load_balancing_loss: 1.000604E+00 | loss scale: 1.0 | grad norm: 1.957 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:12.403971] iteration       59/      60 | consumed samples:         3776 | elapsed time per iteration (ms): 819.5 | throughput per GPU (TFLOP/s/GPU): 239.4 | learning rate: 1.208807E-05 | global batch size:    64 | lm loss: 7.508074E+00 | load_balancing_loss: 1.000596E+00 | loss scale: 1.0 | grad norm: 3.113 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-08-12 09:05:13.240932] iteration       60/      60 | consumed samples:         3840 | elapsed time per iteration (ms): 836.9 | throughput per GPU (TFLOP/s/GPU): 234.5 | learning rate: 1.200000E-05 | global batch size:    64 | lm loss: 7.475336E+00 | load_balancing_loss: 1.000582E+00 | loss scale: 1.0 | grad norm: 1.481 | number of skipped iterations:   0 | number of nan iterations:   0 |
+[after training is done] datetime: 2026-08-12 09:05:13.679060 
+[rank0]:[W812 09:05:15.112111614 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank1]:[W812 09:05:16.019938479 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank3]:[W812 09:05:16.037984460 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank4]:[W812 09:05:16.038490369 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank5]:[W812 09:05:16.048488153 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank7]:[W812 09:05:16.060661285 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank6]:[W812 09:05:16.394918133 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[rank2]:[W812 09:05:16.403226263 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

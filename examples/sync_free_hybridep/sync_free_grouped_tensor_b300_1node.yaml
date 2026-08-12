@@ -1,0 +1,161 @@
+# HybridEP sync-free MoE (Path B) + 1F1B combined overlap — single-node B300 (8x SM103a)
+#
+# Path B of docs/hybridep_paged_stash_sync_free (device-init GroupedTensor/cublas):
+#   HybridEP static-budget dispatch  (moe_flex_dispatcher_backend: hybridep +
+#     moe_expert_rank_capacity_factor)                         -> sync-free dispatch sizing
+#   Paged stash                       (moe_paged_stash)         -> static fwd/bwd activation storage
+#   Device-init GroupedTensor/cublas grouped GEMM  (moe_use_grouped_tensor, NO op-fuser,
+#     Megatron PR #6000 + TE PR #3224)                         -> sync-free expert compute w/o full CG
+#   1F1B combined EP-A2A overlap      (overlap_moe_expert_parallel_comm + delay_wgrad_compute)
+#
+# Unlike Path A this needs NO full-iteration CUDA graph and NO CuTe DSL fused GroupedMLP:
+# the GroupedTensor backend consumes CUDA int64 split metadata directly, so expert compute
+# stays sync-free in eager mode. Intended for SFT / post-training / dynamic control flow.
+#
+# Sync-free boundary: the MoE steady-state data path (router -> dispatch -> FC1 -> act ->
+# FC2 -> combine) is free of D2H/stream sync. Overflow/rerun control still does a
+# flag-reduction + .item() at step boundary (expected, kept rare via forced load balancing).
+#
+# Scaled down from qwen3_30b so an 8-GPU node runs quickly end-to-end while still
+# exercising every feature above (EP8, 64 experts = 8 experts/rank).
+DEPENDENCIES:
+  pytorch_base_image: nvcr.io/nvidia/pytorch:26.04-py3
+  image: megatron-sync-free-grouped-tensor:b300   # built from ./Dockerfile.pathB (target: hybridep)
+ENV_VARS:
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: '1'
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  TORCH_NCCL_AVOID_RECORD_STREAMS: '0'
+  CUDA_DEVICE_MAX_CONNECTIONS: '1'
+  NCCL_NVLS_ENABLE: '0'
+  NCCL_GRAPH_REGISTER: '0'
+  NCCL_DEBUG: VERSION
+  NVTE_FUSED_ATTN: '1'
+  # Single NVLink domain of 8 B300 GPUs.
+  NVLINK_DOMAIN_SIZE: '8'
+  NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN: '8'
+  USE_MNNVL: '0'
+  CUDNN_FE_GROUPED_GEMM_DYNAMIC_MNKL: 'True'
+  NVTE_NORM_FWD_USE_CUDNN: '0'
+  NVTE_NORM_BWD_USE_CUDNN: '0'
+  NVTE_FWD_LAYERNORM_SM_MARGIN: '20'
+  NVTE_BWD_LAYERNORM_SM_MARGIN: '20'
+  NUM_OF_TOKENS_PER_CHUNK_COMBINE_API: '128'
+  NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API: '128'
+  HF_HUB_OFFLINE: '1'
+  TRANSFORMERS_OFFLINE: '1'
+  PYTHONWARNINGS: ignore
+ARGS:
+  # --- tokenizer / data (mock) ---
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: /data/minimax-dialogue/pretrain_model/m2-mini/tokenizer
+  mock_data: true
+  # --- model (Qwen3-30B-A3B style, scaled down for single node) ---
+  num_layers: 8
+  hidden_size: 2048
+  ffn_hidden_size: 6144
+  num_attention_heads: 32
+  kv_channels: 128
+  max_position_embeddings: 4096
+  seq_length: 4096
+  group_query_attention: true
+  num_query_groups: 4
+  qk_layernorm: true
+  normalization: RMSNorm
+  norm_epsilon: 1e-6
+  swiglu: true
+  disable_bias_linear: true
+  untie_embeddings_and_output_weights: true
+  position_embedding_type: rope
+  rotary_percent: 1.0
+  rotary_base: 1000000
+  make_vocab_size_divisible_by: 1187
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  # full (non-varlen / non-packed) attention over the whole sequence via the
+  # TE fused-attention backend (NVTE_FUSED_ATTN=1); auto lets TE pick fused.
+  attention_backend: auto
+  # --- MoE ---
+  num_experts: 64
+  moe_ffn_hidden_size: 768
+  moe_router_load_balancing_type: aux_loss
+  moe_router_topk: 8
+  moe_router_pre_softmax: false
+  moe_aux_loss_coeff: 1e-3
+  moe_router_force_load_balancing: true
+  moe_grouped_gemm: true
+  moe_use_grouped_tensor: true
+  moe_permute_fusion: true
+  moe_router_fusion: true
+  moe_router_dtype: fp32
+  moe_router_padding_for_quantization: true
+  # --- parallelism: single node 8x B300 ---
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 8
+  context_parallel_size: 1
+  expert_tensor_parallel_size: 1
+  sequence_parallel: true
+  use_distributed_optimizer: true
+  # --- HybridEP sync-free dispatch ---
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_hybridep_num_sms: 32
+  moe_expert_rank_capacity_factor: 1.5
+  # --- paged stash ---
+  moe_paged_stash: true
+  moe_paged_stash_page_size: 64
+  moe_paged_stash_buffer_size_factor_cuda: 1.1
+  moe_paged_stash_buffer_size_factor_cpu: 0.0
+  # --- Path B: device-init GroupedTensor/cublas expert compute ---
+  # No op-fuser, no CuTe DSL fused GroupedMLP, no full-iteration CUDA graph.
+  # moe_use_grouped_tensor (above) routes expert GEMMs through TE's GroupedLinear
+  # GroupedTensor backend, which consumes CUDA int64 split metadata directly.
+  # --- 1F1B combined EP-A2A overlap ---
+  overlap_moe_expert_parallel_comm: true
+  delay_wgrad_compute: true
+  te_rng_tracker: true
+  # --- precision ---
+  bf16: true
+  fp8_format: e4m3
+  fp8_recipe: mxfp8
+  fp8_param_gather: true
+  reuse_grad_buf_for_mxfp8_param_ag: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  use_precision_aware_optimizer: true
+  main_grads_dtype: fp32
+  main_params_dtype: fp32
+  exp_avg_dtype: bf16
+  exp_avg_sq_dtype: bf16
+  # --- schedule / batch ---
+  micro_batch_size: 1
+  global_batch_size: 64
+  train_iters: 60
+  # --- optimizer / lr ---
+  lr: 1.2e-4
+  min_lr: 1.2e-5
+  lr_decay_style: cosine
+  lr_warmup_iters: 5
+  weight_decay: 0.1
+  clip_grad: 1.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  init_method_std: 0.02
+  # --- runtime / misc ---
+  use_mcore_models: true
+  use_flash_attn: true
+  transformer_impl: transformer_engine
+  no_create_attention_mask_in_dataloader: true
+  no_check_for_nan_in_loss_and_grad: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: native
+  manual_gc: true
+  manual_gc_interval: 5
+  distributed_timeout_minutes: 30
+  eval_iters: 0
+  eval_interval: 100000
+  # --- logging ---
+  log_throughput: true
+  log_interval: 1
+  logging_level: 40
+  enable_experimental: true
