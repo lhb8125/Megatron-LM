@@ -1,0 +1,21 @@
+# Keep the docker build context small when COPY-ing the repo into the image.
+# (docker/mm/Dockerfile does `COPY . /workspace/Megatron-LM`.)
+.git
+.venv
+**/__pycache__
+**/*.pyc
+
+# Large local artifacts produced by the sync-free experiments — never ship these
+# into the image (they are multi-GB and irrelevant to training).
+examples/sync_free_hybridep/*.tar.gz
+examples/sync_free_hybridep/output
+examples/sync_free_hybridep/artifacts
+examples/sync_free_hybridep/artifacts_pathB
+**/*.nsys-rep
+**/*.qdstrm
+**/*.sqlite
+
+# Editor / OS noise
+.idea
+.vscode
+*.swp
