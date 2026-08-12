@@ -1071,7 +1071,7 @@ class PagedStashRunner:
         for mlp in self.moe_layers:
             ob = mlp.token_dispatcher.check_over_budget()
             if ob is not None:
-                overbudget |= ob.view(-1)[0]
+                overbudget |= ob.view(-1)[0].to(overbudget.device)
 
         flags = torch.stack(
             [
@@ -1081,6 +1081,10 @@ class PagedStashRunner:
             ],
             dim=0,
         )
+        # The control-plane flag reduction must run on the NCCL device. Some backends (e.g. the
+        # non-op-fuser GroupedTensor path) surface these flags as CPU scalars, so move to CUDA.
+        if flags.device.type != "cuda" and torch.cuda.is_available():
+            flags = flags.cuda()
         torch.distributed.all_reduce(flags, op=torch.distributed.ReduceOp.SUM)
         return flags[0].item(), flags[1].item(), flags[2].item()
 

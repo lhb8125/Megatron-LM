@@ -1231,6 +1231,8 @@ class _HybridEPManager(_DispatchManager):
             # Static-budget path only: handle[-1] is HybridEP overflow_flag when tokens were
             # dropped because permuted count exceeded num_permuted_tokens from setup_metadata.
             over_budget = self.handle[-1] != 0
+            if torch.is_tensor(over_budget):
+                over_budget = over_budget.to(self.over_budget.device)
             self.over_budget |= over_budget
         # When capacity factor is None, skip overflow tracking (no token drops). Actual
         # permuted size is resolved below via tokens_per_expert.sum() (CPU sync).
