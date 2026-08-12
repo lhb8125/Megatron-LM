@@ -4,7 +4,10 @@
 # + DeepEP hybrid-ep + resiliency-ext already installed there).
 #
 # Usage:
-#   docker/mm/build_docker.sh [--no-sudo] [--bake-helpers] [--path-a] [--push]
+#   docker/mm/build_docker.sh [--no-sudo] [--bake-helpers] [--path-a] [--no-push]
+#
+# By default the image is pushed to harbor (harbor.xaminim.com/minimax-dialogue).
+# Pass --no-push to build locally only.
 #
 # Env overrides:
 #   BASE_IMAGE   base image to overlay onto
@@ -12,18 +15,20 @@
 #                 use --path-a for megatron-sync-free-hybridep:b300)
 #   IMAGE_NAME   output repo name  (default: megatron-sync-free)
 #   IMAGE_TAG    output tag        (default: <commit>-<timestamp>[-dirty])
-#   REGISTRY     if set (or --push given with a registry), the image is pushed
+#   REGISTRY     push destination  (default: harbor.xaminim.com/minimax-dialogue;
+#                set empty with REGISTRY= to build a local-only tag)
 set -xve
 
 DOCKER_CMD="sudo docker"
 BAKE_HELPERS=0
-DO_PUSH=0
+DO_PUSH=1
 PATH_A=0
 for arg in "$@"; do
     case "$arg" in
         --no-sudo)      DOCKER_CMD="docker" ;;
         --bake-helpers) BAKE_HELPERS=1 ;;
         --push)         DO_PUSH=1 ;;
+        --no-push)      DO_PUSH=0 ;;
         --path-a)       PATH_A=1 ;;
     esac
 done
@@ -47,6 +52,10 @@ fi
 TIMESTAMP=$(date +%Y%m%d-%H%M)
 IMAGE_NAME=${IMAGE_NAME:-megatron-sync-free}
 IMAGE_TAG=${IMAGE_TAG:-${COMMIT_HASH}-${TIMESTAMP}${DIRTY}}
+
+# Push to harbor by default (matches the other Megatron repo's build_docker.sh).
+# Override REGISTRY to change the destination, or pass --no-push to keep it local.
+REGISTRY=${REGISTRY:-harbor.xaminim.com/minimax-dialogue}
 
 if [ -n "${REGISTRY:-}" ]; then
     VERSION="${REGISTRY%/}/${IMAGE_NAME}:${IMAGE_TAG}"
