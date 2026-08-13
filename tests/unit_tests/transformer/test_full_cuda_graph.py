@@ -114,3 +114,37 @@ def test_full_cuda_graph_replay_has_nvtx_range(mocker):
     graph.replay.assert_called_once_with()
     push.assert_called_once_with('megatron.core.full_cuda_graph.replay.training')
     pop.assert_called_once_with('megatron.core.full_cuda_graph.replay.training')
+
+
+def test_full_cuda_graph_capture_disables_autograd_multithreading(mocker):
+    graph = mocker.Mock()
+    mocker.patch.object(FullCudaGraphWrapper, 'curr_iteration', {'training': 1, 'validation': 0})
+    mocker.patch.object(FullCudaGraphWrapper, 'cuda_graph', {'training': None, 'validation': None})
+    mocker.patch.object(FullCudaGraphWrapper, 'result', {'training': None, 'validation': None})
+    mocker.patch('megatron.core.full_cuda_graph.get_all_rng_states', return_value={})
+    mocker.patch('megatron.core.full_cuda_graph.get_shared_capture_stream', return_value='stream')
+    mocker.patch('megatron.core.full_cuda_graph.get_graph_pool', return_value='pool')
+    mocker.patch('megatron.core.full_cuda_graph.torch.cuda.CUDAGraph', return_value=graph)
+    mocker.patch('megatron.core.full_cuda_graph.torch.cuda.graph', return_value=mocker.MagicMock())
+    mocker.patch('megatron.core.full_cuda_graph.torch.cuda.synchronize')
+    mocker.patch('megatron.core.full_cuda_graph.torch.distributed.barrier')
+    multithreading_context = mocker.patch(
+        'megatron.core.full_cuda_graph.torch.autograd.grad_mode.set_multithreading_enabled',
+        return_value=mocker.MagicMock(),
+    )
+
+    wrapper = FullCudaGraphWrapper.__new__(FullCudaGraphWrapper)
+    wrapper.forward_backward_func = mocker.Mock(return_value='captured-result')
+    wrapper.cuda_graph_warmup_steps = 1
+    wrapper.use_single_mempool = True
+    wrapper.data_read = mocker.Mock(return_value=[])
+
+    result = wrapper(
+        model=[], data_iterator=[], num_microbatches=1, seq_length=1, forward_only=False
+    )
+
+    assert result == 'captured-result'
+    multithreading_context.assert_called_once_with(False)
+    wrapper.forward_backward_func.assert_called_once_with(
+        model=[], data_iterator=[], num_microbatches=1, seq_length=1, forward_only=False
+    )

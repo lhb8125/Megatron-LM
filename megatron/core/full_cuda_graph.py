@@ -218,11 +218,18 @@ class FullCudaGraphWrapper:
             capture_range = f'megatron.core.full_cuda_graph.capture.{training_str}'
             nvtx_range_push(capture_range)
             try:
-                with torch.cuda.graph(
-                    FullCudaGraphWrapper.cuda_graph[training_str],
-                    stream=capture_stream,
-                    pool=get_graph_pool(self.use_single_mempool),
-                    capture_error_mode="thread_local",
+                # NVTX push/pop stacks are thread-local. Keep autograd graph construction on
+                # the capture thread so Nsight Systems can project the registered MCore ranges
+                # onto CUDA graph replay nodes. This only affects one-time graph construction;
+                # replay execution remains unchanged.
+                with (
+                    torch.autograd.grad_mode.set_multithreading_enabled(False),
+                    torch.cuda.graph(
+                        FullCudaGraphWrapper.cuda_graph[training_str],
+                        stream=capture_stream,
+                        pool=get_graph_pool(self.use_single_mempool),
+                        capture_error_mode="thread_local",
+                    ),
                 ):
                     FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
                         *args, **kwargs
