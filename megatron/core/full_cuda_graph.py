@@ -9,11 +9,7 @@ from contextlib import nullcontext
 import torch
 
 from megatron.core.tensor_parallel.random import get_all_rng_states
-from megatron.core.utils import (
-    is_nvtx_profiling_enabled,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
+from megatron.core.utils import is_nvtx_profiling_enabled, nvtx_range_pop, nvtx_range_push
 
 logger = logging.getLogger(__name__)
 
