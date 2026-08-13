@@ -272,7 +272,9 @@ class TransformerLayerSchedulePlan:
         )
 
     @staticmethod
-    def run(f_layer, b_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False):
+    def run(
+        f_layer, b_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False, next_b_layer=None
+    ):
         """Schedule one-forward-one-backward operations for a single transformer layer.
 
         This function interleaves forward and backward operations, overlapping the communications
@@ -295,6 +297,10 @@ class TransformerLayerSchedulePlan:
             b_grad (Tensor): Gradient for backward computation
             is_last_layer_in_bwd (bool):
                 Whether the current layer is the last layer in the backward pass.
+            next_b_layer (TransformerLayerSchedulePlan):
+                The next layer in backward order. Its selective-recompute weights are
+                prefetched before this layer's attention backward launches gradient
+                reduce-scatter communication.
 
         Returns:
             Functions or values for next iteration's computation
@@ -305,8 +311,6 @@ class TransformerLayerSchedulePlan:
             if b_layer.mhc_recompute is not None:
                 b_layer.mhc_recompute.forward()
             b_grad = b_layer.moe_combine.backward(b_grad)
-            if b_layer._fsdp_prefetch_recompute_forward_parameters is not None:
-                b_layer._fsdp_prefetch_recompute_forward_parameters()
 
         if f_layer is not None:
             # With an odd layer count, the middle unit can schedule forward and
@@ -331,6 +335,11 @@ class TransformerLayerSchedulePlan:
             b_grad = b_layer.moe_dispatch.backward(b_grad)
 
         if b_layer is not None and b_layer.config.ep_overlap_early_attn_memory_release:
+            if (
+                next_b_layer is not None
+                and next_b_layer._fsdp_prefetch_recompute_forward_parameters is not None
+            ):
+                next_b_layer._fsdp_prefetch_recompute_forward_parameters()
             b_grad = b_layer.attn.backward(b_grad)
 
         if f_layer is not None:
@@ -342,6 +351,11 @@ class TransformerLayerSchedulePlan:
                 f_input = f_layer.moe_combine.forward(f_input)
 
         if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
+            if (
+                next_b_layer is not None
+                and next_b_layer._fsdp_prefetch_recompute_forward_parameters is not None
+            ):
+                next_b_layer._fsdp_prefetch_recompute_forward_parameters()
             b_grad = b_layer.attn.backward(b_grad)
 
         if f_layer is not None:
@@ -612,11 +626,27 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
         overlapped_layers = min(f_num_layers, b_num_layers)
 
+        # The first backward layer has no preceding 1F1B unit from which to prefetch.
+        # Start its selective-recompute gather before entering the layer loop. Each
+        # subsequent layer is prefetched immediately before the preceding layer's
+        # attention backward, which places its gather ahead of that layer's dense
+        # reduce-scatter in NCCL launch order and gives full-iteration CUDA graphs a
+        # complete attention-backward window in which to hide the communication.
+        if b_num_layers > 0:
+            first_b_layer = b_schedule_plan.get_layer(b_num_layers - 1)
+            if first_b_layer._fsdp_prefetch_recompute_forward_parameters is not None:
+                first_b_layer._fsdp_prefetch_recompute_forward_parameters()
+
         f_layer = b_layer = None
         # combined forward and backward pass for overlapped layers
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
             b_layer = b_schedule_plan.pop_layer()
+            next_b_layer = (
+                b_schedule_plan.get_layer(b_schedule_plan.num_layers() - 1)
+                if b_schedule_plan.num_layers() > 0
+                else None
+            )
             nvtx_msg = f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b"
             nvtx_range_push(nvtx_msg)
             f_input, b_grad = TransformerLayerSchedulePlan.run(
@@ -625,6 +655,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 f_input=f_input,
                 b_grad=b_grad,
                 is_last_layer_in_bwd=(i == b_num_layers - 1),
+                next_b_layer=next_b_layer,
             )
             if i < b_num_layers - 1:
                 b_layer.release_state()
@@ -633,10 +664,19 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer()
+            next_b_layer = (
+                b_schedule_plan.get_layer(b_schedule_plan.num_layers() - 1)
+                if b_schedule_plan.num_layers() > 0
+                else None
+            )
             nvtx_msg = f"layer_{b_schedule_plan.num_layers()}b"
             nvtx_range_push(nvtx_msg)
             _, b_grad = TransformerLayerSchedulePlan.run(
-                None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
+                None,
+                b_layer,
+                b_grad=b_grad,
+                is_last_layer_in_bwd=(i == b_num_layers - 1),
+                next_b_layer=next_b_layer,
             )
             if i < b_num_layers - 1:
                 b_layer.release_state()
