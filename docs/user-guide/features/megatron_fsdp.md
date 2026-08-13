@@ -603,6 +603,8 @@ Megatron-FSDP sharding and communication buffers support mixed-precision, such t
 | **NCCL User Buffers** | Allocate and register Megatron-FSDP communication buffers with NCCL, which enables zero-`COPY`, high-precision reduction, copy-engine collectives, and symmetric kernels. Uses double buffering. | `--use-nccl-ub` | `nccl_ub=True` |
 | **NCCL Manual Registration** | Instead of registering NCCL user buffers on first allocation, batch registration of all communication buffers at the end of the initial training step. Reduces registration latency. | `--fsdp-manual-registration` | N/A (Megatron-Core Only) |
 | **Disable Symmetric Registration** | Disable symmetric registration with NCCL. Optional, as symmetric registration failure defaults to normal registration. | `--disable-symmetric-registration` | `disable_symmetric_registration=True` |
+| **UBR Registration Scope** | Register every supported FSDP communicator, or isolate registration to dense inner-FSDP collectives. | `--fsdp-ubr-registration-scope {all,dense_inner}` | `fsdp_ubr_registration_scope=...` |
+| **Symmetric Dense-Inner Reduce-Scatter** | Use registered same-offset output staging for transformer-unit dense inner-FSDP gradient reduce-scatter. Expert, outer-DP, and non-unit reductions remain ordinary. | `--fsdp-ubr-enable-symmetric-rs` | `fsdp_ubr_enable_symmetric_rs=True` |
 
 [NVIDIA Collective Communications Library (NCCL)](https://developer.nvidia.com/nccl) implements multi-device and multi-node communication primitives optimized for CUDA devices and networking from NVIDIA. Megatron-FSDP communications are registered and deeply integrated with NCCL, which enables a variety of hardware-level networking optimizations such as copy-engine AG, high-precision RS, SHARP reduction offloading, and symmetric kernels.
 
@@ -616,3 +618,12 @@ NCCL (`v2.27+`) supports symmetric allocation or registration for communicators 
 - **High-Precision Reduction**: When training large models, high-precision gradient reduction and accumulation is desired for accuracy and convergence, but communicating FP32 gradients is expensive. With symmetric registration, FP32 accumulators enable gradients to be reduced in FP32 but communicated in BF16, which decreases gradient RS communication latency while maintaining high accuracy during training. Megatron-FSDP supports FP32 main gradient accumulation but BF16 gradient communication, customizable through `megatron_fsdp.MixedPrecisionPolicy`.
 
 These optimizations significantly reduce SM resource contention for overlapped compute and communication kernels in FSDP. Symmetric registration, allocation, and pooling is also supported in PyTorch: [`torch.distributed._symmetric_memory`](https://docs.pytorch.org/docs/stable/symmetric_memory.html).
+
+The ordinary Megatron-FSDP reduce-scatter uses an in-place output view beginning at
+`rank * recvcount` inside the full input bucket. Because symmetric collectives require
+the same registered-pool offset on every rank, this layout is not symmetric-registerable.
+`fsdp_ubr_enable_symmetric_rs=True` preserves that path as the default fallback and uses
+a separate same-offset registered output shard only for eligible dense inner-FSDP unit
+reductions. The staged result is accumulated into the persistent local gradient before
+the slot is recycled. This requires `fsdp_ubr_registration_scope="dense_inner"`, manual
+symmetric registration, and the MaxPool double-buffer allocator.
