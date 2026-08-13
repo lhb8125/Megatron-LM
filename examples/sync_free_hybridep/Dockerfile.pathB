@@ -117,6 +117,17 @@ RUN pip install --no-cache-dir flash-attn-4==4.0.0b10 "nvidia-cutlass-dsl[cu13]=
 # =========================
 FROM base AS hybridep
 
+# Build DeepEP with BOTH cross-node backends enabled:
+#   * HybridEP extension (hybrid_ep_cpp): DOCA/RDMA multinode path
+#     (HYBRID_EP_MULTINODE=1, USE_NIXL=0).
+#   * DeepEP core extension (deep_ep_cpp): NVSHMEM internode + low-latency
+#     kernels. This requires NVSHMEM headers + libnvshmem_host.so.* +
+#     libnvshmem_device.a. The base image's system NVSHMEM is missing the
+#     device static lib, so we install the pip wheel (nvidia-nvshmem-cu13),
+#     which ships all of them, and point NVSHMEM_DIR at it. Without this,
+#     DeepEP compiles with -DDISABLE_NVSHMEM and any internode RDMA dispatch
+#     aborts at runtime with "NVSHMEM is disable during compilation"
+#     (config.hpp), which is exactly what broke the cross-node EP jobs.
 RUN bash -ex <<"EOF"
     cd /workspace
     gclone() { for i in 1 2 3 4 5; do git clone "$@" && return 0; echo "clone retry $i"; sleep 10; done; return 1; }
@@ -124,12 +135,26 @@ RUN bash -ex <<"EOF"
     cd rdma-core && git checkout tags/v60.0 && sh build.sh
     apt-get update
     apt-get install -y --no-install-recommends libnvidia-ml-dev
+    # NVSHMEM for DeepEP's internode path (>= 3.3.9 required by hybrid-ep branch).
+    unset PIP_CONSTRAINT
+    pip install --no-cache-dir "nvidia-nvshmem-cu13>=3.3.9"
+    NVSHMEM_DIR="$(python3 -c 'import importlib.util; print(importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0])')"
+    test -f "${NVSHMEM_DIR}/lib/libnvshmem_device.a" || { echo "libnvshmem_device.a missing in ${NVSHMEM_DIR}"; exit 1; }
+    # NVSHMEM 3.7 headers include <cuda/std/array>, which lives under the CUDA
+    # CCCL include dir (targets/<arch>/include/cccl) that nvcc does not search by
+    # default. Expose it via CPATH or DeepEP's internode.cu fails to compile with
+    # "fatal error: cuda/std/array: No such file or directory".
+    CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+    CCCL_INC="$(ls -d ${CUDA_HOME}/targets/*/include/cccl 2>/dev/null | head -1)"
+    test -n "${CCCL_INC}" || { echo "CCCL include dir not found under ${CUDA_HOME}/targets"; exit 1; }
+    export CPATH="${CCCL_INC}:${CPATH:-}"
     cd /workspace
     gclone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git
     # HybridEP hybrid-ep tip (DOCA path; drop the NIXL marker to build without NIXL).
     cd DeepEP && git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6
     rm -f .use_nixl
     RDMA_CORE_HOME=/workspace/rdma-core/build HYBRID_EP_MULTINODE=1 USE_NIXL=0 \
+        NVSHMEM_DIR="${NVSHMEM_DIR}" \
         TORCH_CUDA_ARCH_LIST="10.3" MAX_JOBS=8 \
         pip install --no-build-isolation .
     apt-get purge -y libnvidia-ml-dev
