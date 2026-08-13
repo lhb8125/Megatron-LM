@@ -9,8 +9,18 @@
 #         TE op-fuser + full-iteration CUDA graph + 1F1B combined EP-A2A overlap.
 #
 # Usage:
-#   ./run_sync_free_hybridep_b300.sh                 # normal training
-#   NSYS=1 ./run_sync_free_hybridep_b300.sh          # profile steps with nsys
+#   ./run_sync_free_hybridep_b300.sh                                   # normal training
+#   NSYS_PROFILE_ENABLED=1 ./run_sync_free_hybridep_b300.sh            # nsys, cuda only
+#   NSYS_PROFILE_ENABLED=1 NVTX_PROFILE_ENABLED=1 ./run_..._b300.sh    # nsys + NVTX
+#
+# nsys profiling is controlled the same way as the reference Megatron repo
+# (examples/meepo/pretrain.sh):
+#   NSYS_PROFILE_ENABLED=1   enable nsys capture (cudaProfilerApi range)
+#   NVTX_PROFILE_ENABLED=1   also record NVTX ranges (-t cuda,nvtx). Because THIS
+#                            repo gates framework NVTX behind --nvtx-ranges, we
+#                            additionally pass that flag so nvtx_range_push/pop fire.
+#   NSYS_CUDA_GRAPH_TRACE=node   opt-in: expand cudagraph nodes in the trace.
+# Reports land in $OUTPUT_PATH/nsys_output/<NODE_RANK>.nsys-rep.
 #
 # Env overrides: IMAGE, GPUS_PER_NODE, MASTER_PORT, OUTPUT_PATH,
 #                PROFILE_STEP_START, PROFILE_STEP_END, PROFILE_RANKS
@@ -27,10 +37,13 @@ MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29511}"
 OUTPUT_PATH="${OUTPUT_PATH:-${SCRIPT_DIR}/output}"
 TOKENIZER_DIR="${TOKENIZER_DIR:-/data/minimax-dialogue/pretrain_model/m2-mini/tokenizer}"
-NSYS="${NSYS:-0}"
+NODE_RANK="${NODE_RANK:-0}"
+NSYS_PROFILE_ENABLED="${NSYS_PROFILE_ENABLED:-0}"
+NVTX_PROFILE_ENABLED="${NVTX_PROFILE_ENABLED:-0}"
+NSYS_CUDA_GRAPH_TRACE="${NSYS_CUDA_GRAPH_TRACE:-}"
 PROFILE_STEP_START="${PROFILE_STEP_START:-20}"
 PROFILE_STEP_END="${PROFILE_STEP_END:-23}"
-PROFILE_RANKS="${PROFILE_RANKS:-0 1 2 3 4 5 6 7}"
+PROFILE_RANKS="${PROFILE_RANKS:-0}"
 
 DOCKER="${DOCKER:-sudo docker}"
 
@@ -50,52 +63,33 @@ LAST_RANK=$((GPUS_PER_NODE - 1))
 DIST_ARGS="--nproc_per_node ${GPUS_PER_NODE} --nnodes 1 --node_rank 0 \
   --master_addr ${MASTER_ADDR} --master_port ${MASTER_PORT}"
 
-# nsys: two modes.
-#   NSYS=1  -> cudaProfilerApi capture range driven by Megatron's --profile
-#              (steps PROFILE_STEP_START..END), wrapped per RANK so stop-shutdown
-#              cleanly writes each rank's report.
-#   NSYS=2  -> time-window capture (--delay/--duration). Robust fallback that
-#              does not depend on the app calling cudaProfilerStop; writes the
-#              report unconditionally after NSYS_DURATION seconds.
-NSYS_PREFIX=""
-NO_PYTHON=""
-# PY_BIN is the interpreter placed *after* the nsys wrapper. With torchrun
-# --no-python (nsys per-rank wrapping) we must re-add `python`; without nsys,
-# torchrun runs the .py script directly so PY_BIN stays empty.
-PY_BIN=""
-if [[ "${NSYS}" == "1" ]]; then
-  NSYS_OUT="${OUTPUT_PATH}/nsys"
-  mkdir -p "${NSYS_OUT}"
+# nsys profiling — aligned with the reference repo (examples/meepo/pretrain.sh):
+# a single NSYS_PROFILE_ARGS prefix placed before torchrun, cudaProfilerApi
+# capture range driven by Megatron's --profile (steps PROFILE_STEP_START..END).
+NSYS_PROFILE_ARGS=""
+if [[ "${NSYS_PROFILE_ENABLED}" == "1" ]]; then
+  # Host-side dir for mkdir/chmod; the -o path below is the in-container mount.
+  mkdir -p "${OUTPUT_PATH}/nsys_output"
+  chmod -R 777 "${OUTPUT_PATH}/nsys_output"
+  NSYS_OUTPUT_DIR="/workspace/output/nsys_output"
   TRAIN_ARGS="${TRAIN_ARGS} --profile --profile-step-start ${PROFILE_STEP_START} \
     --profile-step-end ${PROFILE_STEP_END} --profile-ranks ${PROFILE_RANKS}"
-  NO_PYTHON="--no-python"
-  PY_BIN="python"
-  NSYS_PREFIX="nsys profile -s none -o ${NSYS_OUT}/report_rank%q{RANK} \
-    -t cuda,nvtx --cuda-graph-trace=node \
-    --force-overwrite true --capture-range=cudaProfilerApi \
-    --capture-range-end=stop-shutdown --kill=sigterm --cpuctxsw=none"
-elif [[ "${NSYS}" == "2" ]]; then
-  NSYS_OUT="${OUTPUT_PATH}/nsys"
-  mkdir -p "${NSYS_OUT}"
-  NSYS_DELAY="${NSYS_DELAY:-150}"
-  NSYS_DURATION="${NSYS_DURATION:-8}"
-  NO_PYTHON="--no-python"
-  PY_BIN="python"
-  NSYS_PREFIX="nsys profile -s none -o ${NSYS_OUT}/report_rank%q{RANK} \
-    -t cuda,nvtx --cuda-graph-trace=node \
-    --force-overwrite true --delay=${NSYS_DELAY} --duration=${NSYS_DURATION} \
-    --kill=none --cpuctxsw=none"
-elif [[ "${NSYS}" == "3" ]]; then
-  # Single-rank (default rank0) full CUDA+NVTX trace over a few steady iterations.
-  # Only the profiled rank is wrapped by nsys (via nsys_rank_shim.sh); other ranks
-  # run plain python. Uses a time window (--delay/--duration, --kill=none) which is
-  # the mode that reliably records CUPTI kernel/API activity + writes the report
-  # in this docker+torchrun setup. Size NSYS_DELAY so the window lands in steady
-  # state and NSYS_DURATION to cover ~3 iterations.
-  NSYS_OUT="${OUTPUT_PATH}/nsys"
-  mkdir -p "${NSYS_OUT}"
-  NO_PYTHON="--no-python"
-  PY_BIN="/workspace/Megatron-LM/examples/sync_free_hybridep/nsys_rank_shim.sh"
+  # Opt-in: export NSYS_CUDA_GRAPH_TRACE=node to expand cudagraph nodes in traces.
+  CUDA_GRAPH_TRACE_ARG=""
+  if [[ -n "${NSYS_CUDA_GRAPH_TRACE}" ]]; then
+    CUDA_GRAPH_TRACE_ARG="--cuda-graph-trace=${NSYS_CUDA_GRAPH_TRACE}"
+  fi
+  if [[ "${NVTX_PROFILE_ENABLED}" == "1" ]]; then
+    # This repo gates framework NVTX behind --nvtx-ranges; add it so the
+    # nvtx_range_push/pop tags actually show up in the trace.
+    TRAIN_ARGS="${TRAIN_ARGS} --nvtx-ranges"
+    NSYS_TRACE="cuda,nvtx"
+  else
+    NSYS_TRACE="cuda"
+  fi
+  NSYS_PROFILE_ARGS="nsys profile -s none -o ${NSYS_OUTPUT_DIR}/${NODE_RANK} \
+    -t ${NSYS_TRACE} ${CUDA_GRAPH_TRACE_ARG} --force-overwrite true \
+    --capture-range=cudaProfilerApi --capture-range-end=stop --cpuctxsw=none"
 fi
 
 # ------------------------------------------------------------------ in-container cmd
@@ -104,40 +98,22 @@ set -uo pipefail
 cd /workspace/Megatron-LM
 export PYTHONPATH=/workspace/Megatron-LM:\${PYTHONPATH:-}
 ${ENV_EXPORTS}
-# Make sure any nsys reports (incl. nsys' /tmp/nsys-root fallback) land in the
-# mounted output dir even if the run is torn down at capture-range shutdown.
-collect_nsys() {
-  if [[ "${NSYS}" != "0" ]]; then
-    mkdir -p /workspace/output/nsys
-    find /tmp/nsys-root /workspace/Megatron-LM /workspace/output -maxdepth 2 \
-      -name '*.nsys-rep' -newermt '-1 hour' 2>/dev/null \
-      -exec cp -f {} /workspace/output/nsys/ \; || true
-  fi
-}
-trap collect_nsys EXIT
-export NSYS_OUT_DIR=/workspace/output/nsys
-export NSYS_PROFILE_RANK=${PROFILE_RANK:-0}
-export NSYS_TRACE=${NSYS_TRACE:-cuda,nvtx}
-export NSYS_SHIM_MODE=${NSYS_SHIM_MODE:-window}
-export NSYS_SHIM_DELAY=${NSYS_DELAY:-125}
-export NSYS_SHIM_DURATION=${NSYS_DURATION:-4}
 echo "=================== effective env (subset) ==================="
 env | grep -E 'NVTE_|HYBRID|NVLINK|CUDA_DEVICE_MAX' || true
 echo "=============================================================="
-stdbuf -oL -eL python -u -m torch.distributed.run ${DIST_ARGS} ${NO_PYTHON} \
-  ${NSYS_PREFIX} \
-  ${PY_BIN} /workspace/Megatron-LM/pretrain_gpt.py \
+echo "NSYS_PROFILE_ARGS: ${NSYS_PROFILE_ARGS}"
+${NSYS_PROFILE_ARGS} python -u -m torch.distributed.run ${DIST_ARGS} \
+  /workspace/Megatron-LM/pretrain_gpt.py \
   ${TRAIN_ARGS} \
   --save-interval 100000 \
   --tensorboard-dir /workspace/output/tensorboard \
   2>&1 | stdbuf -oL tee /workspace/output/train.log
-collect_nsys
 INNER_EOF
 
 # nsys/CUPTI kernel & CUDA-API tracing needs the SYS_ADMIN capability inside the
 # container (otherwise only NVTX is recorded). Only added when profiling.
 CAP_ARGS=""
-if [[ "${NSYS}" != "0" ]]; then
+if [[ "${NSYS_PROFILE_ENABLED}" == "1" ]]; then
   CAP_ARGS="--cap-add=SYS_ADMIN"
 fi
 

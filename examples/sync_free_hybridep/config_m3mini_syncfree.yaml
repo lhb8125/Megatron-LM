@@ -145,8 +145,11 @@ ARGS:
   overlap_grad_reduce: true
   overlap_param_gather: true
   # ---------- recompute ----------
+  # This repo's selective recompute allows only:
+  # core_attn, moe_act, layernorm, mla_up_proj, mlp, moe, shared_experts, mhc, gdn.
+  # (the meepo job's moe_fc1 / linear_qkv / dense_fc1_act are meepo-only extensions.)
   recompute_granularity: selective
-  recompute_modules: [moe_act, layernorm, moe_fc1, linear_qkv]
+  recompute_modules: [moe_act, layernorm]
   # ---------- runtime / misc ----------
   use_mcore_models: true
   use_flash_attn: true
