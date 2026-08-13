@@ -1,24 +1,22 @@
 # ============================================================
-# M3-Mini-style GPT-MoE — full attention + mock data + sync-free HybridEP
+# M3-Mini-style GPT-MoE — full attention + mock data + sync-free DeepEP
 #
-# Derived from the meepo M3-Mini profile job, ported to THIS repo's plain
-# pretrain_gpt.py (no ViT / sparse-attention / dist_muon / MTP-multimodal infra).
-# Kept from the original: topology (TP1/PP4/EP64/CP4), model size (28 layers,
-# hidden 7168, 384 experts, moe_ffn 5120, top-4), MoE freq, precision, logging.
-# Changed:
-#   * full attention        (dropped experimental_attention_variant=minimax_sparse
-#                            and all sparse_*; enable_varlen_attention off)
-#   * mock data             (--mock-data; no external meepo data manifest)
-#   * sync-free HybridEP     (deepep -> hybridep + static budget + paged stash +
-#                            device-init GroupedTensor), keeping the job's existing
-#                            1F1B combined overlap (overlap_moe_expert_parallel_comm
-#                            + delay_wgrad_compute).
-#   * optimizer adam         (the job's dist_muon needs Emerging-Optimizers; adam +
-#                            distributed optimizer is used here for a self-contained run)
+# Mirror of the online job j-5gkeia28y4 ("[sync-free][prof] NV Megatron DeepEP
+# baseline"): the DeepEP flex dispatcher (NOT hybridep), with NO paged stash and
+# NO device-init GroupedTensor. Kept from that job: topology (TP1/PP2/EP16/CP4),
+# model size (28 layers, hidden 7168, 48 experts, moe_ffn 5120, top-4), MoE freq,
+# precision, logging, 1F1B combined EP-A2A overlap.
 #
-# Consumed by examples/sync_free_hybridep/pretrain.sh (converts ARGS -> CLI flags
-# for pretrain_gpt.py; ENV_VARS -> exports). Topology below assumes 256 GPUs
-# (1*4*64 = 256; DP = world/(TP*PP*EP-with-CP) is derived by Megatron).
+# Two bugs from the online yaml are fixed here:
+#   * VPP required          overlap_moe_expert_parallel_comm with PP>1 asserts
+#                           unless virtual_pipeline_model_parallel_size is set;
+#                           added num_layers_per_virtual_pipeline_stage.
+#   * recompute_modules     online used [moe_act, layernorm, linear_qkv], but
+#                           this repo's selective recompute does not support
+#                           linear_qkv, so it is dropped.
+#
+# Consumed by examples/sync_free_hybridep/pretrain.sh. See
+# config_m3mini_syncfree_min.yaml for a single-node smoke-test shrink.
 ENV_VARS:
   NVTE_ALLOW_NONDETERMINISTIC_ALGO: '1'
   PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -29,8 +27,8 @@ ENV_VARS:
   NVTE_FUSED_ATTN: '1'
   NVTE_NORM_FWD_USE_CUDNN: '0'
   NVTE_NORM_BWD_USE_CUDNN: '0'
-  NVTE_FWD_LAYERNORM_SM_MARGIN: '20'
-  NVTE_BWD_LAYERNORM_SM_MARGIN: '20'
+  NVTE_FWD_LAYERNORM_SM_MARGIN: '32'
+  NVTE_BWD_LAYERNORM_SM_MARGIN: '32'
   NUM_OF_TOKENS_PER_CHUNK_COMBINE_API: '128'
   NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API: '128'
   HF_HUB_OFFLINE: '1'
@@ -68,7 +66,7 @@ ARGS:
   max_position_embeddings: 24576
   seq_length: 24576
   # ---------- MoE ----------
-  num_experts: 384
+  num_experts: 48
   moe_ffn_hidden_size: 5120
   moe_router_topk: 4
   moe_router_score_function: sigmoid
@@ -84,30 +82,21 @@ ARGS:
   moe_router_padding_for_quantization: true
   moe_router_force_load_balancing: true
   moe_shared_expert_intermediate_size: 5120
-  # ---------- parallelism (M3-Mini job topology: 256 GPUs) ----------
+  # ---------- parallelism (online DeepEP job topology) ----------
   tensor_model_parallel_size: 1
-  pipeline_model_parallel_size: 4
+  pipeline_model_parallel_size: 2
   # EP A2A overlap (overlap_moe_expert_parallel_comm) with PP>1 requires VPP.
-  # 28 layers / PP4 -> 7 layers per stage; VPP with 1 layer per virtual stage.
+  # 28 layers / PP2 -> 14 layers per stage; VPP with 1 layer per virtual stage.
   num_layers_per_virtual_pipeline_stage: 1
-  expert_model_parallel_size: 64
+  expert_model_parallel_size: 16
   expert_tensor_parallel_size: 1
   context_parallel_size: 4
   cp_comm_type: a2a
   sequence_parallel: true
   use_distributed_optimizer: true
-  # ---------- HybridEP sync-free dispatch ----------
+  # ---------- DeepEP sync-free dispatch (no paged stash, no grouped tensor) ----------
   moe_token_dispatcher_type: flex
-  moe_flex_dispatcher_backend: hybridep
-  moe_hybridep_num_sms: 20
-  moe_expert_rank_capacity_factor: 1.5
-  # ---------- paged stash ----------
-  moe_paged_stash: true
-  moe_paged_stash_page_size: 64
-  moe_paged_stash_buffer_size_factor_cuda: 1.1
-  moe_paged_stash_buffer_size_factor_cpu: 0.0
-  # ---------- device-init GroupedTensor (Path B: no op-fuser, no full CG) ----------
-  moe_use_grouped_tensor: true
+  moe_flex_dispatcher_backend: deepep
   # ---------- 1F1B combined EP-A2A overlap ----------
   overlap_moe_expert_parallel_comm: true
   delay_wgrad_compute: true
@@ -147,10 +136,7 @@ ARGS:
   use_precision_aware_optimizer: true
   overlap_grad_reduce: true
   overlap_param_gather: true
-  # ---------- recompute ----------
-  # This repo's selective recompute allows only:
-  # core_attn, moe_act, layernorm, mla_up_proj, mlp, moe, shared_experts, mhc, gdn.
-  # (the meepo job's moe_fc1 / linear_qkv / dense_fc1_act are meepo-only extensions.)
+  # ---------- recompute (linear_qkv dropped: unsupported in this repo) ----------
   recompute_granularity: selective
   recompute_modules: [moe_act, layernorm]
   # ---------- runtime / misc ----------
