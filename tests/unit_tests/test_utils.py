@@ -162,6 +162,30 @@ def test_nvtx_range(msg, suffix):
     assert execution_tracker['ranges']
 
 
+def test_nvtx_range_uses_registered_messages():
+    fake_attributes = object()
+    fake_domain = mock.Mock()
+    fake_domain.get_event_attributes.return_value = fake_attributes
+
+    with (
+        patch.object(util, 'HAVE_NVTX', True),
+        patch.object(util, 'nvtx', mock.Mock(get_domain=mock.Mock(return_value=fake_domain))),
+        patch.object(util, '_nvtx_domain', None),
+        patch.object(util, '_nvtx_range_attributes_pool', {}),
+        patch.object(util, '_nvtx_range_messages', []),
+    ):
+        util.configure_nvtx_profiling(True)
+        util.nvtx_range_push("registered_message")
+        util.nvtx_range_pop("registered_message")
+        util.nvtx_range_push("registered_message")
+        util.nvtx_range_pop("registered_message")
+        util.configure_nvtx_profiling(False)
+
+    fake_domain.get_event_attributes.assert_called_once_with(message="registered_message")
+    assert fake_domain.push_range.call_args_list == [mock.call(fake_attributes)] * 2
+    assert fake_domain.pop_range.call_count == 2
+
+
 def test_nvtx_decorator():
     # Track function execution
     execution_tracker = {'decorated': False, 'decorated_with_message': False}

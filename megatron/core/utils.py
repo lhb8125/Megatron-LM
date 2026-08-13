@@ -29,6 +29,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Un
 import numpy
 import torch
 
+try:
+    import nvtx
+
+    HAVE_NVTX = True
+except ImportError:
+    nvtx = None
+    HAVE_NVTX = False
+
 from megatron.core import config
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.package_info import __version__ as mcore_version
@@ -2482,10 +2490,12 @@ def get_thd_batch_on_this_cp_rank(
 
 _nvtx_enabled: bool = False  # Whether NVTX range profiling is enabled
 _nvtx_range_messages: list[str] = []  # Messages associated with active NVTX ranges
-# Permanently pin the string object representing the name of each NVTX range.
-# These string objects may be created during CUDA graph capture.
-# If they are not pinned, the NVTX range names will be garbage-collected and nsys profile crashes.
+# Permanently pin each NVTX range name and, when the nvtx package is available, its registered
+# EventAttributes. Nsight Systems needs registered strings to project ranges recorded during CUDA
+# graph construction onto graph replay. torch.cuda.nvtx.range_push emits inline strings instead.
 _nvtx_range_msg_pool: dict[str, str] = {}
+_nvtx_range_attributes_pool: dict[str, Any] = {}
+_nvtx_domain = None
 
 
 def configure_nvtx_profiling(enabled: bool) -> None:
@@ -2494,8 +2504,10 @@ def configure_nvtx_profiling(enabled: bool) -> None:
     Args:
         enabled (bool): Whether to enable NVTX range profiling
     """
-    global _nvtx_enabled
+    global _nvtx_domain, _nvtx_enabled
     _nvtx_enabled = enabled
+    if enabled and HAVE_NVTX and _nvtx_domain is None:
+        _nvtx_domain = nvtx.get_domain("megatron")
 
 
 def _nvtx_range_get_func_path():
@@ -2535,8 +2547,17 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     # Track messages to ensure consistency when popping
     _nvtx_range_messages.append(msg)
 
-    # Push NVTX range
-    torch.cuda.nvtx.range_push(msg)
+    # The nvtx package registers messages with NVTX before pushing them. This is required for
+    # Nsight Systems CUDA graph NVTX projection. Keep the torch fallback for minimal MCore
+    # installations that do not include the optional nvtx package.
+    if _nvtx_domain is not None:
+        attributes = _nvtx_range_attributes_pool.get(msg)
+        if attributes is None:
+            attributes = _nvtx_domain.get_event_attributes(message=msg)
+            _nvtx_range_attributes_pool[msg] = attributes
+        _nvtx_domain.push_range(attributes)
+    else:
+        torch.cuda.nvtx.range_push(msg)
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2564,8 +2585,11 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
             f"but last range has msg={last_msg}"
         )
 
-    # Pop NVTX range
-    torch.cuda.nvtx.range_pop()
+    # Pop NVTX range using the same backend selected by configure_nvtx_profiling.
+    if _nvtx_domain is not None:
+        _nvtx_domain.pop_range()
+    else:
+        torch.cuda.nvtx.range_pop()
 
 
 @lru_cache(maxsize=None)
