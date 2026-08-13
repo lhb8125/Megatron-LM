@@ -127,7 +127,13 @@ ARGS:
   bf16: true
   fp8_format: e4m3
   fp8_recipe: mxfp8
-  fp8_param_gather: true
+  # NOTE: the online job set fp8_param_gather: true, but TE 2.19 (used by both
+  # the CI image and the online job image) raises "replace_raw_data for
+  # MXFP8Tensor is not supported yet" at model build. The online job never
+  # reached that point because it died earlier at argparse (moe-layer-freq).
+  # Disabled here so the DeepEP recipe actually runs; re-enable once TE
+  # implements MXFP8Tensor replace_raw_data.
+  fp8_param_gather: false
   accumulate_allreduce_grads_in_fp32: true
   main_grads_dtype: fp32
   main_params_dtype: fp32

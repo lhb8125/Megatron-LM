@@ -138,7 +138,10 @@ ARGS:
   bf16: true
   fp8_format: e4m3
   fp8_recipe: mxfp8
-  fp8_param_gather: true
+  # fp8_param_gather + mxfp8 raises "replace_raw_data for MXFP8Tensor is not
+  # supported yet" in TE 2.19 (the CI / online job image). Disabled until TE
+  # implements MXFP8Tensor replace_raw_data.
+  fp8_param_gather: false
   accumulate_allreduce_grads_in_fp32: true
   main_grads_dtype: fp32
   main_params_dtype: fp32

@@ -136,10 +136,12 @@ ARGS:
   bf16: true
   fp8_format: e4m3
   fp8_recipe: mxfp8
-  # fp8_param_gather + mxfp8 hits "replace_raw_data for MXFP8Tensor is not
-  # supported yet" in this image's TE; disabled for the smoke test (it is a
-  # comm optimization, not needed to validate the config path). Re-enable on
-  # an image whose TE implements MXFP8Tensor.replace_raw_data.
+  # fp8_param_gather + mxfp8 raises "replace_raw_data for MXFP8Tensor is not
+  # supported yet" in TE 2.19 (the version in BOTH the CI image and the online
+  # job image), so it cannot be used with mxfp8 today. The online job never hit
+  # this only because it died earlier at argparse; once that is fixed the online
+  # config would hit it too. Keep disabled until TE implements MXFP8Tensor
+  # replace_raw_data.
   fp8_param_gather: false
   accumulate_allreduce_grads_in_fp32: true
   main_grads_dtype: fp32
