@@ -8,6 +8,7 @@ import logging
 import torch
 
 from megatron.core.tensor_parallel.random import get_all_rng_states
+from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 logger = logging.getLogger(__name__)
 
@@ -214,22 +215,32 @@ class FullCudaGraphWrapper:
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = get_shared_capture_stream()
-            with torch.cuda.graph(
-                FullCudaGraphWrapper.cuda_graph[training_str],
-                stream=capture_stream,
-                pool=get_graph_pool(self.use_single_mempool),
-                capture_error_mode="thread_local",
-            ):
-                FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
-                    *args, **kwargs
-                )
+            capture_range = f'megatron.core.full_cuda_graph.capture.{training_str}'
+            nvtx_range_push(capture_range)
+            try:
+                with torch.cuda.graph(
+                    FullCudaGraphWrapper.cuda_graph[training_str],
+                    stream=capture_stream,
+                    pool=get_graph_pool(self.use_single_mempool),
+                    capture_error_mode="thread_local",
+                ):
+                    FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                        *args, **kwargs
+                    )
+            finally:
+                nvtx_range_pop(capture_range)
             torch.cuda.synchronize()
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
         else:
-            FullCudaGraphWrapper.cuda_graph[training_str].replay()
+            replay_range = f'megatron.core.full_cuda_graph.replay.{training_str}'
+            nvtx_range_push(replay_range)
+            try:
+                FullCudaGraphWrapper.cuda_graph[training_str].replay()
+            finally:
+                nvtx_range_pop(replay_range)
         self.next_iter(training_str)
         return FullCudaGraphWrapper.result[training_str]
 

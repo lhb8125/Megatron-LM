@@ -90,3 +90,27 @@ def test_forward_backward_func_with_full_cuda_graph(mocker):
         print(losses_reduced)
         assert i['loss_reduced'] == j['loss_reduced']
     Utils.destroy_model_parallel()
+
+
+def test_full_cuda_graph_replay_has_nvtx_range(mocker):
+    graph = mocker.Mock()
+    mocker.patch.object(FullCudaGraphWrapper, 'curr_iteration', {'training': 2, 'validation': 0})
+    mocker.patch.object(FullCudaGraphWrapper, 'cuda_graph', {'training': graph, 'validation': None})
+    mocker.patch.object(
+        FullCudaGraphWrapper, 'result', {'training': 'captured-result', 'validation': None}
+    )
+    push = mocker.patch('megatron.core.full_cuda_graph.nvtx_range_push')
+    pop = mocker.patch('megatron.core.full_cuda_graph.nvtx_range_pop')
+
+    wrapper = FullCudaGraphWrapper.__new__(FullCudaGraphWrapper)
+    wrapper.cuda_graph_warmup_steps = 1
+    wrapper.data_read = mocker.Mock(return_value=[])
+
+    result = wrapper(
+        model=[], data_iterator=[], num_microbatches=1, seq_length=1, forward_only=False
+    )
+
+    assert result == 'captured-result'
+    graph.replay.assert_called_once_with()
+    push.assert_called_once_with('megatron.core.full_cuda_graph.replay.training')
+    pop.assert_called_once_with('megatron.core.full_cuda_graph.replay.training')
