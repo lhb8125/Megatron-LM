@@ -64,7 +64,13 @@ if [[ ${NSYS_PROFILE_ENABLED:-0} -eq 1 ]]; then
       --profile-step-end ${PROFILE_STEP_END:-47} --profile-ranks ${PROFILE_RANKS:-0}"
     NSYS_OUTPUT_DIR=${TENSORBOARD_LOG_PATH:-/tensorboard-logs}/nsys_output
     mkdir -p "${NSYS_OUTPUT_DIR}" && chmod -R 777 "${NSYS_OUTPUT_DIR}" || true
-    TRACE="cuda"; [[ ${NVTX_PROFILE_ENABLED:-0} -eq 1 ]] && TRACE="cuda,nvtx"
+    TRACE="cuda"
+    if [[ ${NVTX_PROFILE_ENABLED:-0} -eq 1 ]]; then
+        TRACE="cuda,nvtx"
+        # This repo gates framework NVTX ranges behind --nvtx-ranges; without it
+        # nvtx_range_push/pop are no-ops and no framework tags show up in nsys.
+        TRAIN_ARGS+=" --nvtx-ranges"
+    fi
     NSYS_PROFILE_ARGS="nsys profile -s none -o ${NSYS_OUTPUT_DIR}/${NODE_RANK} \
       -t ${TRACE} ${NSYS_CUDA_GRAPH_TRACE:+--cuda-graph-trace=${NSYS_CUDA_GRAPH_TRACE}} \
       --force-overwrite true --capture-range=cudaProfilerApi \

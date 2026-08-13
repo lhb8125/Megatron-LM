@@ -35,7 +35,10 @@ IMAGE="${IMAGE:-megatron-sync-free-hybridep:b300}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29511}"
-OUTPUT_PATH="${OUTPUT_PATH:-${TENSORBOARD_LOG_PATH}/output}"
+OUTPUT_PATH="${OUTPUT_PATH:-${SCRIPT_DIR}/output}"
+# In-container tensorboard log dir. Like the reference repo, nsys reports live
+# under ${TENSORBOARD_LOG_PATH}/nsys_output and --tensorboard-dir == this path.
+TENSORBOARD_LOG_PATH="${TENSORBOARD_LOG_PATH:-/workspace/output/tensorboard}"
 TOKENIZER_DIR="${TOKENIZER_DIR:-/data/minimax-dialogue/pretrain_model/m2-mini/tokenizer}"
 NODE_RANK="${NODE_RANK:-0}"
 NSYS_PROFILE_ENABLED="${NSYS_PROFILE_ENABLED:-0}"
@@ -68,12 +71,9 @@ DIST_ARGS="--nproc_per_node ${GPUS_PER_NODE} --nnodes 1 --node_rank 0 \
 # capture range driven by Megatron's --profile (steps PROFILE_STEP_START..END).
 NSYS_PROFILE_ARGS=""
 if [[ "${NSYS_PROFILE_ENABLED}" == "1" ]]; then
-  # Aligned with the reference repo: nsys reports live under the tensorboard log
-  # dir ($TENSORBOARD_LOG_PATH/nsys_output). Host-side dir for mkdir/chmod; the
-  # -o path below is the in-container mount (--tensorboard-dir is /workspace/output/tensorboard).
-  mkdir -p "${OUTPUT_PATH}/tensorboard/nsys_output"
-  chmod -R 777 "${OUTPUT_PATH}/tensorboard/nsys_output"
-  NSYS_OUTPUT_DIR="/workspace/output/tensorboard/nsys_output"
+  # Reference repo: NSYS_OUTPUT_DIR=$TENSORBOARD_LOG_PATH/nsys_output, created
+  # (mkdir+chmod 777) in-container next to torchrun. See INNER below.
+  NSYS_OUTPUT_DIR="${TENSORBOARD_LOG_PATH}/nsys_output"
   TRAIN_ARGS="${TRAIN_ARGS} --profile --profile-step-start ${PROFILE_STEP_START} \
     --profile-step-end ${PROFILE_STEP_END} --profile-ranks ${PROFILE_RANKS}"
   # Opt-in: export NSYS_CUDA_GRAPH_TRACE=node to expand cudagraph nodes in traces.
@@ -100,6 +100,10 @@ set -uo pipefail
 cd /workspace/Megatron-LM
 export PYTHONPATH=/workspace/Megatron-LM:\${PYTHONPATH:-}
 ${ENV_EXPORTS}
+if [[ "${NSYS_PROFILE_ENABLED}" == "1" ]]; then
+  mkdir -p "${NSYS_OUTPUT_DIR}"
+  chmod -R 777 "${NSYS_OUTPUT_DIR}"
+fi
 echo "=================== effective env (subset) ==================="
 env | grep -E 'NVTE_|HYBRID|NVLINK|CUDA_DEVICE_MAX' || true
 echo "=============================================================="
@@ -108,7 +112,7 @@ ${NSYS_PROFILE_ARGS} python -u -m torch.distributed.run ${DIST_ARGS} \
   /workspace/Megatron-LM/pretrain_gpt.py \
   ${TRAIN_ARGS} \
   --save-interval 100000 \
-  --tensorboard-dir /workspace/output/tensorboard \
+  --tensorboard-dir ${TENSORBOARD_LOG_PATH} \
   2>&1 | stdbuf -oL tee /workspace/output/train.log
 INNER_EOF
 
