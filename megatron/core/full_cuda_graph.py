@@ -9,7 +9,11 @@ from contextlib import nullcontext
 import torch
 
 from megatron.core.tensor_parallel.random import get_all_rng_states
-from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import (
+    is_nvtx_profiling_enabled,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -244,9 +248,16 @@ class FullCudaGraphWrapper:
             capture_range = f'megatron.core.full_cuda_graph.capture.{training_str}'
             nvtx_range_push(capture_range)
             try:
+                # NVTX push/pop stacks are thread-local. Keep autograd graph construction on
+                # the capture thread while fine-grained NVTX is active so Nsight Systems can
+                # associate registered MCore ranges with replay nodes. Preserve the existing
+                # selective-prefetch requirement outside profiling runs.
+                disable_autograd_multithreading = (
+                    self.disable_autograd_multithreading or is_nvtx_profiling_enabled()
+                )
                 autograd_context = (
                     torch.autograd.set_multithreading_enabled(False)
-                    if self.disable_autograd_multithreading
+                    if disable_autograd_multithreading
                     else nullcontext()
                 )
                 with autograd_context:

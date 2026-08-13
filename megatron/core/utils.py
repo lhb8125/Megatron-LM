@@ -2619,6 +2619,11 @@ def configure_nvtx_profiling(enabled: bool) -> None:
         _nvtx_domain = nvtx.get_domain("megatron")
 
 
+def is_nvtx_profiling_enabled() -> bool:
+    """Return whether MCore fine-grained NVTX emission is active."""
+    return _nvtx_enabled
+
+
 def _nvtx_range_get_func_path():
     """Get the path of a function. Assumes being called from nvtx_range_push/pop.
 
