@@ -4165,6 +4165,15 @@ def _add_distributed_args(parser):
         'dense inner-FSDP parameter all-gather communicator.',
     )
     group.add_argument(
+        '--fsdp-ubr-enable-symmetric-rs',
+        action='store_true',
+        default=False,
+        help='Use registered same-offset staging outputs so transformer-unit dense '
+        'inner-FSDP reduce-scatter can select NCCL symmetric kernels. Requires '
+        '--use-nccl-ub, --fsdp-ubr-registration-scope dense_inner, symmetric manual '
+        'registration, and --megatron-fsdp-max-pool-double-buffer.',
+    )
+    group.add_argument(
         '--fsdp-manual-registration',
         action='store_true',
         dest='fsdp_manual_registration',

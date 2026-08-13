@@ -92,6 +92,7 @@ def fully_shard_model(
     fsdp_db_use_persist_buf_on_alloc_fail: bool = False,
     disable_symmetric_registration: bool = False,
     fsdp_ubr_registration_scope: str = 'all',
+    fsdp_ubr_enable_symmetric_rs: bool = False,
     enable_fine_grained_param_gather: bool = False,
     prefetch_recompute_forward_weights: bool = False,
     cache_param_bucket_views: bool = False,
@@ -258,6 +259,12 @@ def fully_shard_model(
             the default behavior; ``dense_inner`` registers only dense inner-FSDP
             parameter all-gathers. Defaults to ``all``.
 
+        fsdp_ubr_enable_symmetric_rs (bool):
+            Whether to stage eligible dense inner-FSDP reduce-scatter outputs in a
+            same-offset symmetric buffer. This allows NCCL symmetric reduce-scatter
+            kernels while preserving the rank-offset in-place path as the default.
+            Defaults to False.
+
         enable_fine_grained_param_gather (bool):
             Whether to enable "fine-grained" param all-gather, which can improve performance
             when using MXFP8 parameters with activation recomputation. Specifically, it
@@ -401,6 +408,8 @@ def fully_shard_model(
         fsdp_db_use_persist_buf_on_alloc_fail=fsdp_db_use_persist_buf_on_alloc_fail,
         disable_symmetric_registration=disable_symmetric_registration,
         fsdp_ubr_registration_scope=fsdp_ubr_registration_scope,
+        fsdp_ubr_enable_symmetric_rs=fsdp_ubr_enable_symmetric_rs,
+        fsdp_manual_registration=fsdp_ubr_enable_symmetric_rs,
         megatron_fsdp_prefetch_recompute_forward_weights=prefetch_recompute_forward_weights,
         megatron_fsdp_cache_param_bucket_views=cache_param_bucket_views,
         megatron_fsdp_use_decoupled_grad=use_decoupled_grad,
@@ -712,6 +721,7 @@ def fully_shard(
     fsdp_db_use_persist_buf_on_alloc_fail: bool = False,
     disable_symmetric_registration: bool = False,
     fsdp_ubr_registration_scope: str = 'all',
+    fsdp_ubr_enable_symmetric_rs: bool = False,
     enable_fine_grained_param_gather: bool = False,
     prefetch_recompute_forward_weights: bool = False,
     cache_param_bucket_views: bool = False,
@@ -769,6 +779,7 @@ def fully_shard(
         fsdp_db_use_persist_buf_on_alloc_fail=fsdp_db_use_persist_buf_on_alloc_fail,
         disable_symmetric_registration=disable_symmetric_registration,
         fsdp_ubr_registration_scope=fsdp_ubr_registration_scope,
+        fsdp_ubr_enable_symmetric_rs=fsdp_ubr_enable_symmetric_rs,
         enable_fine_grained_param_gather=enable_fine_grained_param_gather,
         prefetch_recompute_forward_weights=prefetch_recompute_forward_weights,
         cache_param_bucket_views=cache_param_bucket_views,
