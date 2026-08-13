@@ -1,19 +1,14 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import math
-from types import SimpleNamespace
 
 import pytest
 import torch
 
 from megatron.core.distributed.fsdp.src.megatron_fsdp import param_and_grad_buffer as pgb_module
-from megatron.core.distributed.fsdp.src.megatron_fsdp.distributed_data_parallel_config import (
-    DistributedDataParallelConfig,
-)
 from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import (
     BucketingPolicy,
     MaxPoolAllocator,
-    ParamAndGradBuffer,
     ParameterGroup,
     _build_ubr_arena_layout,
     _get_parameter_groups,
@@ -137,24 +132,6 @@ def test_ubr_scope_rejects_unknown_value():
 
     with pytest.raises(ValueError, match="Invalid FSDP UBR registration scope"):
         _get_ubr_registration_groups(dist_index, "outer")
-
-
-def test_symmetric_rs_config_is_explicit_and_requires_registered_dense_maxpool():
-    """The ordinary rank-offset RS remains the default and invalid opt-ins fail early."""
-    assert not DistributedDataParallelConfig().fsdp_ubr_enable_symmetric_rs
-
-    with pytest.raises(ValueError, match="requires nccl_ub=True"):
-        DistributedDataParallelConfig(fsdp_ubr_enable_symmetric_rs=True)
-
-    config = DistributedDataParallelConfig(
-        nccl_ub=True,
-        fsdp_ubr_registration_scope="dense_inner",
-        fsdp_ubr_enable_symmetric_rs=True,
-        fsdp_manual_registration=True,
-        megatron_fsdp_max_pool_double_buffer=True,
-    )
-    assert config.fsdp_ubr_enable_symmetric_rs
-    assert config.fsdp_double_buffer
 
 
 def test_mem_pool_registration_signature_uses_registration_order():
@@ -303,76 +280,6 @@ def test_max_pool_bucket_filter_keeps_dense_and_expert_slots_disjoint():
         (32, torch.bfloat16, "expert_pool_0_torch.bfloat16_0"),
         (32, torch.bfloat16, "expert_pool_1_torch.bfloat16_0"),
     ]
-
-
-def test_symmetric_rs_output_is_limited_to_dense_inner_unit_buckets():
-    """Only dense transformer-unit RS gets a same-offset registered staging output."""
-    dense_group = object()
-    dense_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
-    expert_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
-    buffer = ParamAndGradBuffer.__new__(ParamAndGradBuffer)
-    buffer.ddp_config = SimpleNamespace(fsdp_ubr_enable_symmetric_rs=True)
-    buffer.parameter_groups = [
-        ParameterGroup([dense_param], dtype=torch.bfloat16, fsdp_unit_id=0),
-        ParameterGroup([expert_param], dtype=torch.bfloat16, is_expert_param=True, fsdp_unit_id=0),
-        ParameterGroup([dense_param], dtype=torch.bfloat16, fsdp_unit_id=None),
-    ]
-    buffer.ubr_groups = [dense_group]
-    buffer.mem_alloc_context = object()
-
-    allocations = []
-    frees = []
-
-    class _TestAllocator:
-        def allocate(self, **kwargs):
-            allocations.append(kwargs)
-            return pgb_module.Bucket(torch.empty(kwargs["size"], dtype=kwargs["dtype"]))
-
-        def free(self, bucket_id):
-            frees.append(bucket_id)
-
-    buffer.symmetric_rs_output_alloc = _TestAllocator()
-    grad_buffer = SimpleNamespace(
-        is_data_distributed=True,
-        data_parallel_group=dense_group,
-        shard_bucket_index=SimpleNamespace(size=2),
-        device=torch.device("cpu"),
-    )
-
-    output = buffer.allocate_symmetric_rs_output(0, grad_buffer, torch.bfloat16)
-    assert output.shape == (2,)
-    assert allocations == [
-        {
-            "bucket_id": 0,
-            "size": 2,
-            "dtype": torch.bfloat16,
-            "device": torch.device("cpu"),
-            "mem_alloc_context": buffer.mem_alloc_context,
-        }
-    ]
-
-    assert buffer.allocate_symmetric_rs_output(1, grad_buffer, torch.bfloat16) is None
-    assert buffer.allocate_symmetric_rs_output(2, grad_buffer, torch.bfloat16) is None
-    buffer.free_symmetric_rs_output(0)
-    assert frees == [0]
-
-
-def test_symmetric_rs_output_rejects_unregistered_communicator():
-    dense_param = torch.nn.Parameter(torch.empty(4, dtype=torch.bfloat16))
-    buffer = ParamAndGradBuffer.__new__(ParamAndGradBuffer)
-    buffer.ddp_config = SimpleNamespace(fsdp_ubr_enable_symmetric_rs=True)
-    buffer.parameter_groups = [ParameterGroup([dense_param], dtype=torch.bfloat16, fsdp_unit_id=0)]
-    buffer.ubr_groups = [object()]
-    buffer.symmetric_rs_output_alloc = object()
-    grad_buffer = SimpleNamespace(
-        is_data_distributed=True,
-        data_parallel_group=object(),
-        shard_bucket_index=SimpleNamespace(size=2),
-        device=torch.device("cpu"),
-    )
-
-    with pytest.raises(RuntimeError, match="unregistered process group"):
-        buffer.allocate_symmetric_rs_output(0, grad_buffer, torch.bfloat16)
 
 
 def test_multi_use_embedding_gets_separate_bucket_when_sharded():
