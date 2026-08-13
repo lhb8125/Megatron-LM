@@ -35,7 +35,7 @@ IMAGE="${IMAGE:-megatron-sync-free-hybridep:b300}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29511}"
-OUTPUT_PATH="${OUTPUT_PATH:-${SCRIPT_DIR}/output}"
+OUTPUT_PATH="${OUTPUT_PATH:-${TENSORBOARD_LOG_PATH}/output}"
 TOKENIZER_DIR="${TOKENIZER_DIR:-/data/minimax-dialogue/pretrain_model/m2-mini/tokenizer}"
 NODE_RANK="${NODE_RANK:-0}"
 NSYS_PROFILE_ENABLED="${NSYS_PROFILE_ENABLED:-0}"
@@ -68,10 +68,12 @@ DIST_ARGS="--nproc_per_node ${GPUS_PER_NODE} --nnodes 1 --node_rank 0 \
 # capture range driven by Megatron's --profile (steps PROFILE_STEP_START..END).
 NSYS_PROFILE_ARGS=""
 if [[ "${NSYS_PROFILE_ENABLED}" == "1" ]]; then
-  # Host-side dir for mkdir/chmod; the -o path below is the in-container mount.
-  mkdir -p "${OUTPUT_PATH}/nsys_output"
-  chmod -R 777 "${OUTPUT_PATH}/nsys_output"
-  NSYS_OUTPUT_DIR="/workspace/output/nsys_output"
+  # Aligned with the reference repo: nsys reports live under the tensorboard log
+  # dir ($TENSORBOARD_LOG_PATH/nsys_output). Host-side dir for mkdir/chmod; the
+  # -o path below is the in-container mount (--tensorboard-dir is /workspace/output/tensorboard).
+  mkdir -p "${OUTPUT_PATH}/tensorboard/nsys_output"
+  chmod -R 777 "${OUTPUT_PATH}/tensorboard/nsys_output"
+  NSYS_OUTPUT_DIR="/workspace/output/tensorboard/nsys_output"
   TRAIN_ARGS="${TRAIN_ARGS} --profile --profile-step-start ${PROFILE_STEP_START} \
     --profile-step-end ${PROFILE_STEP_END} --profile-ranks ${PROFILE_RANKS}"
   # Opt-in: export NSYS_CUDA_GRAPH_TRACE=node to expand cudagraph nodes in traces.
