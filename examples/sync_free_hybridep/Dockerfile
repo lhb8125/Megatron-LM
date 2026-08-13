@@ -111,9 +111,14 @@ RUN bash -ex <<"EOF"
     cd rdma-core && git checkout tags/v60.0 && sh build.sh
     apt-get update
     apt-get install -y --no-install-recommends libnvidia-ml-dev
-    # NVSHMEM for DeepEP's internode path (>= 3.3.9 required by hybrid-ep branch).
+    # NVSHMEM for DeepEP's internode path. Pin to 3.6.5 to MATCH the NVSHMEM
+    # host library shipped in the CUDA base image (libnvshmem_host.so.3.6.5):
+    # DeepEP statically links the device lib from this wheel, and at runtime the
+    # base image's host lib is loaded. A mismatch (e.g. wheel 3.7.2 vs base
+    # host 3.6.5) makes NVSHMEM init abort with "device library version does not
+    # match with host library version" / NVSHMEMX_ERROR_INVALID_VALUE.
     unset PIP_CONSTRAINT
-    pip install --no-cache-dir "nvidia-nvshmem-cu13>=3.3.9"
+    pip install --no-cache-dir "nvidia-nvshmem-cu13==3.6.5"
     NVSHMEM_DIR="$(python3 -c 'import importlib.util; print(importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0])')"
     test -f "${NVSHMEM_DIR}/lib/libnvshmem_device.a" || { echo "libnvshmem_device.a missing in ${NVSHMEM_DIR}"; exit 1; }
     # NVSHMEM 3.7 headers include <cuda/std/array>, which lives under the CUDA
