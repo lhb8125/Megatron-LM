@@ -2489,11 +2489,11 @@ class ParamAndGradBuffer:
         self.mem_alloc_context = self.get_mem_alloc_context(
             groups=self.ubr_groups, symmetric=not self.ddp_config.disable_symmetric_registration
         )
-        # Registered-buffer collectives require matching pool-relative offsets
-        # across ranks. FSDP reduce-scatter is in-place and intentionally writes
-        # each rank's output to ``rank * recvcount`` inside the input bucket.
-        # Keep gradient communication outside the registered pool until this
-        # path provides a same-offset staging output.
+        # Persistent gradients and outer-DP communication remain outside the
+        # registered pool. When symmetric dense-inner RS is enabled, only the
+        # temporary transformer-unit input bucket is allocated under
+        # ``self.mem_alloc_context``. NCCL's standard in-place RS output remains
+        # the rank-offset shard view within that registered input bucket.
         self.grad_mem_alloc_context = nullcontext
 
         # Mark FP8 params. If TransformerEngine is not installed, we can skip this.
@@ -2610,10 +2610,11 @@ class ParamAndGradBuffer:
         # Symmetric collectives require every rank to use the same slot for the
         # same logical bucket, so validate this semantic mapping separately from
         # the allocator segment layout below.
+        runtime_assignment_allocators = [self.weight_alloc, self.transpose_weight_alloc]
+        if self.ddp_config.fsdp_ubr_enable_symmetric_rs:
+            runtime_assignment_allocators.append(self.main_grad_alloc)
         runtime_assignment_signature = _max_pool_assignment_signature(
-            (self.weight_alloc, self.transpose_weight_alloc),
-            self.parameter_groups,
-            self.param_to_name,
+            runtime_assignment_allocators, self.parameter_groups, self.param_to_name
         )
         runtime_assignment_hash = hashlib.sha256(
             repr(runtime_assignment_signature).encode()
@@ -3152,8 +3153,12 @@ class ParamAndGradBuffer:
                 self.ddp_config.nccl_ub
                 and self.ddp_config.fsdp_ubr_registration_scope == "dense_inner"
             )
+            symmetric_dense_inner_rs = (
+                dense_inner_ubr and self.ddp_config.fsdp_ubr_enable_symmetric_rs
+            )
             self.expert_weight_alloc = None
             self.expert_transpose_weight_alloc = None
+            self.expert_grad_alloc = None
             if dense_inner_ubr:
                 if FIXED_POOL_ALLOC_TYPE is not MaxPoolAllocator:
                     raise ValueError(
@@ -3231,15 +3236,44 @@ class ParamAndGradBuffer:
                 grad_dtype_fn = lambda pg: grad_comm_dtype  # noqa: E731
             else:
                 grad_dtype_fn = operator.attrgetter("grad_dtype")
-            self.main_grad_alloc = FIXED_POOL_ALLOC_TYPE(
-                name="fsdp_grads",
-                fsdp_param_groups=self.parameter_groups,
-                size=ub_buffer_num,
-                dtype_fn=grad_dtype_fn,
-                fallback_to_persistent_buffer=(
-                    self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
-                ),
-            )
+            if symmetric_dense_inner_rs:
+                # Register only dense transformer-unit RS buckets. Expert gradient
+                # traffic uses an independent ordinary pool, so it cannot perturb
+                # the dense arena's physical segment or runtime slot ordering.
+                self.main_grad_alloc = MaxPoolAllocator(
+                    name="fsdp_dense_grads",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    dtype_fn=grad_dtype_fn,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                    bucket_filter=dense_bucket_filter,
+                )
+                if any(
+                    pg.is_expert_param and pg.fsdp_unit_id is not None
+                    for pg in self.parameter_groups
+                ):
+                    self.expert_grad_alloc = MaxPoolAllocator(
+                        name="fsdp_expert_grads",
+                        fsdp_param_groups=self.parameter_groups,
+                        size=ub_buffer_num,
+                        dtype_fn=grad_dtype_fn,
+                        fallback_to_persistent_buffer=(
+                            self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                        ),
+                        bucket_filter=expert_bucket_filter,
+                    )
+            else:
+                self.main_grad_alloc = FIXED_POOL_ALLOC_TYPE(
+                    name="fsdp_grads",
+                    fsdp_param_groups=self.parameter_groups,
+                    size=ub_buffer_num,
+                    dtype_fn=grad_dtype_fn,
+                    fallback_to_persistent_buffer=(
+                        self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail
+                    ),
+                )
             if self.dist_index.use_hybrid_fsdp:
                 # Only required for custom communication dtype buffer allocation
                 # to leverage NCCL UBR for high-precision gradient reduction with
@@ -3260,11 +3294,21 @@ class ParamAndGradBuffer:
                     set(self.double_buf_units)
                     | set(self.expert_weight_alloc.fsdp_double_buffer_units)
                 )
+            if symmetric_dense_inner_rs:
+                self.double_buf_units = list(
+                    set(self.double_buf_units) | set(self.main_grad_alloc.fsdp_double_buffer_units)
+                )
+                if self.expert_grad_alloc is not None:
+                    self.double_buf_units = list(
+                        set(self.double_buf_units)
+                        | set(self.expert_grad_alloc.fsdp_double_buffer_units)
+                    )
         else:
             self.weight_alloc = StorageResizeBasedBucketAllocator()
             self.transpose_weight_alloc = StorageResizeBasedBucketAllocator()
             self.expert_weight_alloc = None
             self.expert_transpose_weight_alloc = None
+            self.expert_grad_alloc = None
             self.main_grad_alloc = None
             if self.dist_index.use_hybrid_fsdp:
                 # Only required for custom communication dtype buffer allocation
@@ -3295,9 +3339,29 @@ class ParamAndGradBuffer:
                 if dense_inner_ubr and group.is_expert_param
                 else self.transpose_weight_alloc
             )
+            symmetric_dense_inner_rs = (
+                dense_inner_ubr and self.ddp_config.fsdp_ubr_enable_symmetric_rs
+            )
+            if symmetric_dense_inner_rs and group.is_expert_param:
+                grad_alloc = self.expert_grad_alloc or self.main_grad_alloc
+            else:
+                grad_alloc = self.main_grad_alloc
+            grad_bucket_mem_alloc_context = (
+                self.mem_alloc_context
+                if symmetric_dense_inner_rs
+                and not group.is_expert_param
+                and group.fsdp_unit_id is not None
+                else self.grad_mem_alloc_context
+            )
             if dense_inner_ubr and group.is_expert_param:
                 assert weight_alloc is not None
                 assert transpose_weight_alloc is not None
+            if (
+                symmetric_dense_inner_rs
+                and group.is_expert_param
+                and group.fsdp_unit_id is not None
+            ):
+                assert grad_alloc is not None
 
             main_buf_extra_kwargs = {}
             if should_create_hfsdp_helper_buffers:
@@ -3432,11 +3496,11 @@ class ParamAndGradBuffer:
                     # using basic HSDP or FSDP.
                     data_parallel_group=main_buf_dp_group,
                     is_transpose_buffer=False,
-                    temporary_bucket_allocator=self.main_grad_alloc,
+                    temporary_bucket_allocator=grad_alloc,
                     gradient_scaling_factor=gradient_scaling_factor,
                     bucket_id=group_id,
                     chunk_size_factor=group.chunk_size_factor,
-                    mem_alloc_context=self.grad_mem_alloc_context,
+                    mem_alloc_context=grad_bucket_mem_alloc_context,
                     **main_buf_extra_kwargs,
                 )
 
@@ -3517,7 +3581,12 @@ class ParamAndGradBuffer:
             transpose_weight_specs = {}
             expert_weight_specs = {}
             expert_transpose_weight_specs = {}
+            main_grad_specs = {}
+            expert_grad_specs = {}
             dense_inner_ubr = self.ddp_config.fsdp_ubr_registration_scope == "dense_inner"
+            symmetric_dense_inner_rs = (
+                dense_inner_ubr and self.ddp_config.fsdp_ubr_enable_symmetric_rs
+            )
             for bucket_id, group in enumerate(self.parameter_groups):
                 weight_buffer = group.model_weight_buffer
                 if weight_buffer is not None and weight_buffer.is_data_distributed:
@@ -3540,10 +3609,21 @@ class ParamAndGradBuffer:
                         transpose_buffer.dtype,
                     )
 
-            allocator_specs = (
+                if symmetric_dense_inner_rs:
+                    grad_buffer = group.hfsdp_helper_gbuf or group.main_grad_buffer
+                    if grad_buffer is not None and grad_buffer.is_data_distributed:
+                        target_specs = (
+                            expert_grad_specs if group.is_expert_param else main_grad_specs
+                        )
+                        grad_dtype = self.mp_policy.grad_comm_dtype or grad_buffer.dtype
+                        target_specs[bucket_id] = (grad_buffer.bucket_index.size, grad_dtype)
+
+            allocator_specs = [
                 (self.weight_alloc, weight_specs),
                 (self.transpose_weight_alloc, transpose_weight_specs),
-            )
+            ]
+            if symmetric_dense_inner_rs:
+                allocator_specs.append((self.main_grad_alloc, main_grad_specs))
             persistent_buffers = []
             for group in self.parameter_groups:
                 if dense_inner_ubr and group.is_expert_param:
@@ -3680,10 +3760,12 @@ class ParamAndGradBuffer:
             # scope. Materialize its independent MaxPool outside the symmetric pool so
             # expert/outer traffic cannot alter the registered physical segment order.
             if dense_inner_ubr:
-                ordinary_allocator_specs = (
+                ordinary_allocator_specs = [
                     (self.expert_weight_alloc, expert_weight_specs),
                     (self.expert_transpose_weight_alloc, expert_transpose_weight_specs),
-                )
+                ]
+                if symmetric_dense_inner_rs:
+                    ordinary_allocator_specs.append((self.expert_grad_alloc, expert_grad_specs))
                 for allocator, bucket_specs in ordinary_allocator_specs:
                     if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
                         allocator.materialize(bucket_specs, mem_alloc_context=nullcontext)

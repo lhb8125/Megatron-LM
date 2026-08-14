@@ -168,6 +168,8 @@ class MegatronFSDP(torch.nn.Module):
         fsdp_ubr_registration_scope (str): FSDP communicator scope for NCCL user-buffer
             registration. ``all`` preserves the default behavior; ``dense_inner`` registers
             only dense inner-FSDP parameter all-gathers.
+        fsdp_ubr_enable_symmetric_rs (bool): Whether to register eligible dense inner-FSDP
+            gradient buckets for native in-place symmetric reduce-scatter. Defaults to False.
         enable_fine_grained_param_gather (bool): Whether to enable "fine-grained" param all-gather,
             which can improve performance when using MXFP8 parameters with activation recomputation.
         enable_fine_grained_param_gather_backward_hook (bool): Register pre-backward unshard hooks
@@ -216,6 +218,7 @@ class MegatronFSDP(torch.nn.Module):
         fsdp_db_use_persist_buf_on_alloc_fail: bool = False,
         disable_symmetric_registration: bool = False,
         fsdp_ubr_registration_scope: str = 'all',
+        fsdp_ubr_enable_symmetric_rs: bool = False,
         enable_fine_grained_param_gather_hook: bool = False,
         enable_fine_grained_param_gather_backward_hook: bool = False,
         fine_grained_recurse_module_types: Optional[Tuple[Type[nn.Module], ...]] = None,
@@ -264,6 +267,9 @@ class MegatronFSDP(torch.nn.Module):
                 fsdp_db_use_persist_buf_on_alloc_fail=fsdp_db_use_persist_buf_on_alloc_fail,
                 disable_symmetric_registration=disable_symmetric_registration,
                 fsdp_ubr_registration_scope=fsdp_ubr_registration_scope,
+                fsdp_ubr_enable_symmetric_rs=fsdp_ubr_enable_symmetric_rs,
+                fsdp_manual_registration=fsdp_ubr_enable_symmetric_rs,
+                megatron_fsdp_max_pool_double_buffer=fsdp_ubr_enable_symmetric_rs,
                 check_for_nan_in_grad=False,
             )
         else:

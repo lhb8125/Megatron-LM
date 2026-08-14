@@ -172,6 +172,13 @@ Megatron-FSDP's `fully_shard_*` API has a comprehensive set of arguments for fin
   and the outer-DP payload is small. The isolated-pool path requires
   `maxpool_double_buffer=True`.
     - Defaults to `all`.
+- `fsdp_ubr_enable_symmetric_rs` extends `dense_inner` registration to the
+  transformer-unit gradient buckets used by inner-FSDP reduce-scatter. It preserves
+  NCCL's native in-place layout: the output is the local rank-offset shard view of the
+  registered input bucket, with no separate output staging allocation. Expert,
+  outer-DP, and non-unit reductions stay outside the registered arena. This option
+  requires symmetric manual registration and `maxpool_double_buffer=True`.
+    - Defaults to `False`.
 - `fsdp_double_buffer` will use persistently allocated double buffers for temporarily-defined memory needed in `MegatronFSDP` communications. Having persistent double buffers may increase peak VRAM utilization, but is required to register NCCL user buffers (`nccl_ub=True`) for `MegatronFSDP`. Currently, this is only supported for simple repetitive model structures such as GPT.
     - Defaults to `False`. Automatically overridden to `True` when `nccl_ub` is enabled.
 - `fsdp_buffer_count` controls the number of persistent buffers in each Megatron-FSDP communication pool. The default of two preserves conventional double buffering. Combined 1F1B overlap requires at least three because a backward/recompute unit, the current forward unit, and its forward-prefetched successor may be live concurrently.

@@ -1,13 +1,19 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from megatron.core.distributed.fsdp.src.megatron_fsdp import param_and_grad_buffer as pgb_module
+from megatron.core.distributed.fsdp.src.megatron_fsdp.distributed_data_parallel_config import (
+    DistributedDataParallelConfig,
+)
 from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import (
+    Bucket,
     BucketingPolicy,
+    DataParallelBuffer,
     MaxPoolAllocator,
     ParameterGroup,
     _build_ubr_arena_layout,
@@ -132,6 +138,37 @@ def test_ubr_scope_rejects_unknown_value():
 
     with pytest.raises(ValueError, match="Invalid FSDP UBR registration scope"):
         _get_ubr_registration_groups(dist_index, "outer")
+
+
+def test_symmetric_rs_is_explicit_and_requires_dense_manual_registration():
+    """The native RS path remains opt-in and invalid registration setups fail early."""
+    assert not DistributedDataParallelConfig().fsdp_ubr_enable_symmetric_rs
+
+    with pytest.raises(ValueError, match="requires nccl_ub=True"):
+        DistributedDataParallelConfig(fsdp_ubr_enable_symmetric_rs=True)
+
+    config = DistributedDataParallelConfig(
+        nccl_ub=True,
+        fsdp_ubr_registration_scope="dense_inner",
+        fsdp_ubr_enable_symmetric_rs=True,
+        fsdp_manual_registration=True,
+        megatron_fsdp_max_pool_double_buffer=True,
+    )
+    assert config.fsdp_ubr_enable_symmetric_rs
+    assert config.fsdp_double_buffer
+
+
+def test_reduce_scatter_output_is_native_rank_offset_shard_view():
+    """Symmetric RS does not need a separate same-offset staging allocation."""
+    buffer = DataParallelBuffer.__new__(DataParallelBuffer)
+    buffer.shard_bucket_index = SimpleNamespace(bucket_data_index=8, size=4)
+    bucket = Bucket(torch.arange(16, dtype=torch.float32))
+
+    output = buffer.get_shard_from_bucket(bucket)
+
+    assert torch.equal(output, bucket.data[8:12])
+    assert output.untyped_storage().data_ptr() == bucket.data.untyped_storage().data_ptr()
+    assert output.storage_offset() == 8
 
 
 def test_mem_pool_registration_signature_uses_registration_order():

@@ -129,6 +129,14 @@ class DistributedDataParallelConfig:
     collectives on ordinary NCCL kernels.
     """
 
+    fsdp_ubr_enable_symmetric_rs: bool = False
+    """Register eligible dense inner-FSDP gradient buckets for symmetric reduce-scatter.
+
+    This opt-in preserves NCCL's native in-place layout: each rank's output is a shard
+    view into the registered input bucket. Expert, outer-DP, and non-unit reductions
+    remain on the ordinary NCCL path.
+    """
+
     fsdp_manual_registration: bool = False
     """If true, manually register the FSDP communication buffers to NCCL user buffer.
       This option is only effective when use_megatron_fsdp and nccl_ub is set.
@@ -222,6 +230,25 @@ class DistributedDataParallelConfig:
                 "fsdp_ubr_registration_scope must be one of: all, dense_inner; "
                 f"got {self.fsdp_ubr_registration_scope!r}."
             )
+        if self.fsdp_ubr_enable_symmetric_rs:
+            if not self.nccl_ub:
+                raise ValueError("fsdp_ubr_enable_symmetric_rs requires nccl_ub=True.")
+            if self.disable_symmetric_registration:
+                raise ValueError("fsdp_ubr_enable_symmetric_rs requires symmetric registration.")
+            if self.fsdp_ubr_registration_scope != "dense_inner":
+                raise ValueError(
+                    "fsdp_ubr_enable_symmetric_rs requires "
+                    "fsdp_ubr_registration_scope='dense_inner'."
+                )
+            if not self.fsdp_manual_registration:
+                raise ValueError(
+                    "fsdp_ubr_enable_symmetric_rs requires fsdp_manual_registration=True."
+                )
+            if not self.megatron_fsdp_max_pool_double_buffer:
+                raise ValueError(
+                    "fsdp_ubr_enable_symmetric_rs requires "
+                    "megatron_fsdp_max_pool_double_buffer=True."
+                )
         if self.megatron_fsdp_prefetch_recompute_forward_weights:
             assert self.data_parallel_sharding_strategy == "optim_grads_params", (
                 "megatron_fsdp_prefetch_recompute_forward_weights is only supported with "
