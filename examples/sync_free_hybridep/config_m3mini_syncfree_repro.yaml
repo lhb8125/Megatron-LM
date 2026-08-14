@@ -1,0 +1,152 @@
+# ============================================================
+# Single-node REPRO for the HybridEP grouped-tensor weighted-swiglu shape bug
+# seen in job j-drlu7xy1ch:
+#   weighted_swiglu(input=(N_actual, moe_ffn), weights=(N_capacity, 1)) mismatch
+#   at experts.py bias_act_func -> weighted_bias_swiglu_impl.
+#
+# Unlike config_m3mini_syncfree_min.yaml (DeepEP) and the op-fuser 1node recipe,
+# this reproduces the FAILING job's activation path: HybridEP static budget
+# (moe_expert_rank_capacity_factor) + paged stash + moe_use_grouped_tensor
+# (Path B, NO op-fuser), with swiglu bias-activation fusion.
+#
+# Shrunk to a single node (TP1/PP1/EP4/CP1 -> 4 GPUs) to reproduce cheaply.
+ENV_VARS:
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: '1'
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  CUDA_DEVICE_MAX_CONNECTIONS: '1'
+  NCCL_NVLS_ENABLE: '0'
+  NCCL_GRAPH_REGISTER: '0'
+  NCCL_DEBUG: WARN
+  NVTE_FUSED_ATTN: '1'
+  NVTE_NORM_FWD_USE_CUDNN: '0'
+  NVTE_NORM_BWD_USE_CUDNN: '0'
+  NVTE_FWD_LAYERNORM_SM_MARGIN: '32'
+  NVTE_BWD_LAYERNORM_SM_MARGIN: '32'
+  NUM_OF_TOKENS_PER_CHUNK_COMBINE_API: '128'
+  NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API: '128'
+  HF_HUB_OFFLINE: '1'
+  TRANSFORMERS_OFFLINE: '1'
+  PYTHONWARNINGS: ignore
+ARGS:
+  mock_data: true
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: /data/minimax-dialogue/pretrain_model/m2-mini/tokenizer
+  make_vocab_size_divisible_by: 32
+  seed: 42
+  num_layers: 4
+  hidden_size: 512
+  ffn_hidden_size: 1024
+  num_attention_heads: 8
+  kv_channels: 64
+  group_query_attention: true
+  num_query_groups: 2
+  normalization: RMSNorm
+  norm_epsilon: 1e-6
+  disable_bias_linear: true
+  untie_embeddings_and_output_weights: true
+  swiglu: true
+  qk_layernorm: true
+  attention_backend: auto
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  position_embedding_type: rope
+  rotary_base: 500000
+  rotary_percent: 0.25
+  max_position_embeddings: 512
+  seq_length: 512
+  # ---------- MoE ----------
+  num_experts: 8
+  moe_ffn_hidden_size: 512
+  moe_router_topk: 4
+  moe_router_score_function: sigmoid
+  moe_router_dtype: fp32
+  moe_router_load_balancing_type: aux_loss
+  moe_aux_loss_coeff: 1e-4
+  moe_router_enable_expert_bias: true
+  moe_router_bias_update_rate: 1e-3
+  moe_layer_freq: ([0]*1+[1]*3)
+  moe_grouped_gemm: true
+  moe_permute_fusion: true
+  moe_router_fusion: true
+  moe_router_padding_for_quantization: true
+  moe_router_force_load_balancing: true
+  # shared expert DISABLED to test hypothesis: the known-good pathB 1node recipe
+  # (sync_free_grouped_tensor_b300_1node.yaml) has NO shared expert, while the
+  # failing job and this repro do. Suspect the weighted_swiglu (N_actual vs
+  # N_capacity) mismatch comes from the shared-expert path under grouped_tensor.
+  # moe_shared_expert_intermediate_size: 512
+  # ---------- parallelism (single-node: TP1 PP1 EP4 CP1 -> 4 GPUs) ----------
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: true
+  use_distributed_optimizer: true
+  # ---------- HybridEP static budget + paged stash + grouped tensor (Path B) ----------
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_hybridep_num_sms: 32
+  moe_expert_rank_capacity_factor: 2
+  moe_paged_stash: true
+  moe_paged_stash_page_size: 64
+  moe_paged_stash_buffer_size_factor_cuda: 2
+  moe_paged_stash_buffer_size_factor_cpu: 0.0
+  moe_use_grouped_tensor: true
+  overlap_moe_expert_parallel_comm: true
+  delay_wgrad_compute: true
+  te_rng_tracker: true
+  # ---------- schedule ----------
+  micro_batch_size: 1
+  global_batch_size: 8
+  train_iters: 5
+  # ---------- optimizer / lr (adam) ----------
+  optimizer: adam
+  lr: 2e-4
+  min_lr: 1e-4
+  lr_decay_style: cosine
+  lr_decay_iters: 100
+  lr_warmup_iters: 2
+  lr_warmup_init: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1e-20
+  clip_grad: 1.0
+  init_method_std: 0.006
+  override_opt_param_scheduler: true
+  # ---------- precision (bf16 + mxfp8) ----------
+  bf16: true
+  fp8_format: e4m3
+  fp8_recipe: mxfp8
+  fp8_param_gather: false
+  accumulate_allreduce_grads_in_fp32: true
+  main_grads_dtype: fp32
+  main_params_dtype: fp32
+  exp_avg_dtype: fp32
+  exp_avg_sq_dtype: fp32
+  use_precision_aware_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  # recompute DISABLED here to test the hypothesis that moe_act recompute is
+  # what triggers the weighted_swiglu shape mismatch (the known-good pathB
+  # 1node recipe ran with recompute_granularity=None).
+  # recompute_granularity: selective
+  # recompute_modules: [moe_act, layernorm]
+  use_mcore_models: true
+  use_flash_attn: true
+  transformer_impl: transformer_engine
+  no_create_attention_mask_in_dataloader: true
+  no_check_for_nan_in_loss_and_grad: true
+  calculate_per_token_loss: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: native
+  manual_gc: true
+  manual_gc_interval: 30
+  distributed_timeout_minutes: 30
+  enable_experimental: true
+  eval_iters: 0
+  eval_interval: 20000000
+  log_throughput: true
+  log_interval: 1
+  logging_level: 40
