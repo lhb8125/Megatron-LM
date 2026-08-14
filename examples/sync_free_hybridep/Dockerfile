@@ -98,43 +98,68 @@ FROM base AS hybridep
 #   * HybridEP extension (hybrid_ep_cpp): DOCA/RDMA multinode path
 #     (HYBRID_EP_MULTINODE=1, USE_NIXL=0).
 #   * DeepEP core extension (deep_ep_cpp): NVSHMEM internode + low-latency
-#     kernels. This requires NVSHMEM headers + libnvshmem_host.so.* +
-#     libnvshmem_device.a. The base image's system NVSHMEM is missing the
-#     device static lib, so we install the pip wheel (nvidia-nvshmem-cu13),
-#     which ships all of them, and point NVSHMEM_DIR at it. Without this,
-#     DeepEP compiles with -DDISABLE_NVSHMEM and any internode RDMA dispatch
-#     aborts at runtime with "NVSHMEM is disable during compilation"
-#     (config.hpp), which is exactly what broke the cross-node EP jobs.
+#     kernels, built against a SOURCE-COMPILED NVSHMEM with IBGDA + GDRCopy.
+#
+# We compile NVSHMEM from source (instead of the pip wheel) so IBGDA and
+# GDRCopy transports are actually enabled -- the pip wheel's transports did not
+# work on the RoCE/Spectrum-X cluster and cross-node dispatch timed out
+# ("DeepEP error: timeout (dispatch CPU)"). This mirrors the known-good
+# alg-eng-team base_fv recipe (NVSHMEM 3.4.5 + IBGDA + GDRCopy + libmlx5 link).
+RUN bash -ex <<"EOF"
+    # a. libmlx5.so symlink is required for IBGDA (base already ships it, but be safe).
+    MLX5_SO=/usr/lib/x86_64-linux-gnu/libmlx5.so
+    MLX5_REAL=/usr/lib/x86_64-linux-gnu/libmlx5.so.1
+    if [ ! -e "$MLX5_SO" ] && [ -e "$MLX5_REAL" ]; then ln -s "$MLX5_REAL" "$MLX5_SO" || true; fi
+
+    # b. Build + install NVSHMEM from source with IBGDA/GDRCopy enabled.
+    NVSHMEM_VERSION="3.4.5-0"
+    NVSHMEM_DIR=/opt/nvshmem
+    SRC=/tmp/nvshmem_build
+    mkdir -p "$NVSHMEM_DIR" "$SRC" && cd "$SRC"
+    wget -O "v${NVSHMEM_VERSION}.tar.gz" \
+        "https://github.com/NVIDIA/nvshmem/archive/refs/tags/v${NVSHMEM_VERSION}.tar.gz"
+    tar -zxf "v${NVSHMEM_VERSION}.tar.gz"
+    cd "nvshmem-${NVSHMEM_VERSION}"
+    find . -name CMakeLists.txt -print0 | xargs -0 sed -i \
+        's/\$<BUILD_INTERFACE:\${MPI_CXX_INCLUDE_DIRS}>/\${MPI_CXX_INCLUDE_DIRS}/g'
+    sed -i 's/nvshmemi_call_rdxn_on_stream_kernel/nvshmemi_reduce_on_stream/g' \
+        src/host/team/team_internal.cpp
+    NVSHMEM_SHMEM_SUPPORT=0 NVSHMEM_UCX_SUPPORT=0 NVSHMEM_USE_NCCL=1 \
+    NVSHMEM_IBGDA_SUPPORT=1 NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 NVSHMEM_USE_GDRCOPY=1 \
+    MPI_HOME=/opt/hpcx/ompi \
+    cmake -S . -B build/ \
+        -DCMAKE_INSTALL_PREFIX="$NVSHMEM_DIR" \
+        -DCMAKE_CUDA_ARCHITECTURES="90-real;100-real;103-real;120" \
+        -DMLX5_lib=/usr/lib/x86_64-linux-gnu/libmlx5.so
+    cd build && make -j 16 && make install
+    rm -rf "$SRC"
+EOF
+
+# NVSHMEM env (source-compiled install at /opt/nvshmem).
+ENV NVSHMEM_DIR="/opt/nvshmem"
+ENV NVSHMEM_HOME="/opt/nvshmem"
+ENV LD_LIBRARY_PATH="/opt/nvshmem/lib:${LD_LIBRARY_PATH}"
+ENV PATH="/opt/nvshmem/bin:${PATH}"
+
 RUN bash -ex <<"EOF"
     cd /workspace
     git clone https://github.com/linux-rdma/rdma-core.git
     cd rdma-core && git checkout tags/v60.0 && sh build.sh
     apt-get update
     apt-get install -y --no-install-recommends libnvidia-ml-dev
-    # NVSHMEM for DeepEP's internode path. Pin to 3.6.5 to MATCH the NVSHMEM
-    # host library shipped in the CUDA base image (libnvshmem_host.so.3.6.5):
-    # DeepEP statically links the device lib from this wheel, and at runtime the
-    # base image's host lib is loaded. A mismatch (e.g. wheel 3.7.2 vs base
-    # host 3.6.5) makes NVSHMEM init abort with "device library version does not
-    # match with host library version" / NVSHMEMX_ERROR_INVALID_VALUE.
-    unset PIP_CONSTRAINT
-    pip install --no-cache-dir "nvidia-nvshmem-cu13==3.6.5"
-    NVSHMEM_DIR="$(python3 -c 'import importlib.util; print(importlib.util.find_spec("nvidia.nvshmem").submodule_search_locations[0])')"
-    test -f "${NVSHMEM_DIR}/lib/libnvshmem_device.a" || { echo "libnvshmem_device.a missing in ${NVSHMEM_DIR}"; exit 1; }
-    # NVSHMEM 3.7 headers include <cuda/std/array>, which lives under the CUDA
-    # CCCL include dir (targets/<arch>/include/cccl) that nvcc does not search by
-    # default. Expose it via CPATH or DeepEP's internode.cu fails to compile with
-    # "fatal error: cuda/std/array: No such file or directory".
+    # NVSHMEM 3.x headers pull <cuda/std/array> from the CUDA CCCL include dir,
+    # which nvcc does not search by default; expose it via CPATH.
     CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-    CCCL_INC="$(ls -d ${CUDA_HOME}/targets/*/include/cccl 2>/dev/null | head -1)"
-    test -n "${CCCL_INC}" || { echo "CCCL include dir not found under ${CUDA_HOME}/targets"; exit 1; }
+    CCCL_INC="$(ls -d ${CUDA_HOME}/include/cccl ${CUDA_HOME}/targets/*/include/cccl 2>/dev/null | head -1)"
+    test -n "${CCCL_INC}" || { echo "CCCL include dir not found"; exit 1; }
     export CPATH="${CCCL_INC}:${CPATH:-}"
     git clone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git
     # HybridEP hybrid-ep tip (DOCA path; drop the NIXL marker to build without NIXL).
     cd DeepEP && git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6
     rm -f .use_nixl
     RDMA_CORE_HOME=/workspace/rdma-core/build HYBRID_EP_MULTINODE=1 USE_NIXL=0 \
-        NVSHMEM_DIR="${NVSHMEM_DIR}" \
+        NVSHMEM_DIR=/opt/nvshmem \
         TORCH_CUDA_ARCH_LIST="10.3" MAX_JOBS=8 \
         pip install --no-build-isolation .
     apt-get purge -y libnvidia-ml-dev
