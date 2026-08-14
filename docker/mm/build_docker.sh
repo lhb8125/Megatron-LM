@@ -1,35 +1,45 @@
 #!/bin/bash
-# Build a Megatron-LM image that bakes the CURRENT working tree on top of the
+# Build a Megatron-LM image that bakes the CURRENT working tree on top of a
 # prebuilt sync-free base image (CUDA/cuDNN/cuBLAS + PyTorch + TransformerEngine
-# + DeepEP hybrid-ep + resiliency-ext already installed there).
+# + DeepEP/HybridEP + resiliency-ext already installed there).
+#
+# Two prebuilt bases are supported, pick one with --deepep / --hybridep:
+#   --deepep    : DeepEP cross-node base (NVSHMEM built with IBGDA/GDRCopy),
+#                 for moe_flex_dispatcher_backend=deepep multinode runs.
+#                 -> megatron-sync-free:e60981c20-20260814-1306
+#   --hybridep  : HybridEP base (validated for grouped_tensor training),
+#                 for moe_flex_dispatcher_backend=hybridep runs.
+#                 -> megatron-sync-free:6401e2645-20260812-2227  (default)
 #
 # Usage:
-#   docker/mm/build_docker.sh [--no-sudo] [--bake-helpers] [--path-a] [--no-push]
+#   docker/mm/build_docker.sh [--deepep|--hybridep] [--no-sudo] [--bake-helpers] [--no-push]
 #
 # By default the image is pushed to harbor (harbor.xaminim.com/minimax-dialogue).
 # Pass --no-push to build locally only.
 #
 # Env overrides:
-#   BASE_IMAGE   base image to overlay onto
-#                (default: megatron-sync-free-grouped-tensor:b300  == Path B;
-#                 use --path-a for megatron-sync-free-hybridep:b300)
+#   BASE_IMAGE   base image to overlay onto (overrides --deepep/--hybridep)
 #   IMAGE_NAME   output repo name  (default: megatron-sync-free)
 #   IMAGE_TAG    output tag        (default: <commit>-<timestamp>[-dirty])
 #   REGISTRY     push destination  (default: harbor.xaminim.com/minimax-dialogue;
 #                set empty with REGISTRY= to build a local-only tag)
 set -xve
 
+DEEPEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:e60981c20-20260814-1306"
+HYBRIDEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:6401e2645-20260812-2227"
+
 DOCKER_CMD="sudo docker"
 BAKE_HELPERS=0
 DO_PUSH=1
-PATH_A=0
+BACKEND="hybridep"
 for arg in "$@"; do
     case "$arg" in
         --no-sudo)      DOCKER_CMD="docker" ;;
         --bake-helpers) BAKE_HELPERS=1 ;;
         --push)         DO_PUSH=1 ;;
         --no-push)      DO_PUSH=0 ;;
-        --path-a)       PATH_A=1 ;;
+        --deepep)       BACKEND="deepep" ;;
+        --hybridep)     BACKEND="hybridep" ;;
     esac
 done
 
@@ -37,12 +47,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_DIR}"
 
-# Base image: Path B (device-init GroupedTensor) by default; Path A on request.
-if [ "$PATH_A" -eq 1 ]; then
-    BASE_IMAGE=${BASE_IMAGE:-megatron-sync-free-hybridep:b300}
+# Base image: pick by backend; BASE_IMAGE env overrides.
+if [ "$BACKEND" = "deepep" ]; then
+    BASE_IMAGE=${BASE_IMAGE:-${DEEPEP_BASE}}
 else
-    BASE_IMAGE=${BASE_IMAGE:-megatron-sync-free-grouped-tensor:b300}
+    BASE_IMAGE=${BASE_IMAGE:-${HYBRIDEP_BASE}}
 fi
+echo "Selected backend=${BACKEND}, BASE_IMAGE=${BASE_IMAGE}"
 
 COMMIT_HASH=$(git rev-parse --short=9 HEAD 2>/dev/null || echo nogit)
 DIRTY=""
