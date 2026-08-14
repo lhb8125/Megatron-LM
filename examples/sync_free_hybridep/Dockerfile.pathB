@@ -12,7 +12,11 @@
 #   - NVTE_CUDA_ARCHS / TORCH_CUDA_ARCH_LIST target SM103a only.
 #   - DeepEP built from the hybrid-ep branch (provides deep_ep.HybridEPBuffer).
 
-ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:26.04-py3
+# Base pinned to 25.11 to match the known-good alg-eng-team base_fv recipe:
+# its torch's libtorch_nvshmem does NOT require nvshmem_selected_device_transport,
+# so a source-compiled NVSHMEM 3.4.5 (with IBGDA/GDRCopy) links cleanly. The
+# 26.04 torch needs that newer symbol and conflicts with 3.4.5.
+ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:25.11-py3
 FROM ${FROM_IMAGE_NAME} AS base
 
 ENV SHELL=/bin/bash
