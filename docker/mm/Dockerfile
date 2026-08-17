@@ -11,6 +11,10 @@
 ARG BASE_IMAGE=megatron-sync-free-grouped-tensor:b300
 FROM ${BASE_IMAGE}
 
+# Install py-spy so the platform's hang detector can dump per-rank Python/native
+# stacks (py-spy dump --native) when a job hangs.
+RUN pip install --no-cache-dir py-spy
+
 # Bake the current working tree into the image at the path the launcher uses.
 RUN rm -rf /workspace/Megatron-LM
 WORKDIR /workspace/Megatron-LM
