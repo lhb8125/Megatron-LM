@@ -3090,3 +3090,175 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
+
+
+class EventTracker:
+    """Lightweight singleton for recording CUDA-event based pipeline timings.
+
+    Records per-microbatch forward / backward / forward-backward events during the
+    pipeline schedule and, at the end of the training step, computes the elapsed
+    time of every event relative to a common start event.
+
+    Only the local (JSON-dump) mode is supported: set ``ENABLE_PP_TIMER=1`` to enable
+    the tracker. Which iterations are tracked is controlled by ``ENABLE_PP_TIMER_ITER``
+    (a single iteration ``"5"`` or an inclusive range ``"5-10"``); if unset, the tracker
+    falls back to ``ENABLE_PP_TIMER_INTERVAL`` (default 20) and enables every Nth
+    iteration (0 disables). Set ``ENABLE_PP_TIMER_DUMP_DIR`` to a directory to have the
+    per-rank event times written out as JSON.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.ENABLE_PP_TIMER = False
+            cls._instance.event_pool = {}
+            cls._instance.scalar_pool = {}
+            cls._instance.start_event = torch.cuda.Event(enable_timing=True)
+            cls._instance.cpu_time_pool = {}
+            cls._instance.start_cpu = 0.0
+            cls.f_batch_model_info = ""
+            cls.b_batch_model_info = ""
+            cls.f_prefix = ""
+            cls.b_prefix = ""
+        return cls._instance
+
+    def set_enable_pp_timer(self, enable: bool):
+        """Enable or disable the pipeline timer."""
+        self.ENABLE_PP_TIMER = enable
+
+    def active(self):
+        """Return whether the pipeline timer is currently enabled."""
+        return self.ENABLE_PP_TIMER
+
+    def record_start_event(self):
+        """Record the common start event (the t=0 for all elapsed-time computations)."""
+        if self.ENABLE_PP_TIMER:
+            self.start_event.record()
+            self.start_cpu = time.perf_counter()
+
+    def init_event(self, name: str):
+        """Create a single timing event under ``name``."""
+        self.event_pool[name] = torch.cuda.Event(enable_timing=True)
+
+    def add_event(self, name: str):
+        """Create a paired ``start`` / ``end`` timing event under ``name``."""
+        self.event_pool[f'{name}/start'] = torch.cuda.Event(enable_timing=True)
+        self.event_pool[f'{name}/end'] = torch.cuda.Event(enable_timing=True)
+
+    def get_event(self, name: str):
+        """Return the ``(start, end)`` events for ``name`` (or ``(None, None)`` if disabled)."""
+        if self.ENABLE_PP_TIMER:
+            return (self.event_pool[f'{name}/start'], self.event_pool[f'{name}/end'])
+        else:
+            return None, None
+
+    def record_event(self, name: str):
+        """Record the event ``name``, lazily creating it if needed."""
+        if self.ENABLE_PP_TIMER:
+            if self.event_pool.get(name) is None:
+                self.init_event(name)
+            self.event_pool[name].record()
+            if name.endswith('/start'):
+                self.cpu_time_pool[name] = time.perf_counter()
+
+    def record_event_start(self, name: str):
+        """Record the ``start`` event for ``name``."""
+        self.record_event(f'{name}/start')
+
+    def record_event_end(self, name: str):
+        """Record the ``end`` event for ``name``."""
+        self.record_event(f'{name}/end')
+
+    def record_scalar(self, name: str, value: Union[int, float]):
+        """Record a scalar metric under ``name``."""
+        if self.ENABLE_PP_TIMER:
+            if isinstance(value, torch.Tensor):
+                if value.numel() != 1:
+                    return
+                value = value.detach()
+                if value.is_cuda:
+                    value = value.cpu()
+                value = value.item()
+            self.scalar_pool[name] = value
+
+    def record_scalars(self, metrics: Dict[str, Union[int, float]]):
+        """Record multiple scalar metrics at once."""
+        if self.ENABLE_PP_TIMER:
+            for name, value in metrics.items():
+                self.record_scalar(name, value)
+
+    def reset(self):
+        """Reset all pools to prepare for the next iteration."""
+        self.event_pool = {}
+        self.scalar_pool = {}
+        self.start_event = torch.cuda.Event(enable_timing=True)
+        self.cpu_time_pool = {}
+        self.start_cpu = 0.0
+        self.f_batch_model_info = ""
+        self.b_batch_model_info = ""
+        self.f_prefix = ""
+        self.b_prefix = ""
+
+    def finalize_and_log_events(
+        self,
+        pp_rank: int,
+        PP_size: int,
+        VPP_size: int,
+        TPxCPxDP_rank: int,
+        iteration: int = None,
+        EP_size: int = 1,
+    ):
+        """Synchronize, compute per-event elapsed times, and dump them to JSON (local mode).
+
+        Waits for all previously enqueued CUDA events to complete, computes each event's
+        elapsed time relative to the common start event, and — if ``ENABLE_PP_TIMER_DUMP_DIR``
+        is set — writes the GPU and CPU timelines to per-rank JSON files.
+        """
+        import json
+        import os
+
+        # Wait for all previously enqueued CUDA events to complete so that their
+        # elapsed_time can be safely read.
+        torch.cuda.synchronize()
+
+        # Compute each event's elapsed time relative to start_event.
+        event_times = {}
+        for event_name, event in self.event_pool.items():
+            try:
+                event_times[event_name] = self.start_event.elapsed_time(event)
+            except Exception:
+                # Event was never recorded (redundant); skip it.
+                continue
+
+        # Compute CPU-timeline offsets (ms) of each /start event relative to start_cpu.
+        # Shares the same t=0 as the GPU timeline (see record_start_event).
+        cpu_event_times = {
+            name: (ts - self.start_cpu) * 1000.0 for name, ts in self.cpu_time_pool.items()
+        }
+
+        rank = torch.distributed.get_rank()
+
+        # Optional JSON dump: only write files when ENABLE_PP_TIMER_DUMP_DIR is set.
+        dump_dir = os.environ.get('ENABLE_PP_TIMER_DUMP_DIR')
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            suffix = (
+                f'PP{PP_size}_VPP{VPP_size}_EP{EP_size}_'
+                f'TPxCPxDP_rank_{TPxCPxDP_rank}_pp_rank_{pp_rank}_rank_{rank}'
+            )
+            if iteration is not None:
+                filename = f'{dump_dir}/event_times_iter{iteration}_{suffix}.json'
+                filename_cpu = f'{dump_dir}/event_times_cpu_iter{iteration}_{suffix}.json'
+            else:
+                filename = f'{dump_dir}/event_times_{suffix}.json'
+                filename_cpu = f'{dump_dir}/event_times_cpu_{suffix}.json'
+
+            with open(filename, 'w') as f:
+                json.dump(event_times, f)
+            with open(filename_cpu, 'w') as f:
+                json.dump(cpu_event_times, f)
+
+        # Reset event_pool to prepare for the next iteration.
+        self.reset()

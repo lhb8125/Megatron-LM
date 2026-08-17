@@ -123,6 +123,7 @@ from megatron.core.transformer.moe.paged_stash import PagedStashRunner
 from megatron.core.transformer.moe.router_trace import get_moe_router_tracer, init_moe_router_tracer
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
 from megatron.core.utils import (
+    EventTracker,
     StragglerDetector,
     check_param_hashes_across_dp_replicas,
     configure_nvtx_profiling,
@@ -2744,6 +2745,30 @@ def train_step(
     timers = get_timers()
     num_microbatches = get_num_microbatches()
 
+    # Enable the pipeline timer when ENABLE_PP_TIMER is set.
+    #   ENABLE_PP_TIMER_ITER: single iteration "5" or a range "5-10" (inclusive).
+    #   If unset, fall back to ENABLE_PP_TIMER_INTERVAL (default 20): enable every
+    #   Nth iteration (0 disables).
+    if os.environ.get('ENABLE_PP_TIMER', '0') == '1':
+        pp_timer_iter_str = os.environ.get('ENABLE_PP_TIMER_ITER')
+        if pp_timer_iter_str is not None:
+            if '-' in pp_timer_iter_str:
+                start_iter, end_iter = pp_timer_iter_str.split('-', 1)
+                pp_timer_enabled = int(start_iter) <= args.curr_iteration <= int(end_iter)
+            else:
+                pp_timer_enabled = int(pp_timer_iter_str) == args.curr_iteration
+        else:
+            pp_timer_interval = int(os.environ.get('ENABLE_PP_TIMER_INTERVAL', '20'))
+            pp_timer_enabled = (
+                pp_timer_interval > 0 and args.curr_iteration % pp_timer_interval == 0
+            )
+
+        if pp_timer_enabled:
+            event_tracker = EventTracker()
+            event_tracker.set_enable_pp_timer(True)
+            torch.distributed.barrier()
+            event_tracker.record_start_event()
+
     offload_optimizer_states = getattr(args, 'offload_optimizer_states', False)
     if offload_optimizer_states:
         # Reload optimizer states as late as possible so the H2D transfer can overlap
@@ -2998,6 +3023,18 @@ def train_step(
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
         unwrapped_model = unwrap_model(model[0])
         unwrapped_model.update_momentum(args.curr_iteration)
+
+    # Finalize the pipeline timer (dump per-rank event times) and disable it.
+    event_tracker = EventTracker()
+    if event_tracker.active():
+        event_tracker.finalize_and_log_events(
+            pp_rank=mpu.get_pipeline_model_parallel_rank(),
+            PP_size=mpu.get_pipeline_model_parallel_world_size(),
+            VPP_size=mpu.get_virtual_pipeline_model_parallel_world_size() or 1,
+            TPxCPxDP_rank=mpu.get_tensor_and_data_parallel_group(with_context_parallel=True).rank(),
+            iteration=args.curr_iteration,
+        )
+        event_tracker.set_enable_pp_timer(False)
 
     # Update learning rate.
     if update_successful:

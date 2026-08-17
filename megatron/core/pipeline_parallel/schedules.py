@@ -28,6 +28,7 @@ from megatron.core.transformer.cuda_graphs import create_cudagraphs, set_current
 from megatron.core.transformer.moe.paged_stash import paged_stash_reset
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import (
+    EventTracker,
     drain_embedding_wgrad_compute,
     get_attr_wrapped_model,
     get_model_config,
@@ -1126,6 +1127,27 @@ def forward_backward_pipelining_with_interleaving(
     # model_chunk_id in [0, num_model_chunks)
     # virtual_microbatch_id in [0, total_num_microbatches)
 
+    event_tracker = EventTracker()
+    if event_tracker.active():
+        num_model_chunks = len(model)
+        for i in range(num_model_chunks):
+            for j in range(num_microbatches):
+                event_tracker.add_event(f'forward-{i}-{j}')
+                event_tracker.add_event(f'backward-{i}-{j}')
+                event_tracker.add_event(f'backward_d-{i}-{j}')
+                event_tracker.add_event(f'backward_w-{i}-{j}')
+
+        for i in range(num_model_chunks):
+            for j in range(num_microbatches):
+                for k in range(num_model_chunks):
+                    for l in range(num_microbatches):
+                        event_tracker.add_event(f'forward-backward-{i}-{j}-{k}-{l}')
+
+        cur_stage_microbatch_id = {}
+        for i in range(0, num_model_chunks):
+            cur_stage_microbatch_id[f"fwd-{i}"] = 0
+            cur_stage_microbatch_id[f"bwd-{i}"] = 0
+
     config = get_model_config(model[0])
     if p2p_communicator is None and pg_collection is None:
         p2p_communicator = P2PCommunicator(
@@ -1580,6 +1602,8 @@ def forward_backward_pipelining_with_interleaving(
         post_forward=None,
         post_backward=None,
         checkpoint_activations_microbatch=None,
+        st_event=None,
+        ed_event=None,
     ):
         """
         wrap forward_helper, backward_helper, and combined_forward_backward_helper in a unified way
@@ -1607,6 +1631,8 @@ def forward_backward_pipelining_with_interleaving(
                 pre_backward=pre_backward,
                 post_forward=post_forward,
                 post_backward=post_backward,
+                st_event=st_event,
+                ed_event=ed_event,
             )
         else:  # Conventional interleaved 1F1B path
             forward_output_tensor = None
@@ -1721,10 +1747,19 @@ def forward_backward_pipelining_with_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
+        if event_tracker.active():
+            cur_micro_batch_id = cur_stage_microbatch_id[f"fwd-{cur_model_chunk_id}"]
+            event_tracker.f_batch_model_info = (
+                f'batch{cur_micro_batch_id}-chunk{cur_model_chunk_id}-'
+            )
+            event_tracker.record_event_start(f'forward-{cur_model_chunk_id}-{cur_micro_batch_id}')
         output_tensor, _ = forward_backward_helper_wrapper(
             f_virtual_microbatch_id=k,
             checkpoint_activations_microbatch=checkpoint_activations_microbatch,
         )
+        if event_tracker.active():
+            event_tracker.record_event_end(f'forward-{cur_model_chunk_id}-{cur_micro_batch_id}')
+            cur_stage_microbatch_id[f"fwd-{cur_model_chunk_id}"] += 1
 
         # Don't send tensor downstream if on last stage.
         if _is_vp_last_stage(vp_stage=cur_model_chunk_id) and is_pp_last_stage(pp_group):
@@ -1989,6 +2024,24 @@ def forward_backward_pipelining_with_interleaving(
                     bwd_recv_buffer[(backward_k + 1) % bwd_recv_buffer_size] = None
                 return input_tensor_grad
 
+            st_event, ed_event = None, None
+            if event_tracker.active():
+                backward_model_chunk_id = get_model_chunk_id(backward_k, forward=False)
+                cur_fwd_micro_batch_id = cur_stage_microbatch_id[f"fwd-{cur_model_chunk_id}"]
+                cur_bwd_micro_batch_id = cur_stage_microbatch_id[f"bwd-{backward_model_chunk_id}"]
+                event_tracker.f_batch_model_info = (
+                    f'batch{cur_fwd_micro_batch_id}-chunk{cur_model_chunk_id}-'
+                )
+                event_tracker.b_batch_model_info = (
+                    f'batch{cur_bwd_micro_batch_id}-chunk{backward_model_chunk_id}-'
+                )
+                # Fetch pre-created start/end events for this fused forward-backward.
+                # They are recorded *inside* the schedule (after the pre-compute PP
+                # communication), so PP recv/send is excluded from the timing.
+                st_event, ed_event = event_tracker.get_event(
+                    f'forward-backward-{cur_model_chunk_id}-{cur_fwd_micro_batch_id}-'
+                    f'{backward_model_chunk_id}-{cur_bwd_micro_batch_id}'
+                )
             output_tensor, input_tensor_grad = forward_backward_helper_wrapper(
                 f_virtual_microbatch_id=forward_k,
                 b_virtual_microbatch_id=backward_k,
@@ -1997,7 +2050,12 @@ def forward_backward_pipelining_with_interleaving(
                 post_forward=pp_post_forward,
                 post_backward=pp_post_backward,
                 checkpoint_activations_microbatch=checkpoint_activations_microbatch,
+                st_event=st_event,
+                ed_event=ed_event,
             )
+            if event_tracker.active():
+                cur_stage_microbatch_id[f"fwd-{cur_model_chunk_id}"] += 1
+                cur_stage_microbatch_id[f"bwd-{backward_model_chunk_id}"] += 1
 
         else:  # No p2p overlap.
             backward_k = k
@@ -2111,7 +2169,20 @@ def forward_backward_pipelining_with_interleaving(
                 if bwd_wait_recv_handles:
                     recv_next_wait_handles.append(bwd_wait_recv_handles.pop("recv_next"))
 
+            if event_tracker.active():
+                cur_micro_batch_id = cur_stage_microbatch_id[f"bwd-{cur_model_chunk_id}"]
+                event_tracker.b_batch_model_info = (
+                    f'batch{cur_micro_batch_id}-chunk{cur_model_chunk_id}-'
+                )
+                event_tracker.record_event_start(
+                    f'backward-{cur_model_chunk_id}-{cur_micro_batch_id}'
+                )
             _, input_tensor_grad = forward_backward_helper_wrapper(b_virtual_microbatch_id=k)
+            if event_tracker.active():
+                event_tracker.record_event_end(
+                    f'backward-{cur_model_chunk_id}-{cur_micro_batch_id}'
+                )
+                cur_stage_microbatch_id[f"bwd-{cur_model_chunk_id}"] += 1
 
             # First virtual stage no activation gradient tensor to send.
             if _is_vp_first_stage(vp_stage=cur_model_chunk_id) and is_pp_first_stage(pp_group):
@@ -2179,6 +2250,8 @@ def forward_backward_pipelining_with_interleaving(
         not recv_next_wait_handles
     ), 'recv_next_wait_handles should be cleared at the end of a step'
 
+    if event_tracker.active():
+        event_tracker.record_event_start('optimizer-grads-reduce')
     if config.finalize_model_grads_func is not None and not forward_only:
 
         # If defer_embedding_wgrad_compute is enabled we need to do the
@@ -2197,6 +2270,8 @@ def forward_backward_pipelining_with_interleaving(
             pg_collection=pg_collection,
             force_all_reduce=force_all_reduce,
         )
+    if event_tracker.active():
+        event_tracker.record_event_end('optimizer-grads-reduce')
 
     if getattr(config, 'fine_grained_activation_offloading', False):
         off_interface.reset()

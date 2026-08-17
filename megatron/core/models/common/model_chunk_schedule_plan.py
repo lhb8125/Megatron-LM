@@ -684,6 +684,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         pre_backward=None,
         post_forward=None,
         post_backward=None,
+        st_event=None,
+        ed_event=None,
     ):
         """Model Chunk level 1f1b fine-grained scheduler.
 
@@ -709,6 +711,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             pre_backward (callable or None): The function to call before the backward pass
             post_forward (callable or None): The function to call after the forward pass
             post_backward (callable or None): The function to call after the backward pass
+            st_event (torch.cuda.Event or None): Event recorded once the pre-compute PP
+                communication (pre_forward / pre_backward) has been issued, marking the
+                start of the forward-backward compute (so PP recv/send is excluded).
+            ed_event (torch.cuda.Event or None): Event recorded after the forward-backward
+                compute completes, marking its end.
         Returns:
             The output of the forward pass.
         """
@@ -730,6 +737,12 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 pre_backward(b_schedule_plan.vp_stage)
                 b_schedule_plan.record_current_stream()
 
+            # Mark the start of forward-backward compute *after* the pre-compute PP
+            # communication (pre_forward / pre_backward) so that P2P recv/send is not
+            # counted in the forward-backward timing.
+            if st_event is not None:
+                st_event.record()
+
             # Run post_process backward *before* the stage recompute. post_process
             # keeps its own graph (it is not recomputed) and detaches its input, so
             # its backward produces b_grad independently of the recompute. Releasing
@@ -744,6 +757,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             # The A2A issued here is exposed (not overlapped) by design. No-op unless
             # recompute is on.
             b_schedule_plan.recompute_model_chunk_schedule_plan()
+        else:
+            # Forward-only (e.g. warmup): mark the start of compute here since there
+            # is no pre_backward stage to gate on.
+            if st_event is not None:
+                st_event.record()
 
         f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
         b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
@@ -822,6 +840,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # pre process backward
         if b_schedule_plan is not None:
             b_schedule_plan.pre_process.backward(b_grad)
+
+        # Mark the end of forward-backward compute (before the trailing stream waits /
+        # state release, matching the reference implementation).
+        if ed_event is not None:
+            ed_event.record()
 
         # Free the forward stage's layer activations now that its forward output has
         # been consumed (PP send / post_process). Only the stage input tensor is kept

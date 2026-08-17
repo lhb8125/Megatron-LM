@@ -157,6 +157,8 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
     pre_backward=None,
     post_forward=None,
     post_backward=None,
+    st_event=None,
+    ed_event=None,
 ):
     """Helper method to run combined forward and backward step for A2A communication hiding.
     This method merges the functionality of `forward_step_helper` and `backward_step_helper` and
@@ -260,6 +262,8 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
             else None
         ),
         current_microbatch=f_microbatch_id,
+        st_event=st_event,
+        ed_event=ed_event,
     )
     # forward post process
     if f_model_chunk_id is not None:
@@ -301,6 +305,8 @@ def combined_forward_backward_step(
     current_microbatch=None,
     encoder_decoder_xattn=False,
     fsdp_wrapper=None,
+    st_event=None,
+    ed_event=None,
 ):
     """Merged forward and backward step for combined 1f1b scheduler.
 
@@ -477,6 +483,8 @@ def combined_forward_backward_step(
             pre_backward=pre_backward,
             post_forward=post_forward,
             post_backward=post_backward,
+            st_event=st_event,
+            ed_event=ed_event,
         )
     _release_tensor_storage(loss_node_inputs_to_release)
 
