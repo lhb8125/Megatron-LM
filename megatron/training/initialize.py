@@ -263,8 +263,9 @@ def _initialize_tp_communicators():
         )
 
 
-def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, store,
-                            skip_model_parallel_init=False):
+def _initialize_distributed(
+    get_embedding_ranks, get_position_embedding_ranks, store, skip_model_parallel_init=False
+):
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
@@ -391,6 +392,106 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 f"{mpu.get_pipeline_model_parallel_world_size()}"
             )
 
+            # Eagerly complete NCCL lazy initialization of the 2-rank P2P
+            # communicators used by the pipeline-parallel send/recv path. When
+            # overlap_p2p_comm is enabled (batch_p2p_comm=False), pipeline
+            # parallelism issues unbatched isend/irecv ops that, under NCCL lazy
+            # initialization, each spawn a new 2-rank communicator the first
+            # time an ordered pair communicates. If ranks reach those points in
+            # different orders, the blocking ncclCommInitRank rendezvous can
+            # deadlock at the first training step (the "unbatched P2P op ... In
+            # lazy initialization mode, this will result in a new 2-rank NCCL
+            # communicator to be created" warning immediately precedes the
+            # hang). Doing it here, in a deterministic order on every rank,
+            # avoids that deadlock.
+            _warmup_p2p_communicators()
+
+
+def _warmup_p2p_communicators():
+    """Pre-create the lazily-initialized 2-rank P2P NCCL communicators.
+
+    Pipeline parallelism with ``overlap_p2p_comm=True`` (i.e.
+    ``batch_p2p_comm=False``) uses the unbatched ``isend``/``irecv`` path in
+    :func:`megatron.core.pipeline_parallel.p2p_communication._p2p_ops`. Under
+    NCCL lazy initialization each ordered (rank_a -> rank_b) pair spawns a new
+    2-rank communicator the first time it is used, and the ``ncclCommInitRank``
+    rendezvous is blocking. When different ranks create these communicators in
+    different orders the first training step can deadlock.
+
+    This routine reproduces the exact set of 2-rank communicators that
+    ``_p2p_ops`` would lazily create -- the pipeline-parallel neighbor pairs on
+    the pipeline group, plus (for a 2-rank pipeline group on a non-``ucc``
+    backend) the neighbor pair on ``torch.distributed.group.WORLD`` that
+    ``_p2p_ops`` routes one direction through -- and drives one tiny send/recv
+    per pair up front, in a deterministic order on every rank.
+    """
+    if torch.cuda.device_count() <= 0:
+        return
+    if not torch.distributed.is_initialized():
+        return
+    if mpu.get_pipeline_model_parallel_world_size() <= 1:
+        return
+
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+    pp_group = mpu.get_pipeline_model_parallel_group()
+    # get_pipeline_model_parallel_group can return a list when multiple pipeline
+    # communication backends are configured; warm each concrete group.
+    pp_groups = pp_group if isinstance(pp_group, (list, tuple)) else [pp_group]
+
+    def _warmup_pair(group, is_even, next_global, prev_global):
+        """Drive one send/recv against each neighbor to create the 2-rank comms.
+
+        ``is_even`` selects the send-before-recv vs recv-before-send ordering
+        (mirroring ``_p2p_ops``) and must be derived from the *pipeline group*
+        rank parity for both the pipeline group and the WORLD-routed pair, so
+        the two ranks of every pair post complementary ops and never deadlock.
+        """
+        send_buf = torch.zeros(1, dtype=torch.float32, device=device)
+        recv_buf = torch.zeros(1, dtype=torch.float32, device=device)
+        reqs = []
+        if is_even:
+            reqs.append(torch.distributed.isend(send_buf, dst=next_global, group=group))
+            reqs.append(torch.distributed.irecv(recv_buf, src=prev_global, group=group))
+            reqs.append(torch.distributed.isend(send_buf, dst=prev_global, group=group))
+            reqs.append(torch.distributed.irecv(recv_buf, src=next_global, group=group))
+        else:
+            reqs.append(torch.distributed.irecv(recv_buf, src=prev_global, group=group))
+            reqs.append(torch.distributed.isend(send_buf, dst=next_global, group=group))
+            reqs.append(torch.distributed.irecv(recv_buf, src=next_global, group=group))
+            reqs.append(torch.distributed.isend(send_buf, dst=prev_global, group=group))
+        for req in reqs:
+            req.wait()
+
+    warmed_any = False
+    for group in pp_groups:
+        if group is None:
+            continue
+        world = group.size()
+        if world <= 1:
+            continue
+        rank_in_pg = group.rank()
+        is_even = rank_in_pg % 2 == 0
+        next_global = torch.distributed.get_global_rank(group, (rank_in_pg + 1) % world)
+        prev_global = torch.distributed.get_global_rank(group, (rank_in_pg - 1) % world)
+
+        _warmup_pair(group, is_even, next_global, prev_global)
+
+        # _p2p_ops routes one direction of a 2-rank pipeline group through the
+        # global WORLD communicator (except on the ucc backend). Warm that
+        # 2-rank communicator too so it is not created lazily at step 1. The
+        # ordering must still use the pipeline-group parity (is_even).
+        if world == 2 and torch.distributed.get_backend(group) != 'ucc':
+            world_group = torch.distributed.group.WORLD
+            _warmup_pair(world_group, is_even, next_global, prev_global)
+
+        warmed_any = True
+
+    if warmed_any:
+        torch.cuda.synchronize()
+        torch.distributed.barrier()
+        print_rank_0("> warmed up pipeline-parallel P2P NCCL communicators (eager lazy-init)")
+
 
 def _init_autoresume():
     """Set autoresume start time."""
@@ -421,11 +522,17 @@ def _set_random_seed(
     """
     if seed_ is not None and seed_ > 0:
         # Ensure that different pipeline MP stages get different seeds.
-        pp_rank = get_pg_rank(pp_group) if pp_group is not None else mpu.get_pipeline_model_parallel_rank()
+        pp_rank = (
+            get_pg_rank(pp_group)
+            if pp_group is not None
+            else mpu.get_pipeline_model_parallel_rank()
+        )
         seed = seed_ + (100 * pp_rank)
         # Ensure different data parallel ranks get different seeds
         if data_parallel_random_init:
-            dp_rank = get_pg_rank(dp_group) if dp_group is not None else mpu.get_data_parallel_rank()
+            dp_rank = (
+                get_pg_rank(dp_group) if dp_group is not None else mpu.get_data_parallel_rank()
+            )
             seed = seed + (10 * dp_rank)
         random.seed(seed)
         np.random.seed(seed)
