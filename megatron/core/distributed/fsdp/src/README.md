@@ -175,11 +175,8 @@ Megatron-FSDP's `fully_shard_*` API has a comprehensive set of arguments for fin
 - `fsdp_ubr_enable_symmetric_rs` extends `dense_inner` registration to the
   transformer-unit gradient buckets used by inner-FSDP reduce-scatter. It preserves
   NCCL's native in-place layout: the output is the local rank-offset shard view of the
-  registered input bucket, with no separate output staging allocation. Dense RS input
-  buckets use an independent symmetric arena that is registered after the parameter
-  arena; this avoids one oversized mixed-purpose registration window and initializes
-  the communicator's symmetric/GDAKI context on the existing AG arena first. Expert,
-  outer-DP, and non-unit reductions stay outside both registered arenas. This option
+  registered input bucket, with no separate output staging allocation. Expert,
+  outer-DP, and non-unit reductions stay outside the registered arena. This option
   requires symmetric manual registration and `maxpool_double_buffer=True`.
     - Defaults to `False`.
 - `fsdp_double_buffer` will use persistently allocated double buffers for temporarily-defined memory needed in `MegatronFSDP` communications. Having persistent double buffers may increase peak VRAM utilization, but is required to register NCCL user buffers (`nccl_ub=True`) for `MegatronFSDP`. Currently, this is only supported for simple repetitive model structures such as GPT.

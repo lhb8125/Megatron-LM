@@ -15,7 +15,6 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer impo
     BucketingPolicy,
     DataParallelBuffer,
     MaxPoolAllocator,
-    ParamAndGradBuffer,
     ParameterGroup,
     _build_ubr_arena_layout,
     _get_parameter_groups,
@@ -157,22 +156,6 @@ def test_symmetric_rs_is_explicit_and_requires_dense_manual_registration():
     )
     assert config.fsdp_ubr_enable_symmetric_rs
     assert config.fsdp_double_buffer
-
-
-def test_manual_registration_context_can_target_independent_rs_pool(monkeypatch):
-    """Dense RS allocations must not fall back into the parameter registration pool."""
-    buffer = object.__new__(ParamAndGradBuffer)
-    buffer.ddp_config = SimpleNamespace(nccl_ub=True, fsdp_manual_registration=True)
-    param_pool = object()
-    rs_pool = object()
-    monkeypatch.setattr(pgb_module, "NCCL_ALLOCATOR", "MCORE")
-    monkeypatch.setattr(pgb_module, "NCCL_MEMORY_POOL", param_pool)
-
-    param_context = buffer.get_mem_alloc_context(mem_pool=param_pool)
-    rs_context = buffer.get_mem_alloc_context(mem_pool=rs_pool)
-
-    assert param_context.args == (param_pool,)
-    assert rs_context.args == (rs_pool,)
 
 
 def test_reduce_scatter_output_is_native_rank_offset_shard_view():
