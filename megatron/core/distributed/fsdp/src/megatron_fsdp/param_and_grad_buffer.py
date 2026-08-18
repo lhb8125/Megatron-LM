@@ -105,6 +105,7 @@ except ImportError:
         nccl_allocator = None
 
 NCCL_MEMORY_POOL = None
+NCCL_GRAD_MEMORY_POOL = None
 
 
 def _get_ubr_registration_groups(
@@ -2432,11 +2433,18 @@ class ParamAndGradBuffer:
             # it always uses fsdp double buffer.
             self.ddp_config.fsdp_double_buffer = True
             # Initialize the NCCL memory pool.
-            global NCCL_MEMORY_POOL
+            global NCCL_MEMORY_POOL, NCCL_GRAD_MEMORY_POOL
             # Initialize NCCL allocator runtime if available
             nccl_allocator.init()
             NCCL_MEMORY_POOL = nccl_allocator.create_nccl_mem_pool(
                 symmetric=not self.ddp_config.disable_symmetric_registration
+            )
+            NCCL_GRAD_MEMORY_POOL = (
+                nccl_allocator.create_nccl_mem_pool(
+                    symmetric=not self.ddp_config.disable_symmetric_registration
+                )
+                if self.ddp_config.fsdp_ubr_enable_symmetric_rs
+                else None
             )
             log_single_rank(
                 logger,
@@ -2487,7 +2495,18 @@ class ParamAndGradBuffer:
         # Buffer is registered to data_parallel_group and expert_data_parallel_group if it exists
         # In the case of not using nccl_ub, it returns a nullcontext
         self.mem_alloc_context = self.get_mem_alloc_context(
-            groups=self.ubr_groups, symmetric=not self.ddp_config.disable_symmetric_registration
+            groups=self.ubr_groups,
+            symmetric=not self.ddp_config.disable_symmetric_registration,
+            mem_pool=NCCL_MEMORY_POOL,
+        )
+        self.rs_mem_alloc_context = (
+            self.get_mem_alloc_context(
+                groups=self.ubr_groups,
+                symmetric=not self.ddp_config.disable_symmetric_registration,
+                mem_pool=NCCL_GRAD_MEMORY_POOL,
+            )
+            if NCCL_GRAD_MEMORY_POOL is not None
+            else nullcontext
         )
         # Persistent gradients and outer-DP communication remain outside the
         # registered pool. When symmetric dense-inner RS is enabled, only the
@@ -2525,7 +2544,7 @@ class ParamAndGradBuffer:
 
         self._log_parameter_groups()
 
-    def get_mem_alloc_context(self, groups=None, symmetric=True):
+    def get_mem_alloc_context(self, groups=None, symmetric=True, mem_pool=None):
         """
         Get the memory allocation context for the parameter and gradient buffers.
         """
@@ -2535,6 +2554,7 @@ class ParamAndGradBuffer:
                 "either requires megatron.core.nccl_allocator or apex.contrib.nccl_allocator"
             )
             global NCCL_MEMORY_POOL
+            mem_pool = NCCL_MEMORY_POOL if mem_pool is None else mem_pool
             if groups is None:
                 # data parallel group is a default group for user buffer registration
                 groups = [self.dist_index.get_fsdp_group(is_expert_parallel=False)]
@@ -2542,20 +2562,17 @@ class ParamAndGradBuffer:
             if NCCL_ALLOCATOR == "MCORE":
                 if self.ddp_config.fsdp_manual_registration:
                     return functools.partial(
-                        nccl_allocator.MemPoolAllocatorWithoutRegistration, NCCL_MEMORY_POOL
+                        nccl_allocator.MemPoolAllocatorWithoutRegistration, mem_pool
                     )
                 if len(groups) == 1:
                     # register buffers to the default group directly using nccl memory allocator
                     mem_alloc_context = functools.partial(
-                        nccl_allocator.nccl_mem,
-                        NCCL_MEMORY_POOL,
-                        group=groups[0],
-                        symmetric=symmetric,
+                        nccl_allocator.nccl_mem, mem_pool, group=groups[0], symmetric=symmetric
                     )
                 else:
                     mem_alloc_context = functools.partial(
                         nccl_allocator.MultiGroupMemPoolAllocator,
-                        NCCL_MEMORY_POOL,
+                        mem_pool,
                         groups=groups,
                         symmetric=symmetric,
                     )
@@ -2576,12 +2593,12 @@ class ParamAndGradBuffer:
                 if len(groups) == 1:
                     # register buffers to the default group directly using nccl memory allocator
                     mem_alloc_context = functools.partial(
-                        nccl_allocator.nccl_mem, NCCL_MEMORY_POOL, group=groups[0]
+                        nccl_allocator.nccl_mem, mem_pool, group=groups[0]
                     )
                 else:
                     # Supports multiple groups registration for APEX NCCL allocator.
                     mem_alloc_context = functools.partial(
-                        MultiGroupUBRAllocator, NCCL_MEMORY_POOL, groups=groups
+                        MultiGroupUBRAllocator, mem_pool, groups=groups
                     )
             else:
                 raise ValueError(f"Invalid NCCL allocator: {NCCL_ALLOCATOR}")
@@ -2600,7 +2617,7 @@ class ParamAndGradBuffer:
 
         self.already_registered = True
 
-        global NCCL_MEMORY_POOL
+        global NCCL_MEMORY_POOL, NCCL_GRAD_MEMORY_POOL
         torch.cuda.synchronize()
         torch.distributed.barrier(async_op=False)
         torch.cuda.synchronize()
@@ -2701,46 +2718,54 @@ class ParamAndGradBuffer:
         # segment. Validate that every communicator sees the same segment-size
         # sequence first, otherwise a rank that has fewer or differently sized
         # segments can leave its peers blocked inside ProcessGroupNCCL forever.
-        pool_signature = _mem_pool_registration_signature(NCCL_MEMORY_POOL)
+        registration_pools = [("params", NCCL_MEMORY_POOL)]
+        if NCCL_GRAD_MEMORY_POOL is not None:
+            registration_pools.append(("dense_rs", NCCL_GRAD_MEMORY_POOL))
         registration_errors = []
-        for group in self.ubr_groups:
-            group_signatures = [None] * torch.distributed.get_world_size(group)
-            torch.distributed.all_gather_object(group_signatures, pool_signature, group=group)
-            reference_signature = group_signatures[0]
-            if any(signature != reference_signature for signature in group_signatures[1:]):
-                group_ranks = torch.distributed.get_process_group_ranks(group)
-                signature_groups = defaultdict(list)
-                for rank, signature in zip(group_ranks, group_signatures):
-                    signature_groups[signature].append(rank)
-                summary = []
-                for signature, ranks in signature_groups.items():
-                    first_difference = next(
-                        (
-                            index
-                            for index, (reference_size, size) in enumerate(
-                                zip(reference_signature, signature)
-                            )
-                            if reference_size != size
-                        ),
-                        None,
+        pool_signatures = {}
+        for pool_name, pool in registration_pools:
+            pool_signature = _mem_pool_registration_signature(pool)
+            pool_signatures[pool_name] = pool_signature
+            for group in self.ubr_groups:
+                group_signatures = [None] * torch.distributed.get_world_size(group)
+                torch.distributed.all_gather_object(group_signatures, pool_signature, group=group)
+                reference_signature = group_signatures[0]
+                if any(signature != reference_signature for signature in group_signatures[1:]):
+                    group_ranks = torch.distributed.get_process_group_ranks(group)
+                    signature_groups = defaultdict(list)
+                    for rank, signature in zip(group_ranks, group_signatures):
+                        signature_groups[signature].append(rank)
+                    summary = []
+                    for signature, ranks in signature_groups.items():
+                        first_difference = next(
+                            (
+                                index
+                                for index, (reference_size, size) in enumerate(
+                                    zip(reference_signature, signature)
+                                )
+                                if reference_size != size
+                            ),
+                            None,
+                        )
+                        if first_difference is None and len(signature) != len(reference_signature):
+                            first_difference = min(len(signature), len(reference_signature))
+                        window_start = max(0, (first_difference or 0) - 2)
+                        window_end = min(len(signature), (first_difference or 0) + 3)
+                        signature_bytes = ",".join(map(str, signature)).encode()
+                        summary.append(
+                            {
+                                "rank_count": len(ranks),
+                                "first_ranks": ranks[:8],
+                                "segments": len(signature),
+                                "total_bytes": sum(signature),
+                                "sha256": hashlib.sha256(signature_bytes).hexdigest()[:12],
+                                "first_difference": first_difference,
+                                "sizes_near_difference": signature[window_start:window_end],
+                            }
+                        )
+                    registration_errors.append(
+                        f"pool={pool_name}, {group.group_desc} " f"(size={group.size()}): {summary}"
                     )
-                    if first_difference is None and len(signature) != len(reference_signature):
-                        first_difference = min(len(signature), len(reference_signature))
-                    window_start = max(0, (first_difference or 0) - 2)
-                    window_end = min(len(signature), (first_difference or 0) + 3)
-                    signature_bytes = ",".join(map(str, signature)).encode()
-                    summary.append(
-                        {
-                            "rank_count": len(ranks),
-                            "first_ranks": ranks[:8],
-                            "segments": len(signature),
-                            "total_bytes": sum(signature),
-                            "sha256": hashlib.sha256(signature_bytes).hexdigest()[:12],
-                            "first_difference": first_difference,
-                            "sizes_near_difference": signature[window_start:window_end],
-                        }
-                    )
-                registration_errors.append(f"{group.group_desc} (size={group.size()}): {summary}")
 
         # Synchronize the validation outcome globally so no rank enters NCCL
         # registration while another rank is already raising an exception.
@@ -2762,31 +2787,35 @@ class ParamAndGradBuffer:
                 "See the rank-local mismatch log for segment details."
             )
 
-        log_single_rank(
-            logger,
-            logging.INFO,
-            f"[MCORE][FSDP][Manual REG] Validated {len(pool_signature)} pool segments "
-            f"({sum(pool_signature)} bytes) across all registration groups.",
-        )
+        for pool_name, pool_signature in pool_signatures.items():
+            log_single_rank(
+                logger,
+                logging.WARNING,
+                f"[MCORE][FSDP][Manual REG] Validated pool={pool_name} with "
+                f"{len(pool_signature)} segments ({sum(pool_signature)} bytes) across all "
+                "registration groups.",
+            )
 
-        for group in self.ubr_groups:
-            log_single_rank(
-                logger,
-                logging.INFO,
-                f"[MCORE][FSDP][Manual REG] Registering mem pool to group {group},"
-                f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
-            )
-            nccl_allocator.register_mem_pool(
-                NCCL_MEMORY_POOL,
-                group,
-                symmetric=not self.ddp_config.disable_symmetric_registration,
-            )
-            log_single_rank(
-                logger,
-                logging.INFO,
-                f"[MCORE][FSDP][Manual REG] Registered mem pool to group {group},"
-                f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
-            )
+        # Register the existing parameter arena first. This initializes the
+        # communicator's symmetric/GDAKI context before the independent RS arena
+        # is added, and avoids one oversized mixed-purpose registration window.
+        for pool_name, pool in registration_pools:
+            for group in self.ubr_groups:
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"[MCORE][FSDP][Manual REG] Registering pool={pool_name} to group {group},"
+                    f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
+                )
+                nccl_allocator.register_mem_pool(
+                    pool, group, symmetric=not self.ddp_config.disable_symmetric_registration
+                )
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    f"[MCORE][FSDP][Manual REG] Registered pool={pool_name} to group {group},"
+                    f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
+                )
 
     def trace_ubr_collective(
         self,
@@ -2831,14 +2860,22 @@ class ParamAndGradBuffer:
         ):
             return
 
-        global NCCL_MEMORY_POOL
+        global NCCL_MEMORY_POOL, NCCL_GRAD_MEMORY_POOL
+
+        def registered_location(tensor):
+            for pool_name, pool in (
+                ("params", NCCL_MEMORY_POOL),
+                ("dense_rs", NCCL_GRAD_MEMORY_POOL),
+            ):
+                if pool is None:
+                    continue
+                location = _tensor_mem_pool_location(pool, tensor)
+                if location is not None:
+                    return (pool_name, *location)
+            return None
+
         locations = [
-            (
-                name,
-                str(tensor.dtype),
-                tuple(tensor.shape),
-                _tensor_mem_pool_location(NCCL_MEMORY_POOL, tensor),
-            )
+            (name, str(tensor.dtype), tuple(tensor.shape), registered_location(tensor))
             for name, tensor in tensors
         ]
         group_ranks = torch.distributed.get_process_group_ranks(group)
@@ -3347,7 +3384,7 @@ class ParamAndGradBuffer:
             else:
                 grad_alloc = self.main_grad_alloc
             grad_bucket_mem_alloc_context = (
-                self.mem_alloc_context
+                self.rs_mem_alloc_context
                 if symmetric_dense_inner_rs
                 and not group.is_expert_param
                 and group.fsdp_unit_id is not None
@@ -3622,8 +3659,9 @@ class ParamAndGradBuffer:
                 (self.weight_alloc, weight_specs),
                 (self.transpose_weight_alloc, transpose_weight_specs),
             ]
-            if symmetric_dense_inner_rs:
-                allocator_specs.append((self.main_grad_alloc, main_grad_specs))
+            grad_allocator_specs = (
+                [(self.main_grad_alloc, main_grad_specs)] if symmetric_dense_inner_rs else []
+            )
             persistent_buffers = []
             for group in self.parameter_groups:
                 if dense_inner_ubr and group.is_expert_param:
@@ -3643,13 +3681,17 @@ class ParamAndGradBuffer:
                         persistent_buffers.append((buffer, stable_name))
 
             # ProcessGroupNCCL registers memory-pool segments in allocator creation
-            # order.  Merge every known long-lived allocation into one global plan
-            # sorted by byte size so rank-local MoE parameter-group traversal cannot
-            # permute the registration sequence.  Unlike reserving a second pool-
-            # sized allocation, this creates only the storage training will consume.
-            allocation_plan = []
-            for allocator, bucket_specs in allocator_specs:
-                if isinstance(allocator, MaxPoolAllocator) and bucket_specs:
+            # order. Build deterministic parameter and dense-RS plans independently;
+            # each plan becomes one physical arena, and both preserve identical
+            # offsets across ranks without combining their registration footprint.
+            param_allocation_plan = []
+            grad_allocation_plan = []
+
+            def append_allocator_requests(allocation_plan, specs):
+                """Append deterministic MaxPool requests to one physical arena plan."""
+                for allocator, bucket_specs in specs:
+                    if not isinstance(allocator, MaxPoolAllocator) or not bucket_specs:
+                        continue
                     for size, dtype, buffer_name in allocator.materialization_requests(
                         bucket_specs
                     ):
@@ -3664,8 +3706,11 @@ class ParamAndGradBuffer:
                             )
                         )
 
+            append_allocator_requests(param_allocation_plan, allocator_specs)
+            append_allocator_requests(grad_allocation_plan, grad_allocator_specs)
+
             for buffer, stable_name in persistent_buffers:
-                allocation_plan.append(
+                param_allocation_plan.append(
                     (
                         buffer.data_size * torch.empty((), dtype=buffer.dtype).element_size(),
                         "persistent",
@@ -3676,12 +3721,21 @@ class ParamAndGradBuffer:
                     )
                 )
 
-            ordered_allocation_plan = sorted(
-                allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
-            )
+            def ordered_plan(allocation_plan):
+                return sorted(
+                    allocation_plan, key=lambda item: (item[0], str(item[4]), item[1], item[5])
+                )
+
+            ordered_param_plan = ordered_plan(param_allocation_plan)
+            ordered_grad_plan = ordered_plan(grad_allocation_plan)
+            allocation_plan = param_allocation_plan + grad_allocation_plan
             logical_plan_signature = tuple(
-                (num_bytes, request_kind, str(dtype), stable_name)
-                for num_bytes, request_kind, _, _, dtype, stable_name in ordered_allocation_plan
+                (pool_name, num_bytes, request_kind, str(dtype), stable_name)
+                for pool_name, plan in (
+                    ("params", ordered_param_plan),
+                    ("dense_rs", ordered_grad_plan),
+                )
+                for num_bytes, request_kind, _, _, dtype, stable_name in plan
             )
             logical_plan_hash = hashlib.sha256(repr(logical_plan_signature).encode()).hexdigest()[
                 :12
@@ -3715,27 +3769,42 @@ class ParamAndGradBuffer:
 
             self._ubr_persistent_data = {}
             if dense_inner_ubr:
-                arena_layout, arena_size = _build_ubr_arena_layout(ordered_allocation_plan)
-                with self.mem_alloc_context():
-                    self._ubr_arena = torch.empty(
-                        arena_size, dtype=torch.uint8, device=self.device, requires_grad=False
+
+                def materialize_arena(allocation_plan, mem_alloc_context):
+                    arena_layout, arena_size = _build_ubr_arena_layout(allocation_plan)
+                    with mem_alloc_context():
+                        arena = torch.empty(
+                            arena_size, dtype=torch.uint8, device=self.device, requires_grad=False
+                        )
+                    global_memory_buffer = get_global_memory_buffer()
+                    for byte_offset, request in arena_layout:
+                        num_bytes, request_kind, owner, size, dtype, buffer_name = request
+                        data = arena.narrow(0, byte_offset, num_bytes).view(dtype)
+                        assert data.numel() == size
+                        if request_kind == "max_pool":
+                            global_memory_buffer.buffer[(buffer_name, dtype)] = data
+                            owner.record_materialized(size, dtype, buffer_name)
+                        elif request_kind == "persistent":
+                            self._ubr_persistent_data[id(owner)] = data
+                        else:
+                            raise AssertionError(f"Unexpected UBR allocation kind: {request_kind}")
+                    return arena, arena_size
+
+                self._ubr_arena, param_arena_size = materialize_arena(
+                    ordered_param_plan, self.mem_alloc_context
+                )
+                if ordered_grad_plan:
+                    self._ubr_grad_arena, grad_arena_size = materialize_arena(
+                        ordered_grad_plan, self.rs_mem_alloc_context
                     )
-                global_memory_buffer = get_global_memory_buffer()
-                for byte_offset, request in arena_layout:
-                    num_bytes, request_kind, owner, size, dtype, buffer_name = request
-                    data = self._ubr_arena.narrow(0, byte_offset, num_bytes).view(dtype)
-                    assert data.numel() == size
-                    if request_kind == "max_pool":
-                        global_memory_buffer.buffer[(buffer_name, dtype)] = data
-                        owner.record_materialized(size, dtype, buffer_name)
-                    elif request_kind == "persistent":
-                        self._ubr_persistent_data[id(owner)] = data
-                    else:
-                        raise AssertionError(f"Unexpected UBR allocation kind: {request_kind}")
+                else:
+                    self._ubr_grad_arena = None
+                    grad_arena_size = 0
             else:
-                arena_size = None
+                param_arena_size = None
+                grad_arena_size = None
                 with self.mem_alloc_context():
-                    for _, request_kind, owner, size, dtype, buffer_name in ordered_allocation_plan:
+                    for _, request_kind, owner, size, dtype, buffer_name in ordered_param_plan:
                         if request_kind == "max_pool":
                             get_global_memory_buffer().get_tensor(
                                 [size], dtype=dtype, name=buffer_name
@@ -3753,7 +3822,8 @@ class ParamAndGradBuffer:
                 logging.INFO,
                 f"[MCORE][FSDP][Manual REG] Materialized {len(allocation_plan)} buffers "
                 f"({sum(item[0] for item in allocation_plan)} requested bytes) in global order "
-                f"(logical plan {logical_plan_hash}, arena bytes {arena_size}).",
+                f"(logical plan {logical_plan_hash}, param arena bytes {param_arena_size}, "
+                f"dense-RS arena bytes {grad_arena_size}).",
             )
 
             # Expert parameter AG uses an unregistered communicator in the dense-inner
