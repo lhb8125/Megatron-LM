@@ -7,9 +7,11 @@
 #   --deepep    : DeepEP cross-node base (NVSHMEM built with IBGDA/GDRCopy),
 #                 for moe_flex_dispatcher_backend=deepep multinode runs.
 #                 -> megatron-sync-free:e60981c20-20260814-1306
-#   --hybridep  : HybridEP base (validated for grouped_tensor training),
+#   --hybridep  : HybridEP base (FV 26.05 base + GroupedTensor TE fork +
+#                 source-built NVSHMEM 3.6.5 with IBGDA/GDRCopy kept off
+#                 LD_LIBRARY_PATH, validated for grouped_tensor + paged_stash),
 #                 for moe_flex_dispatcher_backend=hybridep runs.
-#                 -> megatron-sync-free:6401e2645-20260812-2227  (default)
+#                 -> megatron-sync-free:d1e62bd9c-20260818-1950-fvhybridep  (default)
 #
 # Usage:
 #   docker/mm/build_docker.sh [--deepep|--hybridep] [--no-sudo] [--bake-helpers] [--no-push]
@@ -25,8 +27,9 @@
 #                set empty with REGISTRY= to build a local-only tag)
 set -xve
 
-DEEPEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:e60981c20-20260814-1306"
-HYBRIDEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:6401e2645-20260812-2227"
+DEEPEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:d1e62bd9c-20260819-0457-deepep-gt"
+# DEEPEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-base:6c8f064b9-fv"
+HYBRIDEP_BASE="harbor.xaminim.com/minimax-dialogue/megatron-sync-free:d1e62bd9c-20260818-1950-fvhybridep"
 
 DOCKER_CMD="sudo docker"
 BAKE_HELPERS=0

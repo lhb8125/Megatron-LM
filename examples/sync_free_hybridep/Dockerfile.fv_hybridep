@@ -1,0 +1,113 @@
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# HybridEP base built on top of the known-good FV dev image
+#   harbor.xaminim.com/minimax-dialogue/megatron-dev:63f6091a1-20260815-1457-fv
+# which already ships the correct 26.05 torch + source-built NVSHMEM 3.6.5
+# (IBGDA/GDRCopy, kept OFF LD_LIBRARY_PATH) + DeepEP core. That base is the one
+# whose EP dispatch is NOT slow, so we reuse its CUDA/torch/NVSHMEM stack verbatim
+# and only:
+#   1. Replace TE with the zhongbozhu GroupedTensor fork (adds
+#      GroupedLinear(use_grouped_tensor=...)), required by moe_use_grouped_tensor.
+#   2. Add the HybridEP extension (deep_ep.HybridEPBuffer / hybrid_ep_cpp) from
+#      DeepEP's hybrid-ep branch, so moe_flex_dispatcher_backend=hybridep works.
+#
+# The base already has /opt/nvshmem (source 3.6.5, IBGDA/GDRCopy) with NVSHMEM_DIR
+# set and NOT on LD_LIBRARY_PATH -- we keep that layout untouched.
+ARG FROM_IMAGE_NAME=harbor.xaminim.com/minimax-dialogue/megatron-dev:63f6091a1-20260815-1457-fv
+FROM ${FROM_IMAGE_NAME} AS base
+
+ENV SHELL=/bin/bash
+ENV DEBIAN_FRONTEND=noninteractive
+
+# TransformerEngine PR #3224 fork (zhongbozhu:improve_device_grouped_linear).
+# Adds GroupedLinear(use_grouped_tensor=...) + device-init GroupedTensor/cublas
+# grouped GEMM, required by Megatron PR #6000's moe_use_grouped_tensor path.
+ARG TE_REPO="https://github.com/zhongbozhu/TransformerEngine.git"
+ARG TE_COMMIT="0e046349e5f76a8fec85e16a778dfdaee5cacf0d"
+# B300 / GB300.
+ARG NVTE_CUDA_ARCHS="103a"
+
+# ---------------------------------------------------------------------------
+# 1. Reinstall TE from the GroupedTensor fork (source build, C++/CUDA changes).
+#
+# The fork's fused-attn C++ uses newer cudnn-frontend APIs (set_cu_seq_len_q /
+# set_ragged_offset_multiplier) than the base image's bundled headers, so the
+# build fails against the stale headers. Fix (mirrors the FV base_fv recipe):
+# explicitly install a recent cudnn-frontend + matching mathdx/cublas, copy the
+# cublas headers/libs into /usr/local/cuda, and point CPATH at the freshly
+# installed cudnn-frontend include dir so nvcc compiles fused-attn cleanly.
+# ---------------------------------------------------------------------------
+RUN bash -ex <<"EOF"
+    unset PIP_CONSTRAINT
+    # Pinned build deps that satisfy the fork's fused-attn / grouped-GEMM APIs.
+    pip install --no-cache-dir nvidia-mathdx==25.1.1 nvidia-cublas==13.5.1.27 nvidia-cudnn-frontend==1.26.0
+    # Expose the pip cublas headers/libs to nvcc (TE builds against /usr/local/cuda).
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/include/cublas*.h /usr/local/cuda/include/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/include/cublas*.h /usr/local/cuda/include/
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib/libcublas*.so.13 /usr/local/cuda/lib64/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/lib/libcublas*.so.13 /usr/local/cuda/lib64/
+
+    cd /workspace
+    rm -rf TransformerEngine
+    git clone ${TE_REPO} TransformerEngine
+    cd TransformerEngine
+    git checkout ${TE_COMMIT}
+    git submodule update --init --recursive || true
+    # Point TE's build at the just-installed (recent) cudnn-frontend headers so
+    # fused-attn compiles against the APIs the fork branch expects.
+    CUDNN_FE_INC=$(python -c "import os,cudnn; print(os.path.join(os.path.dirname(os.path.dirname(cudnn.__file__)),'include'))")
+    echo "using cudnn-frontend headers: ${CUDNN_FE_INC}"
+    # Disable TE's built-in NCCL-EP backend (needs newer NCCL than base ships);
+    # we use DeepEP/HybridEP for expert parallel instead.
+    CPATH="${CUDNN_FE_INC}:${CPATH:-}" NVTE_WITH_NCCL_EP=0 \
+        NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=16 NVTE_FRAMEWORK=pytorch \
+        pip install --no-build-isolation --no-cache-dir .
+    cd /workspace && rm -rf TransformerEngine /root/.cache
+EOF
+
+# ---------------------------------------------------------------------------
+# 2. Build DeepEP with BOTH backends (deep_ep_cpp + hybrid_ep_cpp) from the
+#    hybrid-ep branch, linking against the base image's /opt/nvshmem (3.6.5,
+#    IBGDA/GDRCopy). We rebuild rdma-core (HybridEP needs RDMA_CORE_HOME) and
+#    replace whatever DeepEP the base shipped with the hybrid-ep tip.
+# ---------------------------------------------------------------------------
+RUN bash -ex <<"EOF"
+    # a. libmlx5.so symlink is required for IBGDA (base already ships it, but be safe).
+    MLX5_SO=/usr/lib/x86_64-linux-gnu/libmlx5.so
+    MLX5_REAL=/usr/lib/x86_64-linux-gnu/libmlx5.so.1
+    if [ ! -e "$MLX5_SO" ] && [ -e "$MLX5_REAL" ]; then ln -s "$MLX5_REAL" "$MLX5_SO" || true; fi
+
+    cd /workspace
+    gclone() { for i in 1 2 3 4 5; do git clone "$@" && return 0; echo "clone retry $i"; sleep 10; done; return 1; }
+    # rdma-core (v60) for HybridEP's DOCA/RDMA multinode path.
+    rm -rf /workspace/rdma-core
+    gclone https://github.com/linux-rdma/rdma-core.git
+    cd rdma-core && git checkout tags/v60.0 && sh build.sh
+    apt-get update
+    apt-get install -y --no-install-recommends libnvidia-ml-dev
+    # NVSHMEM 3.x headers pull <cuda/std/array> from the CUDA CCCL include dir,
+    # which nvcc does not search by default; expose it via CPATH.
+    CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+    CCCL_INC="$(ls -d ${CUDA_HOME}/include/cccl ${CUDA_HOME}/targets/*/include/cccl 2>/dev/null | head -1)"
+    test -n "${CCCL_INC}" || { echo "CCCL include dir not found"; exit 1; }
+    export CPATH="${CCCL_INC}:${CPATH:-}"
+
+    cd /workspace
+    rm -rf DeepEP
+    gclone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git
+    # HybridEP hybrid-ep tip (DOCA path; drop the NIXL marker to build without NIXL).
+    cd DeepEP && git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6
+    rm -f .use_nixl
+    RDMA_CORE_HOME=/workspace/rdma-core/build HYBRID_EP_MULTINODE=1 USE_NIXL=0 \
+        NVSHMEM_DIR=/opt/nvshmem \
+        TORCH_CUDA_ARCH_LIST="10.3" MAX_JOBS=8 \
+        pip install --no-build-isolation .
+    apt-get purge -y libnvidia-ml-dev
+    apt-get autoremove -y
+    rm -rf /root/.cache /tmp/* /var/lib/apt/lists/*
+EOF
+
+# The FV base ships nvidia-resiliency-ext 0.5.0, but mcore's nvrx async-checkpoint
+# strategy asserts >= 0.6.0 at startup. Bump it to match the other sync-free bases.
+RUN unset PIP_CONSTRAINT && pip install --no-cache-dir nvidia-resiliency-ext==0.6.0
+
+WORKDIR /workspace/

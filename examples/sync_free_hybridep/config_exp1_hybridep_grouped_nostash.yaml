@@ -1,0 +1,158 @@
+# ============================================================
+# EXPERIMENT 1: HybridEP + device-init GroupedTensor, WITHOUT paged stash and
+# WITHOUT static rank-capacity budget.
+#
+# Exact diff of job j-nm6f1yv5ht ("[sync-free][perf] NV Megatron sync-free
+# baseline"), which is hybridep + grouped_tensor + paged_stash + capacity_factor=2.
+# This variant removes paged_stash and moe_expert_rank_capacity_factor to isolate
+# the bare "hybridep + moe_use_grouped_tensor" path.
+#
+# Diffs vs j-nm6f1yv5ht (everything else identical):
+#   * moe_expert_rank_capacity_factor   REMOVED (HybridEP falls back to dynamic
+#                                       buffer sizing -> a per-dispatch D2H CPU sync;
+#                                       this is the path we want to measure).
+#   * moe_hybridep_num_sms              REMOVED (was 32; only meaningful with the
+#                                       static-budget path -- harmless either way,
+#                                       dropped to keep the "bare" path clean).
+#   * moe_paged_stash / *_page_size / *_buffer_size_factor_*   REMOVED (paged stash
+#                                       requires capacity_factor, so it must go too).
+#
+# Consumed by examples/sync_free_hybridep/pretrain.sh. Topology TP1/PP2/EP16/CP4,
+# 22 layers, gbs=32 (= j-nm6f1yv5ht, 32 GPUs / 4 nodes).
+ENV_VARS:
+  NVTE_ALLOW_NONDETERMINISTIC_ALGO: '1'
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  CUDA_DEVICE_MAX_CONNECTIONS: '32'
+  NCCL_NVLS_ENABLE: '0'
+  NCCL_DEBUG: WARN
+  NVTE_FUSED_ATTN: '1'
+  NVTE_NORM_FWD_USE_CUDNN: '0'
+  NVTE_NORM_BWD_USE_CUDNN: '0'
+  NVTE_FWD_LAYERNORM_SM_MARGIN: '32'
+  NVTE_BWD_LAYERNORM_SM_MARGIN: '32'
+  NUM_OF_TOKENS_PER_CHUNK_COMBINE_API: '128'
+  NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API: '128'
+  HF_HUB_OFFLINE: '1'
+  TRANSFORMERS_OFFLINE: '1'
+  PYTHONWARNINGS: ignore
+ARGS:
+  # ---------- data (mock) + tokenizer ----------
+  mock_data: true
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: /data/minimax-dialogue/pretrain_model/m2-mini/tokenizer
+  make_vocab_size_divisible_by: 32
+  # ---------- model architecture (from the M3-Mini job) ----------
+  seed: 42
+  num_layers: 22
+  hidden_size: 7168
+  ffn_hidden_size: 20480
+  num_attention_heads: 128
+  kv_channels: 256
+  group_query_attention: true
+  num_query_groups: 8
+  normalization: RMSNorm
+  norm_epsilon: 1e-6
+  disable_bias_linear: true
+  untie_embeddings_and_output_weights: true
+  swiglu: true
+  qk_layernorm: true
+  # ---------- full (non-varlen) attention ----------
+  attention_backend: auto
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  # ---------- position embedding ----------
+  position_embedding_type: rope
+  rotary_base: 500000
+  rotary_percent: 0.25
+  max_position_embeddings: 24576
+  seq_length: 24576
+  # ---------- MoE ----------
+  num_experts: 48
+  moe_ffn_hidden_size: 5120
+  moe_router_topk: 4
+  moe_router_score_function: sigmoid
+  moe_router_dtype: fp32
+  moe_router_load_balancing_type: aux_loss
+  moe_aux_loss_coeff: 1e-4
+  moe_router_enable_expert_bias: true
+  moe_router_bias_update_rate: 1e-3
+  moe_layer_freq: ([0]*3+[1]*19)
+  moe_grouped_gemm: true
+  moe_permute_fusion: true
+  moe_router_fusion: true
+  moe_router_padding_for_quantization: true
+  moe_router_force_load_balancing: true
+  moe_shared_expert_intermediate_size: 5120
+  # ---------- parallelism (M3-Mini job topology: 256 GPUs) ----------
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 2
+  expert_model_parallel_size: 16
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  cp_comm_type: a2a
+  sequence_parallel: true
+  use_distributed_optimizer: true
+  pipeline_model_parallel_layout: "Ettt|(ttt|)*6,tL"
+  # ---------- HybridEP sync-free dispatch (NO capacity budget, NO paged stash) ----------
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  # ---------- device-init GroupedTensor (Path B: no op-fuser, no full CG) ----------
+  moe_use_grouped_tensor: true
+  # ---------- 1F1B combined EP-A2A overlap ----------
+  overlap_moe_expert_parallel_comm: true
+  delay_wgrad_compute: true
+  te_rng_tracker: true
+  # ---------- schedule ----------
+  micro_batch_size: 1
+  global_batch_size: 32
+  train_iters: 1000
+  # ---------- optimizer / lr (adam) ----------
+  optimizer: adam
+  lr: 2e-4
+  min_lr: 1e-4
+  lr_decay_style: cosine
+  lr_decay_iters: 3600
+  lr_warmup_iters: 100
+  lr_warmup_init: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1e-20
+  clip_grad: 1.0
+  init_method_std: 0.006
+  override_opt_param_scheduler: true
+  # ---------- precision (bf16 + mxfp8) ----------
+  bf16: true
+  fp8_format: e4m3
+  fp8_recipe: mxfp8
+  fp8_param_gather: false
+  accumulate_allreduce_grads_in_fp32: true
+  main_grads_dtype: fp32
+  main_params_dtype: fp32
+  exp_avg_dtype: fp32
+  exp_avg_sq_dtype: fp32
+  use_precision_aware_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  # ---------- recompute ----------
+  recompute_granularity: selective
+  recompute_modules: [moe_act, layernorm]
+  # ---------- runtime / misc ----------
+  use_mcore_models: true
+  use_flash_attn: true
+  transformer_impl: transformer_engine
+  no_create_attention_mask_in_dataloader: true
+  no_check_for_nan_in_loss_and_grad: true
+  calculate_per_token_loss: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: native
+  manual_gc: true
+  manual_gc_interval: 30
+  distributed_timeout_minutes: 30
+  enable_experimental: true
+  # ---------- logging / eval ----------
+  eval_iters: 0
+  eval_interval: 20000000
+  log_throughput: true
+  log_interval: 1
+  logging_level: 40

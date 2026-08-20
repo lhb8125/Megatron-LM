@@ -3160,8 +3160,7 @@ class EventTracker:
             if self.event_pool.get(name) is None:
                 self.init_event(name)
             self.event_pool[name].record()
-            if name.endswith('/start'):
-                self.cpu_time_pool[name] = time.perf_counter()
+            self.cpu_time_pool[name] = time.perf_counter()
 
     def record_event_start(self, name: str):
         """Record the ``start`` event for ``name``."""

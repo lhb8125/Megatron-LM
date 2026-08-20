@@ -23,8 +23,10 @@ ENV SHELL=/bin/bash
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG YQ_VERSION=4.27.5
-# TE v2.15 main (matches the full-CG CuTe DSL fused grouped MLP recipe).
-ARG TE_COMMIT="6cdd7115e1c1e6605feaff6ebe111ea0466cd71a"
+# TransformerEngine GroupedTensor fork (zhongbozhu:improve_device_grouped_linear),
+# required by Megatron PR #6000's moe_use_grouped_tensor path.
+ARG TE_REPO="https://github.com/zhongbozhu/TransformerEngine.git"
+ARG TE_COMMIT="0e046349e5f76a8fec85e16a778dfdaee5cacf0d"
 # 103a = SM103a (B300 / GB300).
 ARG NVTE_CUDA_ARCHS="103a"
 
@@ -77,11 +79,36 @@ RUN bash -ex <<"EOF"
     rm -rf /var/lib/apt/lists/*
 EOF
 
-# Install TransformerEngine (v2.15 main)
-RUN unset PIP_CONSTRAINT && \
-    NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=8 NVTE_FRAMEWORK=pytorch \
-    pip install --no-build-isolation --no-cache-dir \
-    "git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}"
+# Install TransformerEngine (GroupedTensor fork) with a cuBLAS >= 13.3 toolchain.
+#
+# The 25.11 base ships cuBLAS 13.1, but TE's cublaslt_grouped_gemm.cu hard-requires
+# COMPILE-TIME cuBLAS >= 13.3 for the device-init GroupedTensor grouped GEMM. Without
+# it, GroupedLinear(use_grouped_tensor=True) either falls back to the multi-stream
+# path (unpadded output -> weighted_swiglu broadcast crash under
+# moe_expert_rank_capacity_factor) or raises "requires cuBLAS 13.3+, but compile-time
+# cuBLAS version is 130100". So we install cuBLAS 13.5 + headers into /usr/local/cuda
+# and a recent cudnn-frontend (fused-attn APIs), THEN build TE against them.
+RUN bash -ex <<"EOF"
+    unset PIP_CONSTRAINT
+    pip install --no-cache-dir nvidia-mathdx==25.1.1 nvidia-cublas==13.5.1.27 nvidia-cudnn-frontend==1.26.0
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/include/cublas*.h /usr/local/cuda/include/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/include/cublas*.h /usr/local/cuda/include/
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib/libcublas*.so.13 /usr/local/cuda/lib64/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/lib/libcublas*.so.13 /usr/local/cuda/lib64/
+
+    cd /workspace
+    rm -rf TransformerEngine
+    git clone ${TE_REPO} TransformerEngine
+    cd TransformerEngine
+    git checkout ${TE_COMMIT}
+    git submodule update --init --recursive || true
+    CUDNN_FE_INC=$(python -c "import os,cudnn; print(os.path.join(os.path.dirname(os.path.dirname(cudnn.__file__)),'include'))")
+    echo "using cudnn-frontend headers: ${CUDNN_FE_INC}"
+    CPATH="${CUDNN_FE_INC}:${CPATH:-}" NVTE_WITH_NCCL_EP=0 \
+        NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=16 NVTE_FRAMEWORK=pytorch \
+        pip install --no-build-isolation --no-cache-dir .
+    cd /workspace && rm -rf TransformerEngine /root/.cache
+EOF
 
 # Flash Attention 4, CUTLASS DSL, and cuDNN frontend with CuTe DSL support.
 # nvidia-cudnn-frontend[cutedsl] is required for the TE v2.15 CuTe DSL fused

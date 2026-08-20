@@ -1,32 +1,36 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
-# IMAGE_NAME: b300-sync-free-hybridep-te215
+# IMAGE_NAME: b300-sync-free-deepep
 #
-# Single-node B300 (SM103a) image for the HybridEP sync-free MoE + 1F1B combined
-# overlap experiment. Path A of docs/hybridep_paged_stash_sync_free:
-#   TE op-fuser + CuTe DSL fused GroupedMLP + full-iteration CUDA graph, on top
-#   of HybridEP static-budget dispatch + paged stash.
+# DeepEP cross-node base image for the sync-free MoE + 1F1B combined overlap
+# experiment on B300 (SM103a). This base ships everything training needs:
+#   CUDA/cuDNN/cuBLAS(>=13.3) + PyTorch(25.11) + TransformerEngine(GroupedTensor
+#   fork) + DeepEP/HybridEP + source-built NVSHMEM 3.4.5 (IBGDA/GDRCopy).
 #
-# Adapted from
-#   examples/moe_recipes/qwen3_235b/gb200/mxfp8_128GPU_TP1PP1EP64_paged_stash_fullcg_overlap.yaml
-# for a single B300 node (compute cap 10.3):
-#   - NVTE_CUDA_ARCHS / TORCH_CUDA_ARCH_LIST target SM103a only.
-#   - DeepEP built from the hybrid-ep branch (provides deep_ep.HybridEPBuffer).
-
-# Base pinned to 26.04. Its torch's libtorch_nvshmem.so has an undefined ref to
-# `nvshmem_selected_device_transport`, a symbol that only exists in NVSHMEM
-# >= 3.6.x, so the source-compiled NVSHMEM below is pinned to 3.6.5-0 (NOT 3.4.5)
-# and is deliberately kept OFF LD_LIBRARY_PATH (see the NVSHMEM stage comment).
-ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:26.04-py3
+# Base pinned to nvcr.io/nvidia/pytorch:25.11-py3 to match the known-good
+# alg-eng-team base_fv NVSHMEM recipe: its torch's libtorch_nvshmem does NOT
+# require nvshmem_selected_device_transport, so a source-compiled NVSHMEM 3.4.5
+# (with IBGDA/GDRCopy) links cleanly. This 25.11 stack is the one whose cross-node
+# NCCL/EP dispatch efficiency is correct on the RoCE/Spectrum-X cluster.
+#
+# NOTE on grouped_tensor (moe_use_grouped_tensor): the 25.11 base ships cuBLAS
+# 13.1, but TE's cublaslt_grouped_gemm.cu hard-requires COMPILE-TIME cuBLAS >= 13.3
+# for the device-init GroupedTensor grouped GEMM. Without it, GroupedLinear falls
+# back to the multi-stream path (unpadded output -> weighted_swiglu broadcast crash
+# under moe_expert_rank_capacity_factor). So we install cuBLAS 13.5 + headers into
+# /usr/local/cuda and REBUILD TE against them (see the TE stage below).
+#
+# DeepEP is built from the hybrid-ep branch, which ships BOTH the DeepEP core
+# extension (deep_ep_cpp, moe_flex_dispatcher_backend=deepep) and the HybridEP
+# extension (hybrid_ep_cpp, moe_flex_dispatcher_backend=hybridep).
+ARG FROM_IMAGE_NAME=nvcr.io/nvidia/pytorch:25.11-py3
 FROM ${FROM_IMAGE_NAME} AS base
 
 ENV SHELL=/bin/bash
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG YQ_VERSION=4.27.5
-# Path B: TransformerEngine PR #3224 (zhongbozhu:improve_device_grouped_linear).
-# Adds GroupedLinear(use_grouped_tensor=...) + device-init GroupedTensor/cublas grouped GEMM,
-# required by Megatron PR #6000's moe_use_grouped_tensor path. Not yet merged into TE main,
-# so we build this fork branch from source (includes C++/CUDA changes).
+# TransformerEngine GroupedTensor fork (zhongbozhu:improve_device_grouped_linear),
+# required by Megatron PR #6000's moe_use_grouped_tensor path.
 ARG TE_REPO="https://github.com/zhongbozhu/TransformerEngine.git"
 ARG TE_COMMIT="0e046349e5f76a8fec85e16a778dfdaee5cacf0d"
 # 103a = SM103a (B300 / GB300).
@@ -81,34 +85,40 @@ RUN bash -ex <<"EOF"
     rm -rf /var/lib/apt/lists/*
 EOF
 
-# Install a recent cudnn-frontend C++ header set BEFORE building TE. The PR #3224 branch's
-# fused-attn C++ uses cudnn-frontend APIs (set_ragged_offset_multiplier / set_cu_seq_len_q)
-# that the base image's /opt/pytorch/.../third_party/cudnn_frontend headers predate.
-RUN pip install --no-cache-dir "nvidia-cudnn-frontend>=1.23.0"
-
-# Install TransformerEngine from PR #3224 fork branch (device-init GroupedTensor)
+# Install TransformerEngine (GroupedTensor fork) with a cuBLAS >= 13.3 toolchain.
+#
+# The 25.11 base ships cuBLAS 13.1, but TE's cublaslt_grouped_gemm.cu hard-requires
+# COMPILE-TIME cuBLAS >= 13.3 for the device-init GroupedTensor grouped GEMM. Without
+# it, GroupedLinear(use_grouped_tensor=True) either falls back to the multi-stream
+# path (unpadded output -> weighted_swiglu broadcast crash under
+# moe_expert_rank_capacity_factor) or raises "requires cuBLAS 13.3+, but compile-time
+# cuBLAS version is 130100". So we install cuBLAS 13.5 + headers into /usr/local/cuda
+# and a recent cudnn-frontend (fused-attn APIs), THEN build TE against them.
 RUN bash -ex <<"EOF"
     unset PIP_CONSTRAINT
+    pip install --no-cache-dir nvidia-mathdx==25.1.1 nvidia-cublas==13.5.1.27 nvidia-cudnn-frontend==1.26.0
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/include/cublas*.h /usr/local/cuda/include/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/include/cublas*.h /usr/local/cuda/include/
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib/libcublas*.so.13 /usr/local/cuda/lib64/ 2>/dev/null || \
+    cp /usr/local/lib/python3.12/dist-packages/nvidia/cu*/lib/libcublas*.so.13 /usr/local/cuda/lib64/
+
     cd /workspace
+    rm -rf TransformerEngine
     git clone ${TE_REPO} TransformerEngine
     cd TransformerEngine
     git checkout ${TE_COMMIT}
     git submodule update --init --recursive || true
-    # Point TE's build at the pip-installed (newer) cudnn-frontend headers instead of the
-    # older ones bundled under /opt/pytorch, so fused-attn compiles.
     CUDNN_FE_INC=$(python -c "import os,cudnn; print(os.path.join(os.path.dirname(os.path.dirname(cudnn.__file__)),'include'))")
     echo "using cudnn-frontend headers: ${CUDNN_FE_INC}"
-    # Disable TE's built-in NCCL-EP backend: its 3rdparty/nccl-extensions requires a newer NCCL
-    # (GIN) than the 26.04 base ships, and we use DeepEP HybridEP for expert parallel instead.
     CPATH="${CUDNN_FE_INC}:${CPATH:-}" NVTE_WITH_NCCL_EP=0 \
-        NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=8 NVTE_FRAMEWORK=pytorch \
+        NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=16 NVTE_FRAMEWORK=pytorch \
         pip install --no-build-isolation --no-cache-dir .
     cd /workspace && rm -rf TransformerEngine /root/.cache
 EOF
 
 # Flash Attention 4, CUTLASS DSL, and cuDNN frontend with CuTe DSL support.
-# nvidia-cudnn-frontend[cutedsl] is required for the TE v2.15 CuTe DSL fused
-# grouped MLP (grouped_gemm_glu_wrapper_sm100).
+# nvidia-cudnn-frontend[cutedsl] is required for the TE CuTe DSL fused grouped MLP
+# (grouped_gemm_glu_wrapper_sm100).
 # Pin nvidia-cutlass-dsl==4.5.2: it is the version quack-kernels 0.5.0 (pulled in
 # by cudnn-frontend[cutedsl]) is built against. 4.7.0 renamed/removed
 # cutlass.cute.core.ThrMma and breaks quack's fused grouped MLP import.
@@ -117,30 +127,22 @@ RUN pip install --no-cache-dir flash-attn-4==4.0.0b10 "nvidia-cutlass-dsl[cu13]=
     pip install --no-cache-dir "nvidia-cutlass-dsl[cu13]==4.5.2"
 
 # =========================
-# HybridEP (DeepEP hybrid-ep branch -> deep_ep.HybridEPBuffer)
+# DeepEP base (DeepEP hybrid-ep branch -> deep_ep_cpp + hybrid_ep_cpp)
 # =========================
-FROM base AS hybridep
+FROM base AS deepep
 
 # Build DeepEP with BOTH cross-node backends enabled:
-#   * HybridEP extension (hybrid_ep_cpp): DOCA/RDMA multinode path
-#     (HYBRID_EP_MULTINODE=1, USE_NIXL=0).
 #   * DeepEP core extension (deep_ep_cpp): NVSHMEM internode + low-latency
 #     kernels, built against a SOURCE-COMPILED NVSHMEM with IBGDA + GDRCopy.
+#     (moe_flex_dispatcher_backend=deepep)
+#   * HybridEP extension (hybrid_ep_cpp): DOCA/RDMA multinode path
+#     (HYBRID_EP_MULTINODE=1, USE_NIXL=0). (moe_flex_dispatcher_backend=hybridep)
 #
-# We compile NVSHMEM from source (instead of the pip wheel / system package) so
-# IBGDA and GDRCopy transports are actually enabled -- the packaged transports
-# did not work on the RoCE/Spectrum-X cluster and cross-node dispatch timed out
-# ("DeepEP error: timeout (dispatch CPU)"), and on 26.04 the system NVSHMEM path
-# silently falls back to a slow transport (~5.6x slower EP dispatch).
-#
-# IMPORTANT (26.04 ABI): pin NVSHMEM to 3.6.5-0, NOT 3.4.5. The NGC 26.04 torch's
-# libtorch_nvshmem.so has an undefined ref to `nvshmem_selected_device_transport`,
-# a symbol that only exists in NVSHMEM >= 3.6.x. Building 3.4.5 and putting it on
-# LD_LIBRARY_PATH makes libtorch_nvshmem.so load the wrong ABI. We therefore build
-# 3.6.5-0 (which provides that symbol) AND deliberately keep /opt/nvshmem OFF
-# LD_LIBRARY_PATH so torch keeps using NGC's bundled runtime; DeepEP consumes the
-# source build only at compile time via NVSHMEM_DIR.
-ARG NVSHMEM_VERSION="3.6.5-0"
+# We compile NVSHMEM from source (instead of the pip wheel) so IBGDA and
+# GDRCopy transports are actually enabled -- the pip wheel's transports did not
+# work on the RoCE/Spectrum-X cluster and cross-node dispatch timed out
+# ("DeepEP error: timeout (dispatch CPU)"). This mirrors the known-good
+# alg-eng-team base_fv recipe (NVSHMEM 3.4.5 + IBGDA + GDRCopy + libmlx5 link).
 RUN bash -ex <<"EOF"
     # a. libmlx5.so symlink is required for IBGDA (base already ships it, but be safe).
     MLX5_SO=/usr/lib/x86_64-linux-gnu/libmlx5.so
@@ -148,7 +150,7 @@ RUN bash -ex <<"EOF"
     if [ ! -e "$MLX5_SO" ] && [ -e "$MLX5_REAL" ]; then ln -s "$MLX5_REAL" "$MLX5_SO" || true; fi
 
     # b. Build + install NVSHMEM from source with IBGDA/GDRCopy enabled.
-    NVSHMEM_VERSION="3.6.5-0"
+    NVSHMEM_VERSION="3.4.5-0"
     NVSHMEM_DIR=/opt/nvshmem
     SRC=/tmp/nvshmem_build
     mkdir -p "$NVSHMEM_DIR" "$SRC" && cd "$SRC"
@@ -156,7 +158,6 @@ RUN bash -ex <<"EOF"
         "https://github.com/NVIDIA/nvshmem/archive/refs/tags/v${NVSHMEM_VERSION}.tar.gz"
     tar -zxf "v${NVSHMEM_VERSION}.tar.gz"
     cd "nvshmem-${NVSHMEM_VERSION}"
-    # Patches from the base_fv recipe (MPI include interface + renamed symbol).
     find . -name CMakeLists.txt -print0 | xargs -0 sed -i \
         's/\$<BUILD_INTERFACE:\${MPI_CXX_INCLUDE_DIRS}>/\${MPI_CXX_INCLUDE_DIRS}/g'
     sed -i 's/nvshmemi_call_rdxn_on_stream_kernel/nvshmemi_reduce_on_stream/g' \
@@ -174,20 +175,14 @@ RUN bash -ex <<"EOF"
 EOF
 
 # NVSHMEM env (source-compiled install at /opt/nvshmem).
-#
-# WARNING: do NOT prepend /opt/nvshmem/lib to LD_LIBRARY_PATH. NGC 26.04 torch is
-# linked against the NVSHMEM bundled under /usr/local/cuda; loading /opt/nvshmem
-# first makes libtorch_nvshmem.so fail with an NVSHMEM ABI error (or silently pick
-# the wrong transport). DeepEP still consumes /opt/nvshmem explicitly via
-# NVSHMEM_DIR at build time, and torch keeps using NGC's matching runtime.
 ENV NVSHMEM_DIR="/opt/nvshmem"
 ENV NVSHMEM_HOME="/opt/nvshmem"
+ENV LD_LIBRARY_PATH="/opt/nvshmem/lib:${LD_LIBRARY_PATH}"
 ENV PATH="/opt/nvshmem/bin:${PATH}"
 
 RUN bash -ex <<"EOF"
     cd /workspace
-    gclone() { for i in 1 2 3 4 5; do git clone "$@" && return 0; echo "clone retry $i"; sleep 10; done; return 1; }
-    gclone https://github.com/linux-rdma/rdma-core.git
+    git clone https://github.com/linux-rdma/rdma-core.git
     cd rdma-core && git checkout tags/v60.0 && sh build.sh
     apt-get update
     apt-get install -y --no-install-recommends libnvidia-ml-dev
@@ -197,8 +192,7 @@ RUN bash -ex <<"EOF"
     CCCL_INC="$(ls -d ${CUDA_HOME}/include/cccl ${CUDA_HOME}/targets/*/include/cccl 2>/dev/null | head -1)"
     test -n "${CCCL_INC}" || { echo "CCCL include dir not found"; exit 1; }
     export CPATH="${CCCL_INC}:${CPATH:-}"
-    cd /workspace
-    gclone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git
+    git clone --branch hybrid-ep https://github.com/deepseek-ai/DeepEP.git
     # HybridEP hybrid-ep tip (DOCA path; drop the NIXL marker to build without NIXL).
     cd DeepEP && git checkout d28bd676c2120573c9f1425f0c16c39faa4117e6
     rm -f .use_nixl
