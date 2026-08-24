@@ -3,6 +3,7 @@
 # Copyright (c) 2025 DeepSeek
 # Licensed under the MIT License - https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE
 
+import os
 from typing import Optional
 
 from megatron.core.utils import internal_api
@@ -34,6 +35,11 @@ import torch
 
 _buffer = None
 _elastic_buffer = None
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Return whether an opt-in environment flag is enabled."""
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
 def get_hidden_bytes(x: torch.Tensor) -> int:
@@ -83,7 +89,13 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        buffer_kwargs = {}
+        if _env_flag_enabled("USE_MNNVL"):
+            # A GB200/GB300 NVLink domain spans multiple hosts. CUDA IPC
+            # handles are process-host local, so DeepEP must use CUDA fabric
+            # handles and allow NVSHMEM MNNVL discovery in that topology.
+            buffer_kwargs.update(allow_mnnvl=True, use_fabric=True)
+        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes, **buffer_kwargs)
     return _buffer
 
 
