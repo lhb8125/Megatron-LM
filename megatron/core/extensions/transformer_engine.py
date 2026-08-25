@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 from __future__ import annotations
 
 import copy
@@ -72,8 +72,14 @@ try:
     import transformer_engine as te
     from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast, fp8_model_init
 
+    try:
+        from transformer_engine.pytorch.utils import mark_grouped_tensor as _te_mark_grouped_tensor
+    except ImportError:
+        _te_mark_grouped_tensor = None
+
     HAVE_TE = True
 except ImportError:
+    _te_mark_grouped_tensor = None
     if TYPE_CHECKING:
         # For type checking, treat transformer_engine as always available.
         import transformer_engine as te
@@ -87,6 +93,51 @@ except ImportError:
         HAVE_TE = False
 
 _TE_CONFIG_TYPE_KEY = "transformer_engine_config_type"
+_EXPERT_PARAMETER_NAME_PATTERN = re.compile(r"(weight|bias)\d*")
+
+
+def mark_grouped_tensor(*tensors: Any) -> None:
+    """Mark dynamic grouped tensors through the Transformer Engine compatibility boundary."""
+    if _te_mark_grouped_tensor is None:
+        raise RuntimeError(
+            "Paged stashing requires Transformer Engine's mark_grouped_tensor utility."
+        )
+    _te_mark_grouped_tensor(*tensors)
+
+
+def _set_expert_parameter_attributes(
+    module: torch.nn.Module, parallel_mode: Optional[str], use_expert_pgs: bool
+) -> None:
+    """Set process-group and tensor-partition metadata on an expert TE module.
+
+    ``allreduce=False`` selects the expert topology, including EDP for gradient reduction.
+
+    Weights and biases, including TEGroupedLinear's numbered parameters, are also marked as
+    TP-partitioned according to ``parallel_mode``; row-parallel biases remain replicated.
+
+    Any parameter which is partitioned along TP or ETP is marked with ``tensor_model_parallel``,
+    which ensures that all shards contribute to the gradient norm.
+
+    Args:
+        module: Transformer Engine module whose direct parameters should be marked.
+        parallel_mode: Tensor-parallel mode used by the module (``"column"``, ``"row"``, or None).
+        use_expert_pgs: Whether to use EP/ETP/EGTP/EDP process groups instead of TP/GTP/CP/DP.
+    """
+    for name, param in module.named_parameters(recurse=False):
+        param.allreduce = not use_expert_pgs
+
+        name_match = _EXPERT_PARAMETER_NAME_PATTERN.fullmatch(name)
+        parameter_kind = name_match.group(1) if name_match else None
+        is_weight = parameter_kind == "weight"
+        is_bias = parameter_kind == "bias"
+        is_partitioned = parallel_mode in ("column", "row") and (
+            is_weight or (parallel_mode == "column" and is_bias)
+        )
+        if is_weight or is_bias:
+            param.tensor_model_parallel = is_partitioned
+        if is_partitioned:
+            param.partition_dim = 1 if parallel_mode == "row" else 0
+            param.partition_stride = 1
 
 
 class TransformerEngineConfigType(enum.Enum):
