@@ -3,6 +3,7 @@
 # Copyright (c) 2025 DeepSeek
 # Licensed under the MIT License - https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE
 
+import inspect
 import os
 from typing import Optional
 
@@ -40,6 +41,14 @@ _elastic_buffer = None
 def _env_flag_enabled(name: str) -> bool:
     """Return whether an opt-in environment flag is enabled."""
     return os.getenv(name, "0").strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _buffer_supports_argument(name: str) -> bool:
+    """Return whether the installed DeepEP Buffer accepts a constructor argument."""
+    try:
+        return name in inspect.signature(Buffer).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def get_hidden_bytes(x: torch.Tensor) -> int:
@@ -92,9 +101,11 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         buffer_kwargs = {}
         if _env_flag_enabled("USE_MNNVL"):
             # A GB200/GB300 NVLink domain spans multiple hosts. CUDA IPC
-            # handles are process-host local, so DeepEP must use CUDA fabric
-            # handles and allow NVSHMEM MNNVL discovery in that topology.
-            buffer_kwargs.update(allow_mnnvl=True, use_fabric=True)
+            # handles are process-host local. Current DeepEP folds fabric-handle
+            # allocation into allow_mnnvl; older forks require use_fabric too.
+            buffer_kwargs["allow_mnnvl"] = True
+            if _buffer_supports_argument("use_fabric"):
+                buffer_kwargs["use_fabric"] = True
         _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes, **buffer_kwargs)
     return _buffer
 
