@@ -185,6 +185,7 @@ class PagedTensor:
         # Page record / spill flag: allocated here; zeroed in offload_to_stash (pack stream).
         self.page_record = torch.empty(self.max_num_pages, dtype=torch.int64, device=self.device)
         self.spilled_to_host = torch.empty(1, dtype=torch.int64, device=self.device)
+        self.offloaded_on_save = False
 
     @property
     def schedule_layer(self):
@@ -531,7 +532,8 @@ class PagedStashManager:
                 while len(self.paged_tensors_to_stash) > 0:
                     paged_tensor = self.paged_tensors_to_stash.pop(0)
                     stash_buffer = self.stash_buffers[paged_tensor.dtype][paged_tensor.hidden_size]
-                    paged_tensor.offload_to_stash(stash_buffer)
+                    if not paged_tensor.offloaded_on_save:
+                        paged_tensor.offload_to_stash(stash_buffer)
                     self.paged_tensors_to_reload[pp_schedule_layer].append(paged_tensor)
                     self.paged_tensors_stash_in_progress.append(paged_tensor)
             else:
@@ -826,6 +828,17 @@ class PagedStashManager:
             hidden_size=hidden_size,
             page_size=self.page_size,
         )
+        if (
+            os.getenv("MCORE_PAGED_STASH_DEBUG_EAGER_BF16_ON_SAVE", "0") == "1"
+            and self.status == 'captured'
+            and dtype == torch.bfloat16
+        ):
+            # Diagnostic only: the device-init GroupedLinear saved input can outlive the
+            # storage visible to its save hook. Copy it while the hook still owns a valid view,
+            # then let group commit only associate the pages with the pipeline schedule.
+            stash_buffer = self.stash_buffers[paged_tensor.dtype][paged_tensor.hidden_size]
+            paged_tensor.offload_to_stash(stash_buffer)
+            paged_tensor.offloaded_on_save = True
 
         if self.status == 'captured':
             self.add_paged_tensor_to_stash(paged_tensor)
