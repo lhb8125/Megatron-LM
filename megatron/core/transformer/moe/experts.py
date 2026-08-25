@@ -61,18 +61,9 @@ if HAVE_TE:
     import transformer_engine as te
 
     from megatron.core.extensions.transformer_engine import Fp8Padding, Fp8Unpadding
-
-    try:
-        from transformer_engine.pytorch.ops.basic.grouped_linear import (
-            GRAD_INPUT_BUFFER_KEY,
-            OUTPUT_BUFFER_KEY,
-        )
-    except ImportError:
-        GRAD_INPUT_BUFFER_KEY = OUTPUT_BUFFER_KEY = None
 else:
     te = None  # type: ignore[assignment, misc]
     Fp8Padding, Fp8Unpadding = None, None
-    GRAD_INPUT_BUFFER_KEY = OUTPUT_BUFFER_KEY = None
 
 try:
     import flashinfer.fused_moe as fused_moe
