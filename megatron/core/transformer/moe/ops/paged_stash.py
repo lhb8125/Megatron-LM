@@ -26,6 +26,7 @@ def paged_stash_copy_kernel(
     spilled_to_host_ptr,  # Output: 0 = stored in CUDA, 1 = stored in host or overflow
     new_free_list_head_ptr,  # Output: shape (2,) updated heads
     PAGE_SIZE: tl.constexpr,
+    MAX_NUM_PAGES: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_HOST_BUFFER: tl.constexpr,
@@ -76,6 +77,18 @@ def paged_stash_copy_kernel(
     if overflow == 1:
         # No stash; preserve heads so Python copy_ does not write garbage into the buffer.
         if pid == 0:
+            tl.store(new_free_list_head_ptr, head_cuda)
+            tl.store(new_free_list_head_ptr + 1, head_host)
+        return
+
+    # The runtime token count can exceed the captured static tensor budget when router load
+    # changes between iterations. The shared stash buffer may still have enough free pages, but
+    # this tensor's page_record is only MAX_NUM_PAGES entries long. Treat that condition like any
+    # other stash overflow so the training runner can retry without static padding/paged stash.
+    if required_pages > MAX_NUM_PAGES:
+        if pid == 0:
+            tl.store(overflow_ptr, 1)
+            tl.store(spilled_to_host_ptr, 1)
             tl.store(new_free_list_head_ptr, head_cuda)
             tl.store(new_free_list_head_ptr + 1, head_host)
         return

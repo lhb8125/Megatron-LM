@@ -13,7 +13,9 @@ from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transfor
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.moe_utils import get_align_size_for_quantization
 from megatron.core.transformer.moe.paged_stash import (
+    PagedStashBuffer,
     PagedStashManager,
+    PagedTensor,
     check_paged_stash_overflow,
     paged_stash_init_chunk_handler,
     paged_stash_reset,
@@ -240,6 +242,40 @@ def _is_mxfp8_supported() -> bool:
 _MXFP8_SKIP_REASON = (
     "MXFP8 (tests configure fp8_recipe='mxfp8') requires compute capability >= 10.0 (Blackwell)"
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_paged_tensor_runtime_tokens_over_static_budget_sets_overflow():
+    """Runtime router skew must request fallback instead of overrunning page_record."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    overflow = torch.zeros(1, dtype=torch.int64, device=device)
+    host_spill = torch.zeros(1, dtype=torch.int64, device=device)
+    hidden_size = 16
+    max_num_tokens = 64
+    runtime_num_tokens = max_num_tokens + 1
+    buffer = PagedStashBuffer(
+        num_tokens=128,
+        hidden_size=hidden_size,
+        page_size=64,
+        device=device,
+        overflow=overflow,
+        host_spill=host_spill,
+        dtype=torch.bfloat16,
+    )
+    paged_tensor = PagedTensor(
+        torch.randn(max_num_tokens * hidden_size, dtype=torch.bfloat16, device=device),
+        num_tokens_tensor=torch.tensor([runtime_num_tokens], dtype=torch.int64, device=device),
+        max_num_tokens=max_num_tokens,
+        hidden_size=hidden_size,
+        page_size=64,
+    )
+
+    paged_tensor.offload_to_stash(buffer)
+    torch.cuda.synchronize()
+
+    assert overflow.item() == 1
+    assert paged_tensor.spilled_to_host.item() == 1
+    assert buffer.free_list_head.tolist() == [0, 0]
 
 
 @pytest.mark.skipif(not _is_mxfp8_supported(), reason=_MXFP8_SKIP_REASON)
