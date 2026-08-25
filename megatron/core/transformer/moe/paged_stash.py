@@ -739,6 +739,13 @@ class PagedStashManager:
         columnwise_scale_inv = tensor.grouped_tensor_scale_inv
         tensor = tensor.flatten()
         if (
+            os.getenv("MCORE_PAGED_STASH_DEBUG_RECORD_PACK_STREAM_ON_SAVE", "0") == "1"
+            and self.status == 'captured'
+        ):
+            # Diagnostic only: the saved tensor is consumed later on the dedicated pack stream.
+            # Record that stream while the original TE tensor is still visible to this hook.
+            tensor.record_stream(self.pack_stream)
+        if (
             os.getenv("MCORE_PAGED_STASH_DEBUG_CLONE_BF16_ON_SAVE", "0") == "1"
             and self.status == 'captured'
             and tensor.dtype == torch.bfloat16
