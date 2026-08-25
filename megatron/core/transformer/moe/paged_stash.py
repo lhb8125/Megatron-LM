@@ -832,6 +832,10 @@ class PagedStashManager:
             os.getenv("MCORE_PAGED_STASH_DEBUG_EAGER_BF16_ON_SAVE", "0") == "1"
             and self.status == 'captured'
             and dtype == torch.bfloat16
+            and self._pp_schedule is not None
+            and self.current_schedule_index + 1 < len(self._pp_schedule)
+            and self._pp_schedule[self.current_schedule_index]
+            != -self._pp_schedule[self.current_schedule_index + 1]
         ):
             # Diagnostic only: the device-init GroupedLinear saved input can outlive the
             # storage visible to its save hook. Copy it while the hook still owns a valid view,
