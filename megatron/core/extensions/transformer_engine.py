@@ -8,6 +8,7 @@ import inspect
 import io
 import os
 import pickle
+import re
 import warnings
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, cast
