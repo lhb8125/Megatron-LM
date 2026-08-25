@@ -235,7 +235,7 @@ class PagedTensor:
             self.spilled_to_host,
             new_free_list_head,
             PAGE_SIZE=self.page_size,
-            MAX_NUM_PAGES=self.max_num_pages,
+            MAX_NUM_TOKENS=max_num_tokens,
             HIDDEN_SIZE=self.hidden_size,
             BLOCK_SIZE=BLOCK_SIZE,
             HAS_HOST_BUFFER=has_host,

@@ -251,7 +251,8 @@ def test_paged_tensor_runtime_tokens_over_static_budget_sets_overflow():
     overflow = torch.zeros(1, dtype=torch.int64, device=device)
     host_spill = torch.zeros(1, dtype=torch.int64, device=device)
     hidden_size = 16
-    max_num_tokens = 64
+    # Keep both counts in the same page so the guard must compare tokens, not page counts.
+    max_num_tokens = 65
     runtime_num_tokens = max_num_tokens + 1
     buffer = PagedStashBuffer(
         num_tokens=128,
