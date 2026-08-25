@@ -1,6 +1,7 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import Any
 
@@ -219,6 +220,36 @@ class PagedTensor:
             else paged_stash_buffer.cuda_buffer
         )
 
+        debug_sync = os.getenv("MCORE_PAGED_STASH_DEBUG_SYNC", "0") == "1"
+        debug_context = None
+        if debug_sync:
+            # Synchronize before reading allocator metadata so an asynchronous failure from the
+            # previous paged tensor is attributed to that launch rather than this one. This path
+            # is intentionally opt-in because both ``item`` and ``tolist`` serialize the stream.
+            torch.cuda.synchronize(self.device)
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_available() and torch.distributed.is_initialized()
+                else 0
+            )
+            debug_context = {
+                "rank": rank,
+                "schedule_layer": self.schedule_layer_no,
+                "dtype": str(self.dtype),
+                "original_shape": tuple(self.original_shape),
+                "source_numel": tensor_to_copy.numel(),
+                "source_bytes": tensor_to_copy.numel() * tensor_to_copy.element_size(),
+                "num_tokens": int(num_tokens_tensor.item()),
+                "max_num_tokens": max_num_tokens,
+                "hidden_size": self.hidden_size,
+                "page_record_pages": self.page_record.numel(),
+                "columnwise_scale_inv": bool(self.is_columnwise_scale_inv),
+                "free_list_head": paged_stash_buffer.free_list_head.tolist(),
+                "free_list_tail": paged_stash_buffer.free_list_tail.tolist(),
+                "free_list_capacity": paged_stash_buffer.free_list_capacity.tolist(),
+            }
+            logger.error("PAGED_STASH_DEBUG phase=before %s", debug_context)
+
         paged_stash_copy_kernel[grid](
             tensor_to_copy.view(paged_stash_buffer.cuda_buffer.dtype),
             paged_stash_buffer.cuda_buffer,
@@ -241,6 +272,18 @@ class PagedTensor:
             HAS_HOST_BUFFER=has_host,
         )
         paged_stash_buffer.free_list_head.copy_(new_free_list_head)
+        if debug_sync:
+            try:
+                torch.cuda.synchronize(self.device)
+            except Exception:
+                logger.exception("PAGED_STASH_DEBUG phase=failed %s", debug_context)
+                raise
+            logger.error(
+                "PAGED_STASH_DEBUG phase=after rank=%s free_list_head=%s overflow=%s",
+                debug_context["rank"],
+                paged_stash_buffer.free_list_head.tolist(),
+                int(paged_stash_buffer.overflow.item()),
+            )
         self._original_tensor = self._tensor
         self._tensor = None
 
