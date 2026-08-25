@@ -738,6 +738,14 @@ class PagedStashManager:
         original_shape = tensor.shape
         columnwise_scale_inv = tensor.grouped_tensor_scale_inv
         tensor = tensor.flatten()
+        if (
+            os.getenv("MCORE_PAGED_STASH_DEBUG_CLONE_BF16_ON_SAVE", "0") == "1"
+            and self.status == 'captured'
+            and tensor.dtype == torch.bfloat16
+        ):
+            # Diagnostic only: distinguish a TE/device-init saved-tensor lifetime problem from
+            # paged-buffer/free-list addressing by taking ownership while the save hook runs.
+            tensor = tensor.clone()
         dtype = tensor.dtype
         hidden_size = tensor.numel() // (
             self.max_num_tokens
