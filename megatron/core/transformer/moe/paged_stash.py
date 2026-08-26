@@ -1064,6 +1064,7 @@ class PagedStashRunner:
         self.optimizer = optimizer
         self.forward_backward_func = forward_backward_func
         self.moe_layers = []
+        self.completed_training_steps = 0
         # TransformerConfig objects that must stay in sync for moe_paged_stash: the training
         # loop `config` (schedules / paged_stash_reset) plus each VP chunk's GPT root config
         # (GPTModel.forward). MoE mlps use the same config reference as that root, so we do
@@ -1341,4 +1342,15 @@ class PagedStashRunner:
                     "moe_paged_stash_buffer_size_factor_cpu.",
                 )
             self.prepare_for_rerun(is_training=training)
+        if training:
+            self.completed_training_steps += 1
+            reset_peak_after_step = int(os.getenv("MCORE_PAGED_STASH_RESET_PEAK_AFTER_STEP", "0"))
+            if reset_peak_after_step == self.completed_training_steps:
+                torch.cuda.reset_peak_memory_stats()
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    "Paged stash validation: reset CUDA peak memory stats "
+                    f"after training step {self.completed_training_steps}.",
+                )
         return result
