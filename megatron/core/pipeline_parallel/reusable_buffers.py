@@ -106,11 +106,7 @@ class ReusableOutputBufferPool:
     def _release(self, slot_index: int, stream: torch.cuda.Stream) -> None:
         slot = self._slots[slot_index]
         if not slot.in_use:
-            # Some final consumers own their lifetime and release immediately after enqueueing
-            # work, while ScheduleNode subsequently visits the same input in its generic
-            # free-input path. Treat that second visit as an ownership query: the persistent
-            # storage is already safe and must not be resized or record_stream'ed.
-            return
+            raise RuntimeError(f"{self.name} slot {slot_index} was released more than once")
         if slot.event is None:
             # External events become explicit CUDA graph event nodes. This is required when
             # capture begins after eager warmup: an internal event wait would otherwise create
@@ -129,6 +125,16 @@ class ReusableOutputBufferPool:
         self._cursor = 0
 
 
+def is_reusable_output_buffer(tensor: torch.Tensor) -> bool:
+    """Return whether ``tensor`` storage belongs to a reusable output pool.
+
+    This ownership probe does not change slot lifetime state. Generic cleanup paths should use
+    it to avoid resizing or recording persistent storage, leaving the actual release to the
+    component that knows the tensor's final scheduled consumer.
+    """
+    return _storage_key(tensor) in _buffer_owners
+
+
 def release_reusable_output_buffer(tensor: torch.Tensor, stream: torch.cuda.Stream) -> bool:
     """Release a registered persistent output after its last scheduled consumer.
 
@@ -139,9 +145,11 @@ def release_reusable_output_buffer(tensor: torch.Tensor, stream: torch.cuda.Stre
     Returns:
         ``True`` when the tensor belongs to a reusable pool. The caller must then avoid
         resizing its storage or calling ``record_stream``, because the pool owns the storage
-        and records the precise consumer completion event itself. Releasing an already-released
-        registered storage is an idempotent ownership query, so a final consumer may release it
-        before ``ScheduleNode`` reaches its generic free-input path.
+        and records the precise consumer completion event itself.
+
+    Raises:
+        RuntimeError: If the registered slot is not currently in use, including a repeated
+            release of the same acquisition.
     """
     owner = _buffer_owners.get(_storage_key(tensor))
     if owner is None:
