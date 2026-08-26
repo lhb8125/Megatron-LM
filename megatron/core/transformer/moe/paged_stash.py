@@ -1278,6 +1278,7 @@ class PagedStashRunner:
                 num_tries < 2
             ), f"PagedStashRunner: num_tries {num_tries} exceeded max attempts!!!"
             num_tries += 1
+            attempt_moe_paged_stash = self.config.moe_paged_stash
             data_iterator, data_list = self.data_read(
                 data_iterator, model, training, num_microbatches
             )
@@ -1286,6 +1287,17 @@ class PagedStashRunner:
             result = self.forward_backward_func(*args, **kwargs)
 
             stash_overflow_ranks, overbudget_ranks, host_spill_ranks = self.check_moe_overflow()
+            if os.getenv("MCORE_PAGED_STASH_LOG_STATUS", "0") == "1":
+                log_single_rank(
+                    logger,
+                    logging.INFO,
+                    "Paged stash status: "
+                    f"attempt={num_tries} enabled={attempt_moe_paged_stash} "
+                    f"stash_overflow_ranks={stash_overflow_ranks} "
+                    f"overbudget_ranks={overbudget_ranks} "
+                    f"host_spill_ranks={host_spill_ranks} "
+                    f"will_retry={stash_overflow_ranks > 0 or overbudget_ranks > 0}",
+                )
             # if no overflow, set the expert_rank_capacity_factor to the original value
             if stash_overflow_ranks == 0 and overbudget_ranks == 0:
                 if host_spill_ranks > 0:
