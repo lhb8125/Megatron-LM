@@ -3376,7 +3376,9 @@ def training_log(
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
 
-            with open(args.memory_snapshot_path, 'wb') as f:
+            snapshot_path = Path(args.memory_snapshot_path)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            with snapshot_path.open('wb') as f:
                 dump(snapshot, f)
 
         elapsed_time = timers('interval-time').elapsed(barrier=True, reset=should_reset)
