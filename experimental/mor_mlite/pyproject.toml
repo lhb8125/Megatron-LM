@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mor-mlite"
+version = "0.1.0"
+description = "Mixture-of-Recursions training extensions for Megatron-Lite"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "MoR MLite contributors" }]
+dependencies = [
+  "numpy>=2.0",
+  "torch>=2.10,<2.11",
+  "safetensors>=0.5",
+  "huggingface-hub>=0.27",
+  "requests>=2.32,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-xdist>=3.6",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+mor-mlite-train = "mor_mlite.train:main"
+mor-mlite-convert-hf = "mor_mlite.convert_hf:main"
+mor-mlite-parity = "mor_mlite.parity.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/mor_mlite/configs" = [
+  "configs/qwen3_30b.json",
+  "configs/tiny.json",
+  "configs/topologies.json",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "distributed: requires torchrun with more than one process",
+  "cuda: requires CUDA",
+  "mlite: requires the pinned Megatron-LM/MLite checkout",
+  "magi: requires MagiAttention v1.1.1",
+  "slow: long-running H100 validation",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,11 @@
+[
+  {"name": "baseline", "world_size": 1, "tp": 1, "cp": 1, "dp": 1, "ep": 1},
+  {"name": "zero1", "world_size": 2, "tp": 1, "cp": 1, "dp": 2, "ep": 1},
+  {"name": "tp", "world_size": 2, "tp": 2, "cp": 1, "dp": 1, "ep": 1},
+  {"name": "cp", "world_size": 2, "tp": 1, "cp": 2, "dp": 1, "ep": 1},
+  {"name": "ep", "world_size": 2, "tp": 1, "cp": 1, "dp": 2, "ep": 2},
+  {"name": "tp_cp_ep", "world_size": 4, "tp": 2, "cp": 2, "dp": 1, "ep": 2},
+  {"name": "tp_dp_ep", "world_size": 4, "tp": 2, "cp": 1, "dp": 2, "ep": 2},
+  {"name": "cp_dp_ep", "world_size": 4, "tp": 1, "cp": 2, "dp": 2, "ep": 2},
+  {"name": "all", "world_size": 8, "tp": 2, "cp": 2, "dp": 2, "ep": 4}
+]

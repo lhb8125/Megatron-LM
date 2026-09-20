@@ -1,0 +1,9 @@
+# Resolver guard used by setup_env.sh and by MLite's nested Magi installer.
+# In particular, quack-kernels has an unbounded `torch` dependency; without
+# this constraint pip is allowed to replace the requested cu129 runtime.
+torch==2.10.0+cu129
+triton==3.6.0
+cuda-python==12.9.4
+cuda-bindings==12.9.4
+packaging==25.0
+setuptools>=78.1.1,<80

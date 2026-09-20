@@ -1,0 +1,39 @@
+# Short allocation for the fixed 20-warmup + 30-measured-update tuning entry.
+# Scientific fields are identical to oci-hsg.yaml and checked by launch_spec.
+SLURM:
+  cluster: oci-hsg
+  nnodes: 16
+  ntasks_per_node: 4
+  gpus_per_node: 4
+  segment: 4
+  time_limit: '1:00:00'
+EXPERIMENT:
+  arms: [A, B, C, D]
+  world_size: 64
+  fallback_world_size: 32
+  global_batch_size: 2048
+  seq_length: 4096
+  seed: 1234
+  ep: 16
+  tp: 1
+  cp: 1
+  pp: 1
+  etp: 1
+  precision: bf16
+  optimizer: distributed_adamw
+  lr: 0.0003
+  min_lr: 0.00003
+  warmup_fraction: 0.01
+  betas: [0.9, 0.95]
+  eps: 0.00000001
+  weight_decay: 0.1
+  clip_grad: 1.0
+  moe_aux: 0.001
+  depth_aux: 0.001
+TUNING:
+  candidates: [1, 2, 4, 8]
+  warmup_updates: 20
+  measured_updates: 30
+  advance_peak_fraction: 0.80
+  eligible_peak_fraction: 0.90
+  throughput_tie_fraction: 0.03

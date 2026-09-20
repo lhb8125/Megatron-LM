@@ -1,0 +1,40 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath}
+\usepackage[active,tightpage]{preview}
+\setlength\PreviewBorder{8pt}
+\pagestyle{empty}
+\begin{document}
+\begin{preview}
+\(\displaystyle
+\begin{aligned}
+L_{\mathrm{physical}} &= N_{\mathrm{start}} + N_{\mathrm{recur}} + N_{\mathrm{end}} \\
+L_{\mathrm{logical,max}} &= N_{\mathrm{start}} + R N_{\mathrm{recur}} + N_{\mathrm{end}}
+\end{aligned}
+\)
+\end{preview}
+\begin{preview}
+\(\displaystyle
+\begin{aligned}
+z_{r,t} &= w_r^{\top} h_{r,t} / T \\
+g_{r,t} &= \alpha\,\sigma(z_{r,t}) \\
+h_{r+1,t} &= h_{r,t} + g_{r,t} F_{\theta}(h_r)_t
+\end{aligned}
+\)
+\end{preview}
+\begin{preview}
+\(\displaystyle
+K_r(L)=\max\left(1,\left\lfloor\frac{(R-r)L}{R}\right\rfloor\right),\quad L>0
+\)
+\end{preview}
+\begin{preview}
+\(\displaystyle
+s_{d,m}=D\,M\,\frac{n_{d,m}}{\sum_{d',m'}n_{d',m'}}
+\)
+\end{preview}
+\begin{preview}
+\(\displaystyle
+W^{\mathrm{shared}}_i=\operatorname{cast}_{\mathrm{BF16}}
+\left(\frac{W_{3+i}+W_{17+i}+W_{31+i}}{3}\right)
+\)
+\end{preview}
+\end{document}

@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.deps/
+.cache/
+.setup.lock
+logs/
+build/
+dist/
+*.egg-info/
+artifacts/*
+!artifacts/.gitkeep
+checkpoints/
+eos-logs/
